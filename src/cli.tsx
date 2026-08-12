@@ -5,7 +5,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { createRuntime, initialState } from "./pipeline.js";
 import { asciiGraph, graphData } from "./graph-view.js";
-import { runTui } from "./tui.js";
+import { promptForTask, runTui } from "./tui.js";
 import { createRunPaths, createWorktree, removeWorktree, stateRoot } from "./worktree.js";
 import type { AuditEvent, RunPaths } from "./types.js";
 
@@ -65,9 +65,16 @@ function hydrateAudit(runtime: ReturnType<typeof createRuntime>, auditFile: stri
   }
 }
 
-const program = new Command().name("neolit").description("Progressive-cooling AI code generation").version("0.2.0");
+const program = new Command().name("neolit").description("Progressive-cooling AI code generation").version("0.2.1");
 
-program.command("run", { isDefault: true }).argument("<task>").option("--repo <path>", "target repository", process.cwd()).option("--no-tui").option("--json").action(async (task: string, options) => start(task, options.repo, options.tui === false, Boolean(options.json)));
+program.command("run", { isDefault: true }).argument("[task]").option("--repo <path>", "target repository", process.cwd()).option("--no-tui").option("--json").action(async (task: string | undefined, options) => {
+  if (!task) {
+    if (options.tui === false || !process.stdin.isTTY || !process.stdout.isTTY) throw new Error("A task is required in non-interactive mode");
+    task = await promptForTask(fs.realpathSync(options.repo)) ?? undefined;
+    if (!task) return;
+  }
+  await start(task, options.repo, options.tui === false, Boolean(options.json));
+});
 program.command("resume").argument("<run-id>").option("--no-tui").action(async (runId: string, options) => {
   const metadata = readMetadata(runId);
   if (!metadata.worktree) throw new Error("Completed run has no worktree to resume");

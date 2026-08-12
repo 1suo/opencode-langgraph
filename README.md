@@ -14,8 +14,10 @@ Neolit progressively turns an ambiguous coding task into constrained implementat
 ```bash
 npm install -g neolit
 cd your-clean-git-repository
-neolit "implement the requested feature"
+neolit
 ```
+
+The TUI opens immediately. Type the task in its prompt and press Enter; Neolit creates the isolated task worktree only after submission. You can still provide the task directly with `neolit "implement the requested feature"`.
 
 When stdout is a terminal, Neolit opens its live TUI. The graph is derived from the compiled LangGraph and decorated with checkpoint status:
 

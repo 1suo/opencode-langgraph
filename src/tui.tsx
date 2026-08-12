@@ -6,6 +6,58 @@ import type { AuditEvent } from "./types.js";
 
 interface AppProps { runtime: PipelineRuntime; execute?: () => Promise<unknown>; initialStatus?: "running" | "complete" | "failed" }
 
+interface TaskPromptProps {
+  repo: string;
+  onSubmit: (task: string) => void;
+  onCancel: () => void;
+}
+
+export function appendTaskInput(value: string, input: string): string {
+  return value + input.replace(/[\u0000-\u001f\u007f]/g, "");
+}
+
+function TaskPrompt({ repo, onSubmit, onCancel }: TaskPromptProps) {
+  const { exit } = useApp();
+  const [task, setTask] = useState("");
+
+  useInput((input, key) => {
+    if ((key.ctrl && input === "c") || key.escape) {
+      onCancel();
+      exit();
+      return;
+    }
+    if (key.return) {
+      const value = task.trim();
+      if (value) {
+        onSubmit(value);
+        exit();
+      }
+      return;
+    }
+    if (key.backspace || key.delete) {
+      setTask((value) => [...value].slice(0, -1).join(""));
+      return;
+    }
+    if (key.ctrl && input === "u") {
+      setTask("");
+      return;
+    }
+    if (!key.ctrl && !key.meta && input) setTask((value) => appendTaskInput(value, input));
+  });
+
+  return <Box flexDirection="column">
+    <Box borderStyle="round" paddingX={1}><Text bold color="cyan">NEOLIT</Text></Box>
+    <Box paddingX={1} flexDirection="column">
+      <Text dimColor>repository: {repo}</Text>
+      <Text>Describe the task, then press Enter:</Text>
+    </Box>
+    <Box borderStyle="single" paddingX={1}>
+      <Text color="cyan">› </Text><Text>{task}</Text><Text color="cyan">█</Text>
+    </Box>
+    <Text dimColor> Enter run · Ctrl+U clear · Esc/Ctrl+C quit</Text>
+  </Box>;
+}
+
 function App({ runtime, execute, initialStatus = "running" }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -52,4 +104,11 @@ function App({ runtime, execute, initialStatus = "running" }: AppProps) {
 export async function runTui(runtime: PipelineRuntime, execute?: () => Promise<unknown>, initialStatus: "running" | "complete" | "failed" = "running"): Promise<void> {
   const instance = render(<App runtime={runtime} execute={execute} initialStatus={initialStatus} />);
   await instance.waitUntilExit();
+}
+
+export async function promptForTask(repo: string): Promise<string | null> {
+  let task: string | null = null;
+  const instance = render(<TaskPrompt repo={repo} onSubmit={(value) => { task = value; }} onCancel={() => { task = null; }} />);
+  await instance.waitUntilExit();
+  return task;
 }

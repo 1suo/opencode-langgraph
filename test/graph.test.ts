@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { asciiGraph, graphData, statusMermaid } from "../src/graph-view.js";
 import { createRuntime } from "../src/pipeline.js";
+import { appendTaskInput } from "../src/tui.js";
 import type { RunPaths } from "../src/types.js";
 
 const roots: string[] = [];
@@ -16,6 +17,10 @@ function runtime() {
 afterEach(() => roots.splice(0).forEach((root) => fs.rmSync(root, { recursive: true, force: true })));
 
 describe("runtime graph", () => {
+  it("accepts task text while removing terminal control characters", () => {
+    expect(appendTaskInput("build ", "a graph\u0000\n")).toBe("build a graph");
+  });
+
   it("contains every route and the cooling stages", async () => {
     const data = await graphData(runtime().graph);
     const nodes = Object.keys(data.nodes);
