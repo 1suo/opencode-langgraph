@@ -17,7 +17,7 @@ cd your-clean-git-repository
 neolit
 ```
 
-The TUI opens immediately. Type the task in its prompt and press Enter; Neolit creates the isolated task worktree only after submission. You can still provide the task directly with `neolit "implement the requested feature"`.
+The TUI opens immediately in a full-screen alternate terminal buffer. Type the task and press Enter; Neolit creates the isolated task worktree only after submission. During execution, the dashboard shows the live graph, active stage and runner, route, validation state, elapsed time, and streaming logs. Use `Tab` to focus panes, `f` for focused/full graph, `Space` to freeze logs, and `q` to detach. You can still provide the task directly with `neolit "implement the requested feature"`.
 
 When stdout is a terminal, Neolit opens its live TUI. The graph is derived from the compiled LangGraph and decorated with checkpoint status:
 

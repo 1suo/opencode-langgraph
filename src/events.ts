@@ -5,6 +5,7 @@ import type { AuditEvent, NodeStatus } from "./types.js";
 export class RunEvents extends EventEmitter {
   readonly statuses = new Map<string, NodeStatus>();
   readonly logs: string[] = [];
+  readonly history: AuditEvent[] = [];
 
   constructor(readonly runId: string, private readonly auditFile: string) {
     super();
@@ -21,6 +22,7 @@ export class RunEvents extends EventEmitter {
   }
 
   private apply(value: AuditEvent): void {
+    this.history.push(value);
     if (value.node && value.status) this.statuses.set(value.node, value.status);
     if (value.message) this.logs.push(value.message);
     this.emit("event", value);

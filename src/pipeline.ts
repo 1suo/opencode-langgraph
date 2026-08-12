@@ -119,7 +119,11 @@ function createPipeline(config: NeolitConfig, events: RunEvents, paths: RunPaths
   };
 
   const builder = new StateGraph(GraphState)
-    .addNode("qualify", wrap("qualify", (state) => ({ route: qualifyTask(state.task), requirementIds: requirements(state.task) })))
+    .addNode("qualify", wrap("qualify", (state) => {
+      const route = qualifyTask(state.task);
+      events.record({ type: "log", node: "qualify", message: `Route: ${route}`, data: { route } });
+      return { route, requirementIds: requirements(state.task) };
+    }))
     .addNode("trivial", wrap("trivial", async (state) => {
       const match = state.task.match(/replace\s+(["'`])([\s\S]+?)\1\s+with\s+(["'`])([\s\S]+?)\3\s+in\s+([\w./-]+)/i);
       if (!match) throw new Error("Trivial route requires: replace \"old\" with \"new\" in path");

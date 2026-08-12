@@ -65,7 +65,7 @@ function hydrateAudit(runtime: ReturnType<typeof createRuntime>, auditFile: stri
   }
 }
 
-const program = new Command().name("neolit").description("Progressive-cooling AI code generation").version("0.2.1");
+const program = new Command().name("neolit").description("Progressive-cooling AI code generation").version("0.2.2");
 
 program.command("run", { isDefault: true }).argument("[task]").option("--repo <path>", "target repository", process.cwd()).option("--no-tui").option("--json").action(async (task: string | undefined, options) => {
   if (!task) {
