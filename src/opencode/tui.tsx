@@ -297,8 +297,9 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
 function GraphToggle(props: { api: TuiPluginApi; session_id?: string; graph: GraphToggleController }) {
   const enabled = () => props.graph.enabled(props.session_id);
   return (
-    <box onMouseUp={() => props.graph.toggle(props.session_id)}>
+    <box flexDirection="row" onMouseUp={() => props.graph.toggle(props.session_id)}>
       <text fg={enabled() ? props.api.theme.current.success : props.api.theme.current.textMuted}>graph:{enabled() ? "on" : "off"} · {props.graph.selected(props.session_id) ?? "default"}</text>
+      <text fg={props.api.theme.current.textMuted}> · F7 toggle · F8 view</text>
     </box>
   );
 }
