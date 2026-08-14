@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
 import { graphNavigationLayer, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
-import { appendPluginEvent, appendProjectEvent, readPluginEvents, readSessionGraphEnabled, writeSessionGraphEnabled, writeStoredRun } from "../src/opencode/store.js";
+import { appendPluginEvent, readPluginEvents, writeSessionGraphEnabled, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
@@ -123,8 +123,8 @@ describe("OpenCode automatic graph routing", () => {
       const hooks = await server({ client, directory: project, worktree: project } as never);
       const config = {} as { command?: Record<string, unknown> };
       await hooks.config?.(config as never);
-      expect(Object.keys(config.command ?? {})).toEqual(expect.arrayContaining(["run-graph", "neolit"]));
-      expect(Object.keys(hooks.tool ?? {})).toEqual(expect.arrayContaining(["langgraph_run", "langgraph_resume", "neolit_run", "neolit_resume"]));
+      expect(Object.keys(config.command ?? {})).toEqual(["run-graph"]);
+      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_run", "langgraph_resume"]);
       const output = {
         message: { id: "message-1", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
         parts: [{ id: "part-1", messageID: "message-1", sessionID: "root", type: "text", text: "What is 2+2?" }],
@@ -210,13 +210,25 @@ describe("OpenCode graph viewer", () => {
 
   it("reads the current project run before route lifecycle callbacks", async () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-viewer-"));
-    appendProjectEvent(project, {
-      at: new Date().toISOString(), runId: "visible-run", rootSessionId: "root", graph: "default",
-      node: "answer", status: "completed", agent: "planner", model: "test/model", text: "visible output",
-    });
-    expect(readVisibleEvents(undefined, project, project)).toMatchObject([
-      { runId: "visible-run", node: "answer", text: "visible output" },
-    ]);
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-state-"));
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    try {
+      appendPluginEvent({
+        at: new Date().toISOString(), runId: "visible-run", rootSessionId: "root", graph: "default",
+        node: "answer", status: "completed", agent: "planner", model: "test/model", text: "visible output",
+      });
+      writeStoredRun({
+        runId: "visible-run", rootSessionId: "root", userMessageId: "message", graph: "default", task: "test",
+        directory: project, worktree: project, status: "completed",
+      });
+      expect(readVisibleEvents(undefined, project, stateHome)).toMatchObject([
+        { runId: "visible-run", node: "answer", text: "visible output" },
+      ]);
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
   });
 
   it("does not leak run state across projects or root sessions", () => {
@@ -244,16 +256,6 @@ describe("OpenCode graph viewer", () => {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
     }
-  });
-
-  it("reads legacy Neolit session state without writing new runs there", () => {
-    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-legacy-"));
-    const legacyDirectory = path.join(stateHome, "neolit", "opencode", "sessions");
-    fs.mkdirSync(legacyDirectory, { recursive: true });
-    fs.writeFileSync(path.join(legacyDirectory, "legacy-session.json"), JSON.stringify({ enabled: true }));
-    expect(readSessionGraphEnabled("legacy-session", stateHome)).toBe(true);
-    writeSessionGraphEnabled("new-session", true, stateHome);
-    expect(fs.existsSync(path.join(stateHome, "opencode-langgraph", "sessions", "new-session.json"))).toBe(true);
   });
 
   it("opens the project graph when no chat session exists yet", async () => {

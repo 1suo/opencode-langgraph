@@ -18,7 +18,7 @@ LangGraph `interrupt()` pauses the graph at a checkpointer. The shipped Bun-comp
 
 ## Configuration
 
-`.opencode/langgraph.ts` exports `defineOpenCodeLangGraph(...)`. It may select `{ preset: "neolit" }` or connect arbitrary compiled LangGraph instances with an initial-state function and result projection. `.neolit/neolit.config.ts` remains a compatibility fallback.
+`.opencode/langgraph.ts` exports `defineOpenCodeLangGraph(...)`. It may select `{ preset: "neolit" }` or connect arbitrary compiled LangGraph instances with an initial-state function and result projection.
 
 ## Validation
 

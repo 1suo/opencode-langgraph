@@ -51,11 +51,6 @@ export interface ConnectorPresetConfig {
 
 export type ConnectorConfig = ConnectorDefinition | ConnectorPresetConfig;
 
-/** @deprecated Use ConnectorGraph. */
-export type NeolitGraph<State extends Record<string, unknown> = Record<string, unknown>> = ConnectorGraph<State>;
-/** @deprecated Use ConnectorDefinition. */
-export type NeolitDefinition = ConnectorDefinition;
-
 export interface AgentCall {
   agent: string;
   prompt: string;

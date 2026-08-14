@@ -10,8 +10,8 @@ export interface AgentNodeOptions<State extends Record<string, unknown>> {
 
 export function agentNode<State extends Record<string, unknown>>(options: AgentNodeOptions<State>) {
   return async (state: State, config?: RunnableConfig): Promise<Partial<State>> => {
-    const runtime = (config?.configurable?.langgraphOpenCodeRuntime ?? config?.configurable?.neolitRuntime) as AgentRuntime | undefined;
-    const node = (options.node ?? config?.configurable?.langgraphOpenCodeNode ?? config?.configurable?.neolitNode) as string | undefined;
+    const runtime = config?.configurable?.langgraphOpenCodeRuntime as AgentRuntime | undefined;
+    const node = (options.node ?? config?.configurable?.langgraphOpenCodeNode) as string | undefined;
     if (!runtime) throw new Error("LangGraph agent node was invoked without an OpenCode runtime");
     const prompt = typeof options.prompt === "function" ? options.prompt(state) : options.prompt;
     const result = await runtime.call({ agent: options.agent, prompt, node: node ?? options.agent, state });

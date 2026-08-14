@@ -3,10 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { progressiveCoolingGraph } from "./preset.js";
-import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, NeolitDefinition, NeolitGraph, OpenCodeModel } from "./types.js";
+import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, OpenCodeModel } from "./types.js";
 
 export const typedConfigFile = path.join(".opencode", "langgraph.ts");
-export const legacyTypedConfigFile = path.join(".neolit", "neolit.config.ts");
 
 export function opencodeModel(input: Omit<OpenCodeModel, "backend">): OpenCodeModel {
   return { backend: "opencode", ...input };
@@ -24,31 +23,21 @@ export function defineOpenCodeLangGraph<const Config extends ConnectorConfig>(co
   return config;
 }
 
-/** @deprecated Use defineOpenCodeLangGraph. */
-export function defineNeolit<const Definition extends NeolitDefinition>(definition: Definition): Definition {
-  return definition;
-}
-
 export async function loadConnectorDefinition(repo: string): Promise<ConnectorDefinition> {
-  const primary = path.join(repo, typedConfigFile);
-  const legacy = path.join(repo, legacyTypedConfigFile);
-  const file = fs.existsSync(primary) ? primary : fs.existsSync(legacy) ? legacy : undefined;
-  if (!file) return neolitPresetDefinition();
+  const file = path.join(repo, typedConfigFile);
+  if (!fs.existsSync(file)) return neolitPresetDefinition();
   const coreEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
-  const jiti = createJiti(import.meta.url, { interopDefault: true, alias: { "opencode-langgraph": coreEntry, neolit: coreEntry } });
+  const jiti = createJiti(import.meta.url, { interopDefault: true, alias: { "opencode-langgraph": coreEntry } });
   const config = await jiti.import<ConnectorConfig>(file, { default: true });
   return "preset" in config ? presetDefinition(config.preset) : config;
 }
-
-/** @deprecated Use loadConnectorDefinition. */
-export const loadNeolitDefinition = loadConnectorDefinition;
 
 function presetDefinition(preset: ConnectorPresetConfig["preset"]): ConnectorDefinition {
   if (preset === "neolit") return neolitPresetDefinition();
   throw new Error(`Unknown LangGraph connector preset: ${preset}`);
 }
 
-export function neolitPresetDefinition(): ConnectorDefinition {
+function neolitPresetDefinition(): ConnectorDefinition {
   return {
     version: 1,
     models: { current: opencodeModel({ model: "inherit" }) },
@@ -61,9 +50,6 @@ export function neolitPresetDefinition(): ConnectorDefinition {
     defaultGraph: "default",
   };
 }
-
-/** @deprecated Use neolitPresetDefinition. */
-export const defaultNeolitDefinition = neolitPresetDefinition;
 
 export function writeConnectorConfig(repo: string): string {
   const file = path.join(repo, typedConfigFile);
@@ -83,9 +69,4 @@ export default defineOpenCodeLangGraph({
 `;
 }
 
-/** @deprecated Use writeConnectorConfig. */
-export const writeNeolitConfig = writeConnectorConfig;
-/** @deprecated Use defaultConnectorConfigSource. */
-export const defaultNeolitConfigSource = defaultConnectorConfigSource;
-
-export type { AgentDefinition, ConnectorConfig, ConnectorDefinition, ConnectorGraph, NeolitDefinition, NeolitGraph } from "./types.js";
+export type { AgentDefinition, ConnectorConfig, ConnectorDefinition, ConnectorGraph } from "./types.js";

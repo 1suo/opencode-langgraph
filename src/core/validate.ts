@@ -53,8 +53,3 @@ export function assertValidConnector(diagnostics: Diagnostic[]): void {
   const errors = diagnostics.filter((item) => item.severity === "error");
   if (errors.length) throw new Error(errors.map((item) => `${item.code} ${item.path}: ${item.message}`).join("\n"));
 }
-
-/** @deprecated Use validateConnector. */
-export const validateNeolit = validateConnector;
-/** @deprecated Use assertValidConnector. */
-export const assertValidNeolit = assertValidConnector;

@@ -35,15 +35,11 @@ export interface SessionGraphState {
 }
 
 function stateBase(stateHome?: string): string {
-  return stateHome || process.env.OPENCODE_LANGGRAPH_STATE_HOME || process.env.NEOLIT_STATE_HOME || path.join(os.homedir(), ".local", "state");
+  return stateHome || process.env.OPENCODE_LANGGRAPH_STATE_HOME || path.join(os.homedir(), ".local", "state");
 }
 
 function root(stateHome?: string): string {
   return path.join(stateBase(stateHome), "opencode-langgraph");
-}
-
-function legacyRoot(stateHome?: string): string {
-  return path.join(stateBase(stateHome), "neolit", "opencode");
 }
 
 export function eventFile(rootSessionId: string): string {
@@ -55,27 +51,8 @@ export function appendPluginEvent(event: PluginRunEvent): void {
   fs.appendFileSync(eventFile(event.rootSessionId), `${JSON.stringify(event)}\n`);
 }
 
-export function appendProjectEvent(worktree: string, event: PluginRunEvent): void {
-  const directory = path.join(worktree, ".neolit", ".runtime");
-  fs.mkdirSync(directory, { recursive: true });
-  fs.appendFileSync(path.join(directory, `${event.rootSessionId}.jsonl`), `${JSON.stringify(event)}\n`);
-}
-
-export function readLatestLocalEvents(worktree: string): PluginRunEvent[] {
-  const directory = path.join(worktree, ".neolit", ".runtime");
-  if (!fs.existsSync(directory)) return [];
-  const files = fs.readdirSync(directory).filter((name) => name.endsWith(".jsonl")).map((name) => path.join(directory, name));
-  const latest = files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
-  if (!latest) return [];
-  return fs.readFileSync(latest, "utf8").split("\n").filter(Boolean).flatMap((line) => {
-    try { return [JSON.parse(line) as PluginRunEvent]; } catch { return []; }
-  });
-}
-
 export function readPluginEvents(rootSessionId: string, stateHome?: string): PluginRunEvent[] {
-  const primary = path.join(root(stateHome), `${rootSessionId}.jsonl`);
-  const legacy = path.join(legacyRoot(stateHome), `${rootSessionId}.jsonl`);
-  const file = fs.existsSync(primary) ? primary : legacy;
+  const file = path.join(root(stateHome), `${rootSessionId}.jsonl`);
   if (!fs.existsSync(file)) return [];
   return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line) as PluginRunEvent]; } catch { return []; }
@@ -88,9 +65,7 @@ function sessionStateFile(sessionId: string, stateHome?: string): string {
 
 export function readSessionGraphEnabled(sessionId: string, stateHome?: string): boolean {
   try {
-    const primary = sessionStateFile(sessionId, stateHome);
-    const legacy = path.join(legacyRoot(stateHome), "sessions", `${sessionId}.json`);
-    const state = JSON.parse(fs.readFileSync(fs.existsSync(primary) ? primary : legacy, "utf8")) as SessionGraphState;
+    const state = JSON.parse(fs.readFileSync(sessionStateFile(sessionId, stateHome), "utf8")) as SessionGraphState;
     return state.enabled === true;
   } catch {
     return false;
@@ -109,46 +84,42 @@ export function writeStoredRun(run: StoredRun): void {
 }
 
 export function readStoredRun(runId: string): StoredRun {
-  const primary = path.join(root(), "runs", `${runId}.json`);
-  const legacy = path.join(legacyRoot(), "runs", `${runId}.json`);
-  return JSON.parse(fs.readFileSync(fs.existsSync(primary) ? primary : legacy, "utf8")) as StoredRun;
+  return JSON.parse(fs.readFileSync(path.join(root(), "runs", `${runId}.json`), "utf8")) as StoredRun;
 }
 
 export function readLatestStoredRun(rootSessionId: string): StoredRun | undefined {
+  const directory = path.join(root(), "runs");
+  if (!fs.existsSync(directory)) return;
   let latest: { modified: number; run: StoredRun } | undefined;
-  for (const directory of [path.join(root(), "runs"), path.join(legacyRoot(), "runs")]) {
-    if (!fs.existsSync(directory)) continue;
-    for (const name of fs.readdirSync(directory)) {
-      if (!name.endsWith(".json")) continue;
-      const file = path.join(directory, name);
-      try {
-        const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
-        if (run.rootSessionId !== rootSessionId) continue;
-        const modified = fs.statSync(file).mtimeMs;
-        if (!latest || modified > latest.modified) latest = { modified, run };
-      } catch {
-        // Ignore an incomplete or externally edited run file.
-      }
+  for (const name of fs.readdirSync(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(directory, name);
+    try {
+      const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
+      if (run.rootSessionId !== rootSessionId) continue;
+      const modified = fs.statSync(file).mtimeMs;
+      if (!latest || modified > latest.modified) latest = { modified, run };
+    } catch {
+      // Ignore an incomplete or externally edited run file.
     }
   }
   return latest?.run;
 }
 
 export function readLatestProjectEvents(worktree: string, stateHome?: string): PluginRunEvent[] {
+  const directory = path.join(root(stateHome), "runs");
+  if (!fs.existsSync(directory)) return [];
   const matches: Array<{ modified: number; run: StoredRun }> = [];
-  for (const directory of [path.join(root(stateHome), "runs"), path.join(legacyRoot(stateHome), "runs")]) {
-    if (!fs.existsSync(directory)) continue;
-    for (const name of fs.readdirSync(directory)) {
-      if (!name.endsWith(".json")) continue;
-      const file = path.join(directory, name);
-      try {
-        const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
-        const modified = fs.statSync(file).mtimeMs;
-        if (path.resolve(run.worktree) !== path.resolve(worktree)) continue;
-        matches.push({ modified, run });
-      } catch {
-        // Ignore an incomplete or externally edited run file.
-      }
+  for (const name of fs.readdirSync(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(directory, name);
+    try {
+      const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
+      const modified = fs.statSync(file).mtimeMs;
+      if (path.resolve(run.worktree) !== path.resolve(worktree)) continue;
+      matches.push({ modified, run });
+    } catch {
+      // Ignore an incomplete or externally edited run file.
     }
   }
   for (const candidate of matches.sort((a, b) => b.modified - a.modified)) {

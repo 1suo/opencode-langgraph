@@ -4,8 +4,7 @@
   "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
   "bin": {
-    "opencode-langgraph": "dist/src/cli.js",
-    "neolit": "dist/src/cli.js"
+    "opencode-langgraph": "dist/src/cli.js"
   },
   "exports": {
     ".": "./dist/src/core/index.js",

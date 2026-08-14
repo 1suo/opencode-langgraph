@@ -24,10 +24,9 @@ export const server: Plugin = async (plugin) => {
         agent: "build",
         template: "$ARGUMENTS",
       };
-      config.command.neolit = { ...config.command["run-graph"], description: "Compatibility alias for /run-graph" };
     },
     "command.execute.before": async (input) => {
-      if (input.command === "run-graph" || input.command === "neolit") manualMessages.add(input.sessionID);
+      if (input.command === "run-graph") manualMessages.add(input.sessionID);
     },
     "chat.message": async (input, output) => {
       if (input.messageID && internalMessages.delete(input.messageID)) return;
@@ -67,8 +66,6 @@ export const server: Plugin = async (plugin) => {
     tool: {
       langgraph_run: graphTool(plugin),
       langgraph_resume: resumeTool(plugin),
-      neolit_run: graphTool(plugin, true),
-      neolit_resume: resumeTool(plugin, true),
     },
   };
 };
@@ -223,9 +220,9 @@ async function executeResume(
   }
 }
 
-function graphTool(plugin: PluginInput, compatibility = false) {
+function graphTool(plugin: PluginInput) {
   return tool({
-    description: compatibility ? "Compatibility alias for langgraph_run." : "Run a configured LangGraph workflow through OpenCode agents.",
+    description: "Run a configured LangGraph workflow through OpenCode agents.",
     args: {
       task: tool.schema.string().min(1).describe("Complete task for the graph"),
       graph: tool.schema.string().optional().describe("Configured graph name; defaults to the repository default"),
@@ -247,9 +244,9 @@ function graphTool(plugin: PluginInput, compatibility = false) {
   });
 }
 
-function resumeTool(plugin: PluginInput, compatibility = false) {
+function resumeTool(plugin: PluginInput) {
   return tool({
-    description: compatibility ? "Compatibility alias for langgraph_resume." : "Resume a paused LangGraph after the user has answered its human-in-the-loop request.",
+    description: "Resume a paused LangGraph after the user has answered its human-in-the-loop request.",
     args: {
       runId: tool.schema.string().min(1),
       answer: tool.schema.unknown().describe("User answer passed to LangGraph Command.resume"),

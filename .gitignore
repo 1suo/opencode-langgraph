@@ -1,9 +1,7 @@
 node_modules/
 dist/
-.neolit/state/
-.neolit/.runtime/
+.neolit/
 .opencode-langgraph-state/
-neolit-*.tgz
 opencode-langgraph-*.tgz
 coverage/
 *.tgz

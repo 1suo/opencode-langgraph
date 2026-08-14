@@ -31,8 +31,6 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 
 Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution, and the toggle and run history are scoped to the OpenCode session. No project initialization is required.
 
-Legacy `/neolit`, `/neolit-graph`, `/neolit-graph-toggle`, `neolit_run`, and `neolit_resume` aliases remain available.
-
 ## Configure
 
 Without configuration, the connector uses `preset: "neolit"`. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
@@ -45,8 +43,6 @@ export default defineOpenCodeLangGraph({
   preset: "neolit",
 })
 ```
-
-The legacy `.neolit/neolit.config.ts` path remains readable when the primary config does not exist.
 
 ### Connect an arbitrary graph
 
@@ -101,10 +97,21 @@ export default defineOpenCodeLangGraph({
 
 `model: "inherit"` uses the parent OpenCode message's model. Explicit OpenCode models use `provider/model`. Command models are also supported through `commandModel(...)`.
 
+### Graph design contract
+
+Users design graphs directly in `.opencode/langgraph.ts`:
+
+1. Define typed LangGraph state with `Annotation.Root(...)`.
+2. Build normal deterministic nodes, branches, loops, fan-out, and joins with `StateGraph`.
+3. Use `agentNode(...)` only where a node should execute an OpenCode agent. The referenced entry in `agents` selects its model, OpenCode agent, system prompt, and tools.
+4. Compile with a checkpointer. This is required for interrupts and resume.
+5. Wrap the compiled graph with `defineGraph({ graph, initial, result })`. `initial` maps an OpenCode message into graph state; `result` maps final state back into the root chat.
+6. Register one or more named graphs and choose `defaultGraph`. `/run-graph` and `graph:on` use that default unless `langgraph_run` specifies another name.
+
+Ordinary LangGraph nodes remain ordinary code. `agentNode(...)` is the connector boundary: it creates an OpenCode child session and writes the completed assistant text into the state field selected by `output`. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
+
+Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. Custom graphs can provide any LangGraph-compatible persistent checkpointer when restart persistence is required.
+
 Run `opencode-langgraph validate` after edits and `opencode-langgraph graph` to preview the compiled topology. Restart OpenCode after changing plugin code or configuration.
-
-## Compatibility
-
-The old `neolit` CLI binary and TypeScript names (`defineNeolit`, `NeolitDefinition`, and `NeolitGraph`) remain deprecated aliases. Existing state under `~/.local/state/neolit/opencode` is readable; new state is written under `~/.local/state/opencode-langgraph`.
 
 API keys and tokens remain owned by OpenCode or the selected external CLI and are never stored by the connector.

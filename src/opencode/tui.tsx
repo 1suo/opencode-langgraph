@@ -4,7 +4,7 @@ import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { renderMermaidASCII } from "beautiful-mermaid";
 import path from "node:path";
-import { readLatestLocalEvents, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, writeSessionGraphEnabled, type PluginRunEvent } from "./store.js";
+import { readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, writeSessionGraphEnabled, type PluginRunEvent } from "./store.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
   const value = api.route.current.name === "session" && "params" in api.route.current ? api.route.current.params?.sessionID : undefined;
@@ -212,7 +212,7 @@ function executions(events: PluginRunEvent[]): PluginRunEvent[] {
 
 function initialSelection(events: PluginRunEvent[]): number {
   const items = executions(events);
-  const agent = items.findLastIndex((event) => event.agent !== "langgraph" && event.agent !== "neolit" && Boolean(event.text));
+  const agent = items.findLastIndex((event) => event.agent !== "langgraph" && Boolean(event.text));
   return agent >= 0 ? agent : Math.max(0, items.length - 1);
 }
 
@@ -224,7 +224,7 @@ function stateHome(api: TuiPluginApi): string {
   const marker = `${path.sep}.config${path.sep}`;
   const configIndex = api.state.path.config.indexOf(marker);
   if (configIndex >= 0) return path.join(api.state.path.config.slice(0, configIndex), ".local", "state");
-  return process.env.OPENCODE_LANGGRAPH_STATE_HOME || process.env.NEOLIT_STATE_HOME || path.join(process.cwd(), ".opencode-langgraph-state");
+  return process.env.OPENCODE_LANGGRAPH_STATE_HOME || path.join(process.cwd(), ".opencode-langgraph-state");
 }
 
 function eventsForMessage(events: PluginRunEvent[], userMessageId?: string): PluginRunEvent[] {
@@ -236,8 +236,7 @@ function eventsForMessage(events: PluginRunEvent[], userMessageId?: string): Plu
 
 export function readVisibleEvents(rootSessionId: string | undefined, worktree: string, stateHome: string, userMessageId?: string): PluginRunEvent[] {
   if (rootSessionId) return eventsForMessage(readPluginEvents(rootSessionId, stateHome), userMessageId);
-  const local = readLatestLocalEvents(worktree);
-  return eventsForMessage(local.length ? local : readLatestProjectEvents(worktree, stateHome), userMessageId);
+  return eventsForMessage(readLatestProjectEvents(worktree, stateHome), userMessageId);
 }
 
 function useEvents(rootSessionId: () => string | undefined, worktree: () => string, stateHome: () => string, userMessageId: () => string | undefined = () => undefined) {
@@ -295,7 +294,7 @@ function useApiEvents(api: TuiPluginApi, rootSessionId: () => string | undefined
       const roots = (sessions.data ?? []).sort((left, right) => right.time.updated - left.time.updated);
       for (const candidate of roots) {
         const candidateChildren = await api.client.session.children({ sessionID: candidate.id, directory: projectPath(api) }).catch(() => ({ data: [] }));
-        if ((candidateChildren.data ?? []).some((child) => child.title.startsWith("LangGraph · ") || child.title.startsWith("Neolit · "))) {
+        if ((candidateChildren.data ?? []).some((child) => child.title.startsWith("LangGraph · "))) {
           root = candidate.id;
           children = candidateChildren;
           onRoot?.(root);
@@ -304,7 +303,7 @@ function useApiEvents(api: TuiPluginApi, rootSessionId: () => string | undefined
       }
     }
     if (!root || !children) { setEvents(fallback()); return; }
-    const graphChildren = (children.data ?? []).filter((child) => child.title.startsWith("LangGraph · ") || child.title.startsWith("Neolit · "));
+    const graphChildren = (children.data ?? []).filter((child) => child.title.startsWith("LangGraph · "));
     if (!graphChildren.length) { setEvents(fallback()); return; }
     const statuses = await api.client.session.status({ directory: projectPath(api) }).catch(() => ({ data: {} }));
     const diskEvents = fallback();
@@ -512,16 +511,11 @@ export const tui: TuiPlugin = async (api) => {
     },
   });
   const renderGraph = ({ params }: { params?: Record<string, unknown> }) => <GraphRoute api={api} rootSessionId={typeof params?.sessionID === "string" ? params.sessionID : activeSessionId} userMessageId={typeof params?.messageID === "string" ? params.messageID : undefined} />;
-  api.route.register([
-    { name: "langgraph.graph", render: renderGraph },
-    { name: "neolit.graph", render: renderGraph },
-  ]);
+  api.route.register([{ name: "langgraph.graph", render: renderGraph }]);
   api.keymap.registerLayer({
     commands: [
       { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() { openGraph(api, activeSessionId); } },
       { name: "langgraph.graph.toggle", title: "Toggle LangGraph for this session", slashName: "graph-toggle", category: "LangGraph", namespace: "palette", run() { const id = sessionId(api) ?? activeSessionId; if (id) graphToggle.toggle(id); } },
-      { name: "neolit.graph.open", title: "Open graph (legacy /neolit-graph)", slashName: "neolit-graph", category: "Compatibility", namespace: "palette", run() { openGraph(api, activeSessionId); } },
-      { name: "neolit.graph.toggle", title: "Toggle graph (legacy /neolit-graph-toggle)", slashName: "neolit-graph-toggle", category: "Compatibility", namespace: "palette", run() { const id = sessionId(api) ?? activeSessionId; if (id) graphToggle.toggle(id); } },
     ],
     bindings: [{ key: "f8", cmd: "langgraph.graph.open", desc: "Open LangGraph" }],
   });
