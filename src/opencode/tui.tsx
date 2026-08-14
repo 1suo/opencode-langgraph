@@ -255,6 +255,7 @@ function useEvents(rootSessionId: () => string | undefined, worktree: () => stri
 interface GraphToggleController {
   enabled(sessionId?: string): boolean;
   selected(sessionId?: string): string | undefined;
+  defaultGraph(): string | undefined;
   toggle(sessionId?: string): boolean;
   select(sessionId: string | undefined, graph: string): void;
   adopt(sessionId: string): void;
@@ -262,7 +263,9 @@ interface GraphToggleController {
 
 function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
   const [revision, setRevision] = createSignal(0);
+  const [defaultGraph, setDefaultGraph] = createSignal<string>();
   const home = () => readHomeGraphState(projectPath(api), stateHome(api));
+  void loadConnectorDefinition(projectPath(api)).then((definition) => setDefaultGraph(definition.defaultGraph)).catch(() => undefined);
   return {
     enabled(id) {
       revision();
@@ -272,6 +275,7 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
       revision();
       return id ? readSessionGraphName(id, stateHome(api)) : home()?.graph;
     },
+    defaultGraph,
     toggle(id) {
       const enabled = id ? !readSessionGraphEnabled(id, stateHome(api)) : home()?.enabled !== true;
       if (id) writeSessionGraphEnabled(id, enabled, stateHome(api));
@@ -294,12 +298,16 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
   };
 }
 
+export function graphToggleLabel(enabled: boolean, graph?: string): string {
+  return `[F7] graph:${enabled ? graph ?? "…" : "off"} · [F8] view`;
+}
+
 function GraphToggle(props: { api: TuiPluginApi; session_id?: string; graph: GraphToggleController }) {
   const enabled = () => props.graph.enabled(props.session_id);
+  const name = () => props.graph.selected(props.session_id) ?? props.graph.defaultGraph();
   return (
-    <box flexDirection="row" onMouseUp={() => props.graph.toggle(props.session_id)}>
-      <text fg={enabled() ? props.api.theme.current.success : props.api.theme.current.textMuted}>graph:{enabled() ? "on" : "off"} · {props.graph.selected(props.session_id) ?? "default"}</text>
-      <text fg={props.api.theme.current.textMuted}> · F7 toggle · F8 view</text>
+    <box onMouseUp={() => props.graph.toggle(props.session_id)}>
+      <text fg={enabled() ? props.api.theme.current.success : props.api.theme.current.textMuted}>{graphToggleLabel(enabled(), name())}</text>
     </box>
   );
 }

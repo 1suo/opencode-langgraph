@@ -5,7 +5,7 @@ import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/lang
 import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
-import { graphNavigationLayer, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
+import { graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
@@ -208,6 +208,11 @@ export default defineOpenCodeLangGraph({ version: 1, models: {}, agents: {}, gra
 });
 
 describe("OpenCode graph viewer", () => {
+  it("shows the actual graph name in the prompt shortcut legend", () => {
+    expect(graphToggleLabel(false, "review")).toBe("[F7] graph:off · [F8] view");
+    expect(graphToggleLabel(true, "review")).toBe("[F7] graph:review · [F8] view");
+  });
+
   it("ships the TUI framework as runtime dependencies", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { dependencies: Record<string, string>; exports: Record<string, string>; scripts: Record<string, string> };
     expect(Object.keys(manifest.dependencies)).toEqual(expect.arrayContaining(["@opentui/core", "@opentui/solid", "solid-js"]));
