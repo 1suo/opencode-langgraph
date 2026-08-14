@@ -1,45 +1,77 @@
 {
-  "name": "neolit",
-  "version": "0.2.2",
-  "description": "Progressive-cooling orchestration for constrained AI code generation",
+  "name": "opencode-langgraph",
+  "version": "0.4.0",
+  "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
   "bin": {
+    "opencode-langgraph": "dist/src/cli.js",
     "neolit": "dist/src/cli.js"
+  },
+  "exports": {
+    ".": "./dist/src/core/index.js",
+    "./server": "./dist/src/opencode/server.js",
+    "./tui": "./src/opencode/tui.tsx"
   },
   "files": [
     "dist/",
+    "src/opencode/store.ts",
+    "src/opencode/tui.tsx",
     "README.md",
-    "PLAN.md",
-    "neolit.config.example.json"
+    "PLAN.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/cli.tsx",
+    "dev": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "tsc -p tsconfig.json --noEmit && vitest run",
-    "demo": "tsx scripts/demo.ts",
     "prepack": "npm run check && npm run build",
     "release": "node dist/src/release.js"
   },
-  "keywords": ["ai", "agents", "langgraph", "code-generation", "tui"],
+  "keywords": [
+    "ai",
+    "agents",
+    "langgraph",
+    "opencode",
+    "connector",
+    "code-generation",
+    "tui"
+  ],
   "author": "1suo",
   "license": "MIT",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.12.0",
+    "opencode": ">=1.18.16 <2"
   },
   "dependencies": {
     "@langchain/langgraph": "^1.4.9",
-    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "@opencode-ai/plugin": "1.18.16",
     "beautiful-mermaid": "^1.1.3",
     "commander": "^15.0.0",
-    "ink": "^7.1.1",
-    "react": "^19.2.4",
+    "jiti": "^2.6.1",
     "zod": "^4.4.3"
   },
+  "peerDependencies": {
+    "@opentui/core": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5",
+    "solid-js": "1.9.12"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@opentui/core": "^0.5.2",
+    "@opentui/solid": "^0.5.2",
     "@types/node": "^24.10.0",
-    "@types/react": "^19.2.0",
+    "solid-js": "1.9.12",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"

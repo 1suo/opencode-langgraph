@@ -1,105 +1,110 @@
-# Neolit
+# OpenCode LangGraph
 
-Neolit progressively turns an ambiguous coding task into constrained implementation gaps. It uses independent agents for grounding, candidate generation, selection, and skeleton construction, then gives Codex only the disposable task worktree and permission to fill explicit gap ranges. Deterministic checks decide whether the result survives.
+`opencode-langgraph` is an explicit, generic connector between [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/overview) and [OpenCode](https://opencode.ai/). OpenCode remains the chat, coding, model, permission, and child-session runtime. LangGraph owns orchestration state, routing, checkpoints, and interrupts.
 
-## Requirements
+Neolit is the optional built-in progressive-cooling preset. It is not required to use the connector.
 
-- Node.js 22.12 or newer
-- Git and ripgrep (`rg`)
-- [`opencode`](https://opencode.ai/) authenticated for trusted stages
-- [`codex`](https://developers.openai.com/codex/cli/) authenticated for hostile gap filling
+## Install
 
-## Install and run
-
-```bash
-npm install -g neolit
-cd your-clean-git-repository
-neolit
+```sh
+npm install -g opencode-langgraph
+opencode plugin opencode-langgraph
+opencode
 ```
 
-The TUI opens immediately in a full-screen alternate terminal buffer. Type the task and press Enter; Neolit creates the isolated task worktree only after submission. During execution, the dashboard shows the live graph, active stage and runner, route, validation state, elapsed time, and streaming logs. Use `Tab` to focus panes, `f` for focused/full graph, `Space` to freeze logs, and `q` to detach. You can still provide the task directly with `neolit "implement the requested feature"`.
+For local development:
 
-When stdout is a terminal, Neolit opens its live TUI. The graph is derived from the compiled LangGraph and decorated with checkpoint status:
-
-- `✓` completed
-- `▶` active
-- `○` pending
-- `↻` retrying
-- `×` failed
-- `!` interrupted
-
-Keys: `g` graph, `l` logs, `f` focus/full graph, `q` detach from the display.
-
-For automation:
-
-```bash
-neolit run "fix the parser" --no-tui --json
-neolit resume RUN_ID --no-tui
-neolit attach RUN_ID
+```sh
+npm pack
+opencode plugin ./opencode-langgraph-0.4.0.tgz --force
 ```
 
-Inspect the executable graph without starting a run:
+The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
 
-```bash
-neolit graph --format ascii
-neolit graph --format mermaid --output graph.mmd
-neolit graph --format json
+## Use
+
+Each OpenCode session starts with `graph:off`. Click that indicator beside the prompt or run `/graph-toggle`. While `graph:on`, every root user message starts a fresh graph execution linked to that message.
+
+- `/run-graph <task>` runs one task explicitly even while `graph:off`.
+- `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
+- `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
+
+Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution, and the toggle and run history are scoped to the OpenCode session. No project initialization is required.
+
+Legacy `/neolit`, `/neolit-graph`, `/neolit-graph-toggle`, `neolit_run`, and `neolit_resume` aliases remain available.
+
+## Configure
+
+Without configuration, the connector uses `preset: "neolit"`. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+
+```ts
+import { defineOpenCodeLangGraph } from "opencode-langgraph"
+
+export default defineOpenCodeLangGraph({
+  version: 1,
+  preset: "neolit",
+})
 ```
 
-## Routes
+The legacy `.neolit/neolit.config.ts` path remains readable when the primary config does not exist.
 
-1. **Trivial** accepts only a mechanical command shaped like `replace "old" with "new" in path` and requires one exact occurrence.
-2. **Simple** generates tests, implements the smallest change, and runs deterministic validation.
-3. **Complex** accumulates repository context, evolves grounded rephrasings and plans, creates a constrained skeleton, fills gaps, and validates the patch.
-4. **Exploratory** evolves a grounded report and produces no code patch.
+### Connect an arbitrary graph
 
-Each code-producing run requires a clean git repository and operates in a detached temporary worktree. The caller's branch is never modified. A successful run writes a binary-safe patch under the state directory; an unsuccessful run retains its worktree for resume and inspection.
+Any compiled LangGraph can be connected by supplying models, agents, graphs, and a default graph:
 
-State defaults to `$XDG_STATE_HOME/neolit/runs`, or `~/.local/state/neolit/runs` when `XDG_STATE_HOME` is unset. Every run contains SQLite checkpoints, immutable prompts and outputs, JSONL audit events, validation data, and its final report or patch.
+```ts
+import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph"
+import {
+  agentNode,
+  defineGraph,
+  defineOpenCodeLangGraph,
+  opencodeModel,
+} from "opencode-langgraph"
 
-## Configuration
+const State = Annotation.Root({
+  task: Annotation<string>,
+  answer: Annotation<string>,
+})
+type State = typeof State.State
 
-Copy [`neolit.config.example.json`](neolit.config.example.json) to `neolit.config.json` in the target repository. Candidate count is restricted to 3–5 and gap-fill retries to at most three. Runner commands and validation commands are always executed as argument arrays, never through a shell.
+const graph = new StateGraph(State)
+  .addNode("answer", agentNode<State>({
+    agent: "worker",
+    prompt: (state) => state.task,
+    output: "answer",
+  }))
+  .addEdge(START, "answer")
+  .addEdge("answer", END)
+  .compile({ checkpointer: new MemorySaver() })
 
-```json
-{
-  "candidates": 3,
-  "trusted": {
-    "command": "opencode",
-    "args": ["run", "--pure", "--format", "json"],
-    "model": "deepseek/deepseek-reasoner"
+export default defineOpenCodeLangGraph({
+  version: 1,
+  models: { current: opencodeModel({ model: "inherit" }) },
+  agents: {
+    worker: {
+      model: "current",
+      opencodeAgent: "build",
+      systemPrompt: "Complete the graph node accurately.",
+      tools: { question: false },
+    },
   },
-  "hostile": {
-    "command": "codex",
-    "args": ["exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "workspace-write"],
-    "model": "gpt-5.6-sol"
+  graphs: {
+    default: defineGraph({
+      graph,
+      initial: ({ task }) => ({ task, answer: "" }),
+      result: (state) => state.answer,
+    }),
   },
-  "validation": [
-    { "name": "tests", "command": "npm", "args": ["test"] }
-  ]
-}
+  defaultGraph: "default",
+})
 ```
 
-The worktree is an integrity boundary for the caller's branch, not a host-security sandbox. Codex can inspect and execute content inside that worktree. Neolit snapshots it before Stage 6 and rejects created/deleted files, undeclared-file edits, changed markers, or any changed byte outside a declared gap.
+`model: "inherit"` uses the parent OpenCode message's model. Explicit OpenCode models use `provider/model`. Command models are also supported through `commandModel(...)`.
 
-## Development
+Run `opencode-langgraph validate` after edits and `opencode-langgraph graph` to preview the compiled topology. Restart OpenCode after changing plugin code or configuration.
 
-```bash
-npm install
-npm run check
-npm run build
-npm run demo  # invokes the configured real agents and consumes model tokens
-```
+## Compatibility
 
-The demo creates a temporary git repository and runs the full complex route against it.
+The old `neolit` CLI binary and TypeScript names (`defineNeolit`, `NeolitDefinition`, and `NeolitGraph`) remain deprecated aliases. Existing state under `~/.local/state/neolit/opencode` is readable; new state is written under `~/.local/state/opencode-langgraph`.
 
-## Release
-
-The release helper fails closed unless `main` is clean, `v<package-version>` exists, checks and package inspection pass, and both npm and GitHub authentication are valid:
-
-```bash
-npm run build
-npm run release
-```
-
-It then publishes npm and pushes `main` with tags. Architecture and threat-model details are in [`PLAN.md`](PLAN.md).
+API keys and tokens remain owned by OpenCode or the selected external CLI and are never stored by the connector.

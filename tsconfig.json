@@ -13,6 +13,6 @@
     "sourceMap": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts"],
+  "include": ["src/core/**/*.ts", "src/opencode/**/*.ts", "src/opencode/**/*.tsx", "src/cli.ts", "src/release.ts"],
   "exclude": ["node_modules", "dist", "test"]
 }
