@@ -206,6 +206,11 @@ export default defineOpenCodeLangGraph({ version: 1, models: {}, agents: {}, gra
 });
 
 describe("OpenCode graph viewer", () => {
+  it("ships the TUI framework as runtime dependencies", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { dependencies: Record<string, string> };
+    expect(Object.keys(manifest.dependencies)).toEqual(expect.arrayContaining(["@opentui/core", "@opentui/solid", "solid-js"]));
+  });
+
   it("persists graph selection when graph mode is toggled", () => {
     const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-state-"));
     writeSessionGraphName("root", "review", stateHome);
