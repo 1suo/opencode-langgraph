@@ -344,16 +344,12 @@ USE
 /graph-toggle       Run it automatically for each message
 /run-graph <task>   Run one task explicitly
 
-DESIGN
-Graphs live in .opencode/langgraph.ts (optional).
-1. Define typed state with Annotation.Root(...).
-2. Build and compile a normal StateGraph with a checkpointer.
-3. Wrap it with defineGraph({ graph, initial, result }).
-4. Register it in defineOpenCodeLangGraph({ graphs, defaultGraph }).
+DESIGN · .opencode/langgraph.ts
+1. Annotation.Root state → StateGraph → compile with checkpointer.
+2. defineGraph({ graph, initial, result }) maps chat ↔ graph state.
+3. defineOpenCodeLangGraph({ graphs, defaultGraph }) registers names.
 
-Start: opencode-langgraph init
-Check: opencode-langgraph validate
-Preview: opencode-langgraph graph`;
+TOOLS · opencode-langgraph init · validate · graph`;
 }
 
 function showGraphHelp(api: TuiPluginApi): void {
