@@ -337,19 +337,18 @@ async function showGraphSelector(api: TuiPluginApi, sessionID: string | undefine
 }
 
 export function graphHelpText(): string {
-  return `[F7] toggle graph  ·  [F8] view latest run  ·  [F9] help
+  return `[F7] toggle · [F8] view · [F9] help
 
 USE
-/graph-select       Choose a graph for this session
-/graph-toggle       Run it automatically for each message
-/run-graph <task>   Run one task explicitly
+/graph-select choose · /graph-toggle auto
+/run-graph <task> once
 
 DESIGN · .opencode/langgraph.ts
-1. Annotation.Root state → StateGraph → compile with checkpointer.
-2. defineGraph({ graph, initial, result }) maps chat ↔ graph state.
-3. defineOpenCodeLangGraph({ graphs, defaultGraph }) registers names.
+1. Annotation.Root → StateGraph → compile(checkpointer)
+2. defineGraph({ graph, initial, result }) maps I/O
+3. defineOpenCodeLangGraph registers graphs + default
 
-TOOLS · opencode-langgraph init · validate · graph`;
+CLI · opencode-langgraph init · validate · graph`;
 }
 
 function showGraphHelp(api: TuiPluginApi): void {
