@@ -38,6 +38,14 @@
   ],
   "author": "1suo",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1suo/opencode-langgraph.git"
+  },
+  "homepage": "https://github.com/1suo/opencode-langgraph#readme",
+  "bugs": {
+    "url": "https://github.com/1suo/opencode-langgraph/issues"
+  },
   "engines": {
     "node": ">=22.12.0",
     "opencode": ">=1.18.16 <2"
