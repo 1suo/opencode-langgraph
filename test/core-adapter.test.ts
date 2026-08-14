@@ -5,7 +5,7 @@ import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/lang
 import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
-import { graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
+import { graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
@@ -209,8 +209,14 @@ export default defineOpenCodeLangGraph({ version: 1, models: {}, agents: {}, gra
 
 describe("OpenCode graph viewer", () => {
   it("shows the actual graph name in the prompt shortcut legend", () => {
-    expect(graphToggleLabel(false, "review")).toBe("[F7] graph:off · [F8] view");
-    expect(graphToggleLabel(true, "review")).toBe("[F7] graph:review · [F8] view");
+    expect(graphToggleLabel(false, "review")).toBe("[F7] graph:off · [F8] view · [F9] help");
+    expect(graphToggleLabel(true, "review")).toBe("[F7] graph:review · [F8] view · [F9] help");
+  });
+
+  it("keeps graph usage and design help available in the TUI", () => {
+    expect(graphHelpText()).toContain("/graph-select");
+    expect(graphHelpText()).toContain(".opencode/langgraph.ts");
+    expect(graphHelpText()).toContain("defineGraph({ graph, initial, result })");
   });
 
   it("ships the TUI framework as runtime dependencies", () => {
@@ -370,6 +376,7 @@ describe("OpenCode graph viewer", () => {
       expect(navigations.at(-1)).toEqual({ name: "langgraph.graph", params: { sessionID: "root-session" } });
       expect(commands.map((command) => command.name)).toContain("langgraph.graph.select");
       expect(bindings).toContainEqual({ key: "f7", cmd: "langgraph.graph.toggle", desc: "Toggle LangGraph" });
+      expect(bindings).toContainEqual({ key: "f9", cmd: "langgraph.graph.help", desc: "LangGraph help" });
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;

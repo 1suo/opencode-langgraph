@@ -29,6 +29,7 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `F7` toggles graph execution on or off for the current or next session.
 - `/run-graph <task>` runs one task explicitly even while `graph:off`.
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
+- `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
 - `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
 
 Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.

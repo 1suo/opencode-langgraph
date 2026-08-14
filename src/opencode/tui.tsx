@@ -299,7 +299,7 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
 }
 
 export function graphToggleLabel(enabled: boolean, graph?: string): string {
-  return `[F7] graph:${enabled ? graph ?? "…" : "off"} · [F8] view`;
+  return `[F7] graph:${enabled ? graph ?? "…" : "off"} · [F8] view · [F9] help`;
 }
 
 function GraphToggle(props: { api: TuiPluginApi; session_id?: string; graph: GraphToggleController }) {
@@ -334,6 +334,34 @@ async function showGraphSelector(api: TuiPluginApi, sessionID: string | undefine
   } catch (error) {
     api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
   }
+}
+
+export function graphHelpText(): string {
+  return `[F7] toggle graph  ·  [F8] view latest run  ·  [F9] help
+
+USE
+/graph-select       Choose a graph for this session
+/graph-toggle       Run it automatically for each message
+/run-graph <task>   Run one task explicitly
+
+DESIGN
+Graphs live in .opencode/langgraph.ts (optional).
+1. Define typed state with Annotation.Root(...).
+2. Build and compile a normal StateGraph with a checkpointer.
+3. Wrap it with defineGraph({ graph, initial, result }).
+4. Register it in defineOpenCodeLangGraph({ graphs, defaultGraph }).
+
+Start: opencode-langgraph init
+Check: opencode-langgraph validate
+Preview: opencode-langgraph graph`;
+}
+
+function showGraphHelp(api: TuiPluginApi): void {
+  api.ui.dialog.replace(() => api.ui.DialogAlert({
+    title: "OpenCode LangGraph",
+    message: graphHelpText(),
+    onConfirm: () => api.ui.dialog.clear(),
+  }));
 }
 
 function useApiEvents(api: TuiPluginApi, rootSessionId: () => string | undefined, fallback: () => PluginRunEvent[], onRoot?: (id: string) => void) {
@@ -580,10 +608,12 @@ export const tui: TuiPlugin = async (api) => {
       { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() { openGraph(api, activeSessionId); } },
       { name: "langgraph.graph.toggle", title: "Toggle LangGraph for this session", slashName: "graph-toggle", category: "LangGraph", namespace: "palette", run() { graphToggle.toggle(api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId); } },
       { name: "langgraph.graph.select", title: "Select LangGraph for this session", slashName: "graph-select", category: "LangGraph", namespace: "palette", async run() { await showGraphSelector(api, api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId, graphToggle); } },
+      { name: "langgraph.graph.help", title: "Open LangGraph help", slashName: "graph-help", category: "LangGraph", namespace: "palette", run() { showGraphHelp(api); } },
     ],
     bindings: [
       { key: "f7", cmd: "langgraph.graph.toggle", desc: "Toggle LangGraph" },
       { key: "f8", cmd: "langgraph.graph.open", desc: "Open LangGraph" },
+      { key: "f9", cmd: "langgraph.graph.help", desc: "LangGraph help" },
     ],
   });
 };
