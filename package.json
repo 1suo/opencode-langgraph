@@ -1,6 +1,6 @@
 {
   "name": "opencode-langgraph",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
   "bin": {
@@ -9,12 +9,10 @@
   "exports": {
     ".": "./dist/src/core/index.js",
     "./server": "./dist/src/opencode/server.js",
-    "./tui": "./src/opencode/tui.tsx"
+    "./tui": "./dist/src/opencode/tui.js"
   },
   "files": [
     "dist/",
-    "src/opencode/store.ts",
-    "src/opencode/tui.tsx",
     "README.md",
     "PLAN.md"
   ],
