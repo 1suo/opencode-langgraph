@@ -23,15 +23,15 @@ The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; Op
 
 ## Use
 
-Each OpenCode session starts with `graph:off`. Click that indicator beside the prompt or run `/graph-toggle`. While `graph:on`, every root user message starts a fresh graph execution linked to that message.
+Each OpenCode session starts with `graph:off`. Click that indicator beside the prompt or run `/graph-toggle`; this also works on the home prompt before the first session exists. While `graph:on`, every root user message starts a fresh graph execution linked to that message.
 
 - `/graph-select` opens a searchable TUI selector for the graph used by the current session.
-- `F7` toggles graph execution on or off for the current session.
+- `F7` toggles graph execution on or off for the current or next session.
 - `/run-graph <task>` runs one task explicitly even while `graph:off`.
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
 
-Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. No project initialization is required.
+Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
 
 ## Configure
 

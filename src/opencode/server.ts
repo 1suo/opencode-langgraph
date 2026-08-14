@@ -5,7 +5,7 @@ import { loadConnectorDefinition } from "../core/config.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
-import { appendPluginEvent, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 
 function messageModel(info: { role: string; model?: { providerID: string; modelID: string }; providerID?: string; modelID?: string }) {
   if (info.role === "user") return info.model;
@@ -31,9 +31,10 @@ export const server: Plugin = async (plugin) => {
     "chat.message": async (input, output) => {
       if (input.messageID && internalMessages.delete(input.messageID)) return;
       const manual = manualMessages.delete(input.sessionID);
-      if (!manual && !readSessionGraphEnabled(input.sessionID)) return;
       const session = await plugin.client.session.get({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
       if (session.data.parentID) return;
+      const graphState = readSessionGraphState(input.sessionID) ?? adoptHomeGraphState(input.sessionID, plugin.worktree);
+      if (!manual && graphState?.enabled !== true) return;
       const task = output.parts
         .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text" && !part.synthetic && !part.ignored)
         .map((part) => part.text)
@@ -53,13 +54,15 @@ export const server: Plugin = async (plugin) => {
       void executeGraph(plugin, {
         task, rootSessionId: input.sessionID, userMessageId: rootMessageID,
         directory: plugin.directory, worktree: plugin.worktree, parentModel,
-        graph: readSessionGraphName(input.sessionID),
+        graph: graphState?.graph,
       })
         .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
         .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error));
     },
     "experimental.chat.system.transform": async (input, output) => {
-      if (!input.sessionID || !readSessionGraphEnabled(input.sessionID)) return;
+      if (!input.sessionID) return;
+      const graphState = readSessionGraphState(input.sessionID) ?? readHomeGraphState(plugin.worktree);
+      if (graphState?.enabled !== true) return;
       const session = await plugin.client.session.get({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
       if (session.data.parentID) return;
       output.system.push(`The OpenCode LangGraph connector runs a new graph for each user message while graph:on. A synthetic message contains its result or human-input request. Present that result directly and do not redo graph work. langgraph_run and langgraph_resume remain available for explicit manual control.`);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createHash } from "node:crypto";
 
 export interface PluginRunEvent {
   at: string;
@@ -65,18 +66,18 @@ function sessionStateFile(sessionId: string, stateHome?: string): string {
 }
 
 export function readSessionGraphEnabled(sessionId: string, stateHome?: string): boolean {
-  return readSessionGraphState(sessionId, stateHome).enabled;
+  return readSessionGraphState(sessionId, stateHome)?.enabled === true;
 }
 
 export function readSessionGraphName(sessionId: string, stateHome?: string): string | undefined {
-  return readSessionGraphState(sessionId, stateHome).graph;
+  return readSessionGraphState(sessionId, stateHome)?.graph;
 }
 
-function readSessionGraphState(sessionId: string, stateHome?: string): SessionGraphState {
+export function readSessionGraphState(sessionId: string, stateHome?: string): SessionGraphState | undefined {
   try {
     return JSON.parse(fs.readFileSync(sessionStateFile(sessionId, stateHome), "utf8")) as SessionGraphState;
   } catch {
-    return { enabled: false };
+    return;
   }
 }
 
@@ -85,13 +86,48 @@ export function writeSessionGraphEnabled(sessionId: string, enabled: boolean, st
 }
 
 export function writeSessionGraphName(sessionId: string, graph: string, stateHome?: string): void {
-  writeSessionGraphState(sessionId, { ...readSessionGraphState(sessionId, stateHome), graph }, stateHome);
+  writeSessionGraphState(sessionId, { enabled: false, ...readSessionGraphState(sessionId, stateHome), graph }, stateHome);
 }
 
-function writeSessionGraphState(sessionId: string, state: SessionGraphState, stateHome?: string): void {
+export function writeSessionGraphState(sessionId: string, state: SessionGraphState, stateHome?: string): void {
   const file = sessionStateFile(sessionId, stateHome);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(state));
+}
+
+function homeStateFile(worktree: string, stateHome?: string): string {
+  const id = createHash("sha256").update(path.resolve(worktree)).digest("hex");
+  return path.join(root(stateHome), "home", `${id}.json`);
+}
+
+export function readHomeGraphState(worktree: string, stateHome?: string): SessionGraphState | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(homeStateFile(worktree, stateHome), "utf8")) as SessionGraphState;
+  } catch {
+    return;
+  }
+}
+
+export function writeHomeGraphState(worktree: string, state: SessionGraphState, stateHome?: string): void {
+  const file = homeStateFile(worktree, stateHome);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(state));
+}
+
+export function clearHomeGraphState(worktree: string, stateHome?: string): void {
+  try { fs.unlinkSync(homeStateFile(worktree, stateHome)); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+export function adoptHomeGraphState(sessionId: string, worktree: string, stateHome?: string): SessionGraphState | undefined {
+  const existing = readSessionGraphState(sessionId, stateHome);
+  if (existing) return existing;
+  const pending = readHomeGraphState(worktree, stateHome);
+  if (!pending) return;
+  writeSessionGraphState(sessionId, pending, stateHome);
+  clearHomeGraphState(worktree, stateHome);
+  return pending;
 }
 
 export function writeStoredRun(run: StoredRun): void {
