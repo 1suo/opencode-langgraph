@@ -1,6 +1,6 @@
 {
   "name": "opencode-langgraph",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
   "bin": {
@@ -17,7 +17,7 @@
     "PLAN.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-tui.mjs",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -60,7 +60,10 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@babel/core": "7.28.0",
+    "@babel/preset-typescript": "7.27.1",
     "@types/node": "^24.10.0",
+    "babel-preset-solid": "1.9.12",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
