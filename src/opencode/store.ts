@@ -32,6 +32,7 @@ export interface StoredRun {
 
 export interface SessionGraphState {
   enabled: boolean;
+  graph?: string;
 }
 
 function stateBase(stateHome?: string): string {
@@ -64,18 +65,33 @@ function sessionStateFile(sessionId: string, stateHome?: string): string {
 }
 
 export function readSessionGraphEnabled(sessionId: string, stateHome?: string): boolean {
+  return readSessionGraphState(sessionId, stateHome).enabled;
+}
+
+export function readSessionGraphName(sessionId: string, stateHome?: string): string | undefined {
+  return readSessionGraphState(sessionId, stateHome).graph;
+}
+
+function readSessionGraphState(sessionId: string, stateHome?: string): SessionGraphState {
   try {
-    const state = JSON.parse(fs.readFileSync(sessionStateFile(sessionId, stateHome), "utf8")) as SessionGraphState;
-    return state.enabled === true;
+    return JSON.parse(fs.readFileSync(sessionStateFile(sessionId, stateHome), "utf8")) as SessionGraphState;
   } catch {
-    return false;
+    return { enabled: false };
   }
 }
 
 export function writeSessionGraphEnabled(sessionId: string, enabled: boolean, stateHome?: string): void {
+  writeSessionGraphState(sessionId, { ...readSessionGraphState(sessionId, stateHome), enabled }, stateHome);
+}
+
+export function writeSessionGraphName(sessionId: string, graph: string, stateHome?: string): void {
+  writeSessionGraphState(sessionId, { ...readSessionGraphState(sessionId, stateHome), graph }, stateHome);
+}
+
+function writeSessionGraphState(sessionId: string, state: SessionGraphState, stateHome?: string): void {
   const file = sessionStateFile(sessionId, stateHome);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ enabled } satisfies SessionGraphState));
+  fs.writeFileSync(file, JSON.stringify(state));
 }
 
 export function writeStoredRun(run: StoredRun): void {

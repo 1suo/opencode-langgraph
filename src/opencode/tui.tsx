@@ -4,7 +4,8 @@ import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { renderMermaidASCII } from "beautiful-mermaid";
 import path from "node:path";
-import { readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, writeSessionGraphEnabled, type PluginRunEvent } from "./store.js";
+import { loadConnectorDefinition } from "../core/config.js";
+import { readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeSessionGraphEnabled, writeSessionGraphName, type PluginRunEvent } from "./store.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
   const value = api.route.current.name === "session" && "params" in api.route.current ? api.route.current.params?.sessionID : undefined;
@@ -253,7 +254,9 @@ function useEvents(rootSessionId: () => string | undefined, worktree: () => stri
 
 interface GraphToggleController {
   enabled(sessionId: string): boolean;
+  selected(sessionId: string): string | undefined;
   toggle(sessionId: string): boolean;
+  select(sessionId: string, graph: string): void;
 }
 
 function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
@@ -263,12 +266,21 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
       revision();
       return readSessionGraphEnabled(id, stateHome(api));
     },
+    selected(id) {
+      revision();
+      return readSessionGraphName(id, stateHome(api));
+    },
     toggle(id) {
       const enabled = !readSessionGraphEnabled(id, stateHome(api));
       writeSessionGraphEnabled(id, enabled, stateHome(api));
       setRevision((value) => value + 1);
       api.renderer.requestRender();
       return enabled;
+    },
+    select(id, graph) {
+      writeSessionGraphName(id, graph, stateHome(api));
+      setRevision((value) => value + 1);
+      api.renderer.requestRender();
     },
   };
 }
@@ -277,9 +289,33 @@ function GraphToggle(props: { api: TuiPluginApi; session_id: string; graph: Grap
   const enabled = () => props.graph.enabled(props.session_id);
   return (
     <box onMouseUp={() => props.graph.toggle(props.session_id)}>
-      <text fg={enabled() ? props.api.theme.current.success : props.api.theme.current.textMuted}>graph:{enabled() ? "on" : "off"}</text>
+      <text fg={enabled() ? props.api.theme.current.success : props.api.theme.current.textMuted}>graph:{enabled() ? "on" : "off"} · {props.graph.selected(props.session_id) ?? "default"}</text>
     </box>
   );
+}
+
+async function showGraphSelector(api: TuiPluginApi, sessionID: string, controller: GraphToggleController): Promise<void> {
+  try {
+    const definition = await loadConnectorDefinition(projectPath(api));
+    const names = Object.keys(definition.graphs);
+    api.ui.dialog.replace(() => api.ui.DialogSelect({
+      title: "Select LangGraph for this session",
+      placeholder: "Search graphs",
+      current: controller.selected(sessionID) ?? definition.defaultGraph,
+      options: names.map((name) => ({
+        title: name,
+        value: name,
+        description: name === definition.defaultGraph ? "Configured default" : undefined,
+      })),
+      onSelect(option) {
+        controller.select(sessionID, option.value);
+        api.ui.dialog.clear();
+        api.ui.toast({ variant: "success", message: `Selected graph: ${option.value}` });
+      },
+    }));
+  } catch (error) {
+    api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function useApiEvents(api: TuiPluginApi, rootSessionId: () => string | undefined, fallback: () => PluginRunEvent[], onRoot?: (id: string) => void) {
@@ -516,8 +552,12 @@ export const tui: TuiPlugin = async (api) => {
     commands: [
       { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() { openGraph(api, activeSessionId); } },
       { name: "langgraph.graph.toggle", title: "Toggle LangGraph for this session", slashName: "graph-toggle", category: "LangGraph", namespace: "palette", run() { const id = sessionId(api) ?? activeSessionId; if (id) graphToggle.toggle(id); } },
+      { name: "langgraph.graph.select", title: "Select LangGraph for this session", slashName: "graph-select", category: "LangGraph", namespace: "palette", async run() { const id = sessionId(api) ?? activeSessionId; if (id) await showGraphSelector(api, id, graphToggle); } },
     ],
-    bindings: [{ key: "f8", cmd: "langgraph.graph.open", desc: "Open LangGraph" }],
+    bindings: [
+      { key: "f7", cmd: "langgraph.graph.toggle", desc: "Toggle LangGraph" },
+      { key: "f8", cmd: "langgraph.graph.open", desc: "Open LangGraph" },
+    ],
   });
 };
 

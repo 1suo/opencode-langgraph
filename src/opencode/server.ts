@@ -5,7 +5,7 @@ import { loadConnectorDefinition } from "../core/config.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
-import { appendPluginEvent, readSessionGraphEnabled, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { appendPluginEvent, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 
 function messageModel(info: { role: string; model?: { providerID: string; modelID: string }; providerID?: string; modelID?: string }) {
   if (info.role === "user") return info.model;
@@ -53,6 +53,7 @@ export const server: Plugin = async (plugin) => {
       void executeGraph(plugin, {
         task, rootSessionId: input.sessionID, userMessageId: rootMessageID,
         directory: plugin.directory, worktree: plugin.worktree, parentModel,
+        graph: readSessionGraphName(input.sessionID),
       })
         .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
         .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error));
@@ -235,7 +236,7 @@ function graphTool(plugin: PluginInput) {
       });
       const parentModel = messageModel(parent.data.info);
       const result = await executeGraph(plugin, {
-        task: args.task, graph: args.graph, rootSessionId: context.sessionID, userMessageId: context.messageID,
+        task: args.task, graph: args.graph ?? readSessionGraphName(context.sessionID), rootSessionId: context.sessionID, userMessageId: context.messageID,
         directory: context.directory, worktree: context.worktree, parentModel,
         signal: context.abort, ask: context.ask, metadata: context.metadata,
       });

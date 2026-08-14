@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.4.0.tgz --force
+opencode plugin ./opencode-langgraph-0.4.1.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -25,11 +25,13 @@ The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; Op
 
 Each OpenCode session starts with `graph:off`. Click that indicator beside the prompt or run `/graph-toggle`. While `graph:on`, every root user message starts a fresh graph execution linked to that message.
 
+- `/graph-select` opens a searchable TUI selector for the graph used by the current session.
+- `F7` toggles graph execution on or off for the current session.
 - `/run-graph <task>` runs one task explicitly even while `graph:off`.
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
 
-Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution, and the toggle and run history are scoped to the OpenCode session. No project initialization is required.
+Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. No project initialization is required.
 
 ## Configure
 
@@ -106,7 +108,7 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 3. Use `agentNode(...)` only where a node should execute an OpenCode agent. The referenced entry in `agents` selects its model, OpenCode agent, system prompt, and tools.
 4. Compile with a checkpointer. This is required for interrupts and resume.
 5. Wrap the compiled graph with `defineGraph({ graph, initial, result })`. `initial` maps an OpenCode message into graph state; `result` maps final state back into the root chat.
-6. Register one or more named graphs and choose `defaultGraph`. `/run-graph` and `graph:on` use that default unless `langgraph_run` specifies another name.
+6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`; `langgraph_run` can also specify a graph explicitly.
 
 Ordinary LangGraph nodes remain ordinary code. `agentNode(...)` is the connector boundary: it creates an OpenCode child session and writes the completed assistant text into the state field selected by `output`. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
 

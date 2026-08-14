@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
 import { graphNavigationLayer, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
-import { appendPluginEvent, readPluginEvents, writeSessionGraphEnabled, writeStoredRun } from "../src/opencode/store.js";
+import { appendPluginEvent, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
@@ -157,9 +157,65 @@ describe("OpenCode automatic graph routing", () => {
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
     }
   });
+
+  it("runs the graph selected for that OpenCode session", async () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-state-"));
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-project-"));
+    const configDirectory = path.join(project, ".opencode");
+    fs.mkdirSync(configDirectory, { recursive: true });
+    fs.symlinkSync(path.join(process.cwd(), "node_modules"), path.join(project, "node_modules"), "dir");
+    fs.writeFileSync(path.join(configDirectory, "langgraph.ts"), `
+import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
+import { defineGraph, defineOpenCodeLangGraph } from "opencode-langgraph";
+const State = Annotation.Root({ task: Annotation<string>, result: Annotation<string> });
+const named = (result: string) => defineGraph({
+  graph: new StateGraph(State).addNode("finish", () => ({ result })).addEdge(START, "finish").addEdge("finish", END).compile({ checkpointer: new MemorySaver() }),
+  initial: ({ task }: { task: string }) => ({ task, result: "" }),
+  result: (value: { result: string }) => value.result,
+});
+export default defineOpenCodeLangGraph({ version: 1, models: {}, agents: {}, graphs: { first: named("first"), second: named("second") }, defaultGraph: "first" });
+`);
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = state;
+    const posted: unknown[] = [];
+    const client = { session: {
+      get: async () => ({ data: { id: "root", parentID: undefined } }),
+      messages: async () => ({ data: [{ info: { role: "assistant", parentID: "message" }, parts: [] }] }),
+      promptAsync: async (input: unknown) => { posted.push(input); return { data: undefined }; },
+    } };
+    try {
+      writeSessionGraphName("root", "second", state);
+      writeSessionGraphEnabled("root", true, state);
+      const hooks = await server({ client, directory: project, worktree: project } as never);
+      const output = {
+        message: { id: "message", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
+        parts: [{ id: "part", messageID: "message", sessionID: "root", type: "text", text: "task" }],
+      };
+      await hooks["chat.message"]?.({ sessionID: "root", messageID: "message" }, output as never);
+      const deadline = Date.now() + 2_000;
+      while (readPluginEvents("root", state).at(-1)?.node !== "__end__" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      const events = readPluginEvents("root", state);
+      expect(events.every((event) => event.graph === "second")).toBe(true);
+      expect(events.at(-1)).toMatchObject({ node: "__end__", text: "second" });
+      expect(posted).toHaveLength(1);
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
 });
 
 describe("OpenCode graph viewer", () => {
+  it("persists graph selection when graph mode is toggled", () => {
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-state-"));
+    writeSessionGraphName("root", "review", stateHome);
+    writeSessionGraphEnabled("root", true, stateHome);
+    expect(readSessionGraphName("root", stateHome)).toBe("review");
+    expect(readSessionGraphEnabled("root", stateHome)).toBe(true);
+    writeSessionGraphEnabled("root", false, stateHome);
+    expect(readSessionGraphName("root", stateHome)).toBe("review");
+  });
+
   it("routes graph navigation through scoped keymap commands", () => {
     const calls: string[] = [];
     const controls = new Proxy({}, {
@@ -260,6 +316,7 @@ describe("OpenCode graph viewer", () => {
 
   it("opens the project graph when no chat session exists yet", async () => {
     let commands: Array<{ name: string; run: () => void }> = [];
+    const bindings: Array<{ key: string; cmd: string }> = [];
     let selectSession: ((event: { properties: { sessionID: string } }) => void) | undefined;
     const navigations: Array<{ name: string; params?: Record<string, unknown> }> = [];
     const api = {
@@ -272,7 +329,7 @@ describe("OpenCode graph viewer", () => {
       event: { on: (_type: string, handler: typeof selectSession) => { selectSession = handler; return () => undefined; } },
       slots: { register: () => "opencode-langgraph" },
       keymap: {
-        registerLayer: (layer: { commands: typeof commands }) => { commands.push(...layer.commands); return () => undefined; },
+        registerLayer: (layer: { commands: typeof commands; bindings?: typeof bindings }) => { commands.push(...layer.commands); bindings.push(...(layer.bindings ?? [])); return () => undefined; },
         createKeyMatcher: () => () => false,
         intercept: () => () => undefined,
       },
@@ -284,5 +341,7 @@ describe("OpenCode graph viewer", () => {
     selectSession?.({ properties: { sessionID: "root-session" } });
     commands.find((command) => command.name === "langgraph.graph.open")?.run();
     expect(navigations.at(-1)).toEqual({ name: "langgraph.graph", params: { sessionID: "root-session" } });
+    expect(commands.map((command) => command.name)).toContain("langgraph.graph.select");
+    expect(bindings).toContainEqual({ key: "f7", cmd: "langgraph.graph.toggle", desc: "Toggle LangGraph" });
   });
 });
