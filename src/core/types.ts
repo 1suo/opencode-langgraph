@@ -22,6 +22,17 @@ export interface AgentDefinition {
   tools?: Record<string, boolean>;
   inactivityTimeoutMs?: number;
   maxRuntimeMs?: number;
+  maxSteps?: number;
+}
+
+export interface AgentUsage {
+  turns: number;
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
 }
 
 export interface GraphDisplayNode {
@@ -69,6 +80,7 @@ export interface AgentCallResult {
   sessionId?: string;
   structured?: unknown;
   tools?: AgentToolTrace[];
+  usage?: AgentUsage;
 }
 
 export interface AgentToolTrace {
@@ -100,6 +112,7 @@ export interface GraphProgressSnapshot {
   callsUsed?: number;
   callBudget?: number;
   summary?: string;
+  usage?: AgentUsage;
   nodes: GraphProgressNode[];
 }
 

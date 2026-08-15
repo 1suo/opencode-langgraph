@@ -10,7 +10,7 @@ import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGra
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
-import { mergeAnalysis } from "../src/core/progressive-lod/plan.js";
+import { implementationOrder, liveNodeCount, mergeAnalysis } from "../src/core/progressive-lod/plan.js";
 import { AnalysisSchema, ClassificationSchema, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
 import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
@@ -61,7 +61,9 @@ describe("typed graph validation", () => {
 
   it("uses the production progressive-LOD workflow as the zero-config preset", async () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-config-"));
-    expect((await loadConnectorDefinition(project)).defaultGraph).toBe("progressive-lod");
+    const definition = await loadConnectorDefinition(project);
+    expect(definition.defaultGraph).toBe("progressive-lod");
+    expect(definition.agents.classifier).toMatchObject({ maxSteps: 2, tools: { read: false, grep: false, glob: false, bash: false } });
     const file = writeConnectorConfig(project);
     expect(path.relative(project, file)).toBe(typedConfigFile);
     expect(fs.readFileSync(file, "utf8")).toContain('preset: "progressive-lod"');
@@ -167,6 +169,27 @@ describe("OpenCode child-session runtime", () => {
     await expect(runtime.call({ agent: "worker", node: "work", prompt: "work", state: {} })).rejects.toThrow("was inactive for 25ms");
     expect(aborted).toBe(true);
   });
+
+  it("accounts completed model steps and enforces the configured ceiling only while busy", async () => {
+    const run = async (busy: boolean) => {
+      let aborted = false;
+      const client = { session: {
+        create: async () => ({ data: { id: "child" } }), promptAsync: async () => ({ data: undefined }),
+        status: async () => ({ data: busy ? { child: { type: "busy" } } : {} }),
+        messages: async () => ({ data: [{ info: { id: "assistant", role: "assistant", finish: "stop", cost: .01, tokens: { input: 12, output: 3, reasoning: 2, cache: { read: 40, write: 1 } } }, parts: [{ type: "text", text: "done" }] }] }),
+        abort: async () => { aborted = true; return { data: true }; },
+      } };
+      const definition: ConnectorDefinition = { version: 1, models: { current: { backend: "opencode", model: "inherit" } }, agents: { worker: { model: "current", systemPrompt: "work", tools: { question: false }, maxSteps: 1 } }, graphs: {}, defaultGraph: "default" };
+      const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+      return { result: runtime.call({ agent: "worker", node: "work", prompt: "work", state: {} }), aborted: () => aborted };
+    };
+    const idle = await run(false);
+    await expect(idle.result).resolves.toMatchObject({ text: "done", usage: { turns: 1, input: 12, output: 3, reasoning: 2, cacheRead: 40, cacheWrite: 1, cost: .01 } });
+    expect(idle.aborted()).toBe(false);
+    const busy = await run(true);
+    await expect(busy.result).rejects.toThrow("reached its 1-step maximum");
+    expect(busy.aborted()).toBe(true);
+  });
 });
 
 describe("progressive planning reducer", () => {
@@ -199,6 +222,32 @@ describe("progressive planning reducer", () => {
     const merged = mergeAnalysis(state(), output);
     expect(merged.activeNodeId).toBe("p1");
     expect(merged.plan[0]).toMatchObject({ status: "active", contextCycles: 1 });
+  });
+
+  it("uses live-node capacity atomically and resolves sibling dependency keys", () => {
+    const current = state();
+    current.budget = { ...current.budget, nodes: 2 };
+    current.plan.unshift({ ...current.plan[0], id: "p0", status: "removed" });
+    const output = { summary: "split", evidence: [], constraints: [], candidates: [{ name: "one", rationale: "", refinements: [
+      { key: "base", action: "split" as const, title: "Base", description: "base", level: "base", implementable: true, dependencies: [], files: [] },
+      { key: "consumer", action: "split" as const, title: "Consumer", description: "consumer", level: "consumer", implementable: true, dependencies: ["base"], files: [] },
+    ] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } };
+    const merged = mergeAnalysis(current, output);
+    expect(liveNodeCount(merged.plan)).toBe(2);
+    expect(merged.plan.find((node) => node.title === "Consumer")?.dependencies).toEqual(["p2"]);
+    expect(implementationOrder(merged.plan).map((node) => node.id)).toEqual(["p2", "p3"]);
+
+    const overflow = state();
+    overflow.budget = { ...overflow.budget, nodes: 1 };
+    const held = mergeAnalysis(overflow, output);
+    expect(held.plan).toHaveLength(1);
+    expect(held.plan[0]).toMatchObject({ id: "p1", status: "active" });
+    expect(held.discoveries.at(-1)).toContain("only 1 remain");
+  });
+
+  it("orders unconstrained plan IDs numerically", () => {
+    const base = state().plan[0];
+    expect(implementationOrder([{ ...base, id: "p10", status: "ready" }, { ...base, id: "p2", status: "ready" }]).map((node) => node.id)).toEqual(["p2", "p10"]);
   });
 });
 
@@ -238,6 +287,27 @@ describe("progressive planning graph", () => {
     const result = await configured.graph.invoke(configured.initial({ task: "fix typo", directory: "/repo", worktree: "/repo", runId: "short" }), { configurable: { thread_id: "short", langgraphOpenCodeRuntime: runtime } });
     expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 4 });
     expect(configured.progress?.(result)?.nodes.at(-1)).toMatchObject({ level: "verified text edit", depth: 1, status: "verified" });
+  });
+
+  it("omits unrelated full descriptions from subsequent branch prompts", async () => {
+    const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
+    let analysisCalls = 0;
+    let secondPrompt = "";
+    const runtime = { call: async (input: { node: string; prompt: string }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "change", planningFrame: "root", readOnly: false, risks: [] } };
+      if (input.node === "analyze" && analysisCalls++ === 0) return { text: "", structured: { summary: "root split", evidence: [], constraints: [], candidates: [{ name: "direct", rationale: "", refinements: [
+        { key: "done", action: "split", title: "Done sibling", description: "UNRELATED FULL DESCRIPTION", level: "leaf", implementable: true, dependencies: [], files: [] },
+        { key: "next", action: "split", title: "Next branch", description: "inspect next", level: "branch", implementable: false, dependencies: [], files: [] },
+      ] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } } };
+      if (input.node === "analyze") { secondPrompt = input.prompt; return { text: "", structured: { summary: "next ready", evidence: [], constraints: [], candidates: [{ name: "direct", rationale: "", refinements: [{ key: "leaf", action: "refine", title: "Next leaf", description: "implement next", level: "leaf", implementable: true, dependencies: [], files: [] }] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } } }; }
+      if (input.node === "implement") return { text: "implemented" };
+      if (input.node === "verify") return { text: "", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    await configured.graph.invoke(configured.initial({ task: "change", directory: "/repo", worktree: "/repo", runId: "compact" }), { configurable: { thread_id: "compact", langgraphOpenCodeRuntime: runtime } });
+    expect(secondPrompt).toContain("Done sibling");
+    expect(secondPrompt).not.toContain("UNRELATED FULL DESCRIPTION");
+    expect(secondPrompt).toContain("root split");
   });
 
   it("does not acquire the worktree for direct answers", async () => {

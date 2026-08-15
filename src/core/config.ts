@@ -42,10 +42,13 @@ function progressiveLodPresetDefinition(): ConnectorDefinition {
     version: 1,
     models: { current: opencodeModel({ model: "inherit" }) },
     agents: {
-      analyst: { model: "current", opencodeAgent: "plan", systemPrompt: "Ground every planning and verification claim in repository evidence. Produce exact structured output when requested.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false } },
-      implementer: { model: "current", opencodeAgent: "build", systemPrompt: "Implement the complete bounded plan in the current worktree and verify your edits. Preserve unrelated user work.", tools: { question: false } },
+      classifier: { model: "current", opencodeAgent: "plan", systemPrompt: "Classify the supplied request directly. Do not inspect the repository or call tools. Produce exact structured output.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: 2 },
+      analyst: { model: "current", opencodeAgent: "plan", systemPrompt: "Ground planning claims in supplied evidence and inspect only unresolved repository facts. Produce exact structured output when requested.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 32 },
+      answer: { model: "current", opencodeAgent: "plan", systemPrompt: "Answer accurately from the request and repository evidence when needed.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
+      verifier: { model: "current", opencodeAgent: "plan", systemPrompt: "Verify the actual worktree against the task and plan. Do not edit files. Produce exact structured output.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
+      implementer: { model: "current", opencodeAgent: "build", systemPrompt: "Implement the complete bounded plan in the current worktree and verify your edits. Preserve unrelated user work.", tools: { question: false }, maxSteps: 64 },
     },
-    graphs: { "progressive-lod": progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer" }) },
+    graphs: { "progressive-lod": progressiveLodGraph({ classifierAgent: "classifier", analystAgent: "analyst", answerAgent: "answer", verifierAgent: "verifier", implementerAgent: "implementer" }) },
     defaultGraph: "progressive-lod",
   };
 }

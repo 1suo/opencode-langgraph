@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
-import type { AgentCall, AgentCallResult, AgentRuntime, AgentToolTrace, ConnectorDefinition } from "../core/types.js";
+import type { AgentCall, AgentCallResult, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition } from "../core/types.js";
 import { registerPermissionHandler } from "./permissions.js";
 
 export interface OpenCodeRuntimeOptions {
@@ -13,7 +13,7 @@ export interface OpenCodeRuntimeOptions {
   worktree: string;
   signal: AbortSignal;
   ask?: (input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) => Promise<void>;
-  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; sessionId?: string }) => void;
+  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; sessionId?: string; usage?: AgentUsage }) => void;
 }
 
 function modelId(value: string): { providerID: string; modelID: string } {
@@ -40,6 +40,21 @@ function activityFingerprint(messages: Array<{ info: { id?: string; role: string
     if (part.type === "tool") return [part.id, part.type, (part.state as Record<string, unknown>).status];
     return [part.id, part.type];
   })]));
+}
+
+function sessionUsage(messages: Array<{ info: { id?: string; role: string; finish?: string; cost?: number; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } }; parts: Part[] }>): AgentUsage {
+  const usage: AgentUsage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+  for (const message of messages) {
+    if (message.info.role !== "assistant" || !message.info.finish) continue;
+    usage.turns++;
+    usage.input += message.info.tokens?.input ?? 0;
+    usage.output += message.info.tokens?.output ?? 0;
+    usage.reasoning += message.info.tokens?.reasoning ?? 0;
+    usage.cacheRead += message.info.tokens?.cache?.read ?? 0;
+    usage.cacheWrite += message.info.tokens?.cache?.write ?? 0;
+    usage.cost += message.info.cost ?? 0;
+  }
+  return usage;
 }
 
 function toolTraces(parts: Part[]): AgentToolTrace[] {
@@ -126,8 +141,8 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         } as never,
         throwOnError: true,
       });
-      const output = await this.waitForAnswer(sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000);
-      this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId });
+      const output = await this.waitForAnswer(sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000, agent.maxSteps);
+      this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: output.usage });
       return { ...output, sessionId };
     } catch (error) {
       this.options.onEvent?.({ node: input.node, status: this.options.signal.aborted ? "interrupted" : "failed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: error instanceof Error ? error.message : String(error), state: input.state, sessionId });
@@ -138,17 +153,24 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number): Promise<Omit<AgentCallResult, "sessionId">> {
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number, maxSteps?: number): Promise<Omit<AgentCallResult, "sessionId">> {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastFingerprint = "";
     let lastProgress = "";
+    let lastUsage = "";
     const pollIntervalMs = Math.min(250, Math.max(10, Math.floor(inactivityTimeoutMs / 4)));
     while (true) {
       if (this.options.signal.aborted) throw this.options.signal.reason ?? new Error("LangGraph run aborted");
       const status = await this.options.plugin.client.session.status({ query: { directory: this.options.directory }, throwOnError: true });
       const current = status.data[sessionId];
       const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      const usage = sessionUsage(messages.data);
+      const usageFingerprint = JSON.stringify(usage);
+      if (usageFingerprint !== lastUsage) {
+        lastUsage = usageFingerprint;
+        this.options.onEvent?.({ node, status: "active", agent, model, sessionId, usage });
+      }
       const fingerprint = activityFingerprint(messages.data);
       if (fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
@@ -161,7 +183,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         const structured = assistant?.info.role === "assistant" ? (assistant.info as typeof assistant.info & { structured?: unknown }).structured : undefined;
         if (output || structured !== undefined) {
           const tools = assistant ? toolTraces(assistant.parts) : [];
-          return { text: output || JSON.stringify(structured), ...(structured !== undefined ? { structured } : {}), ...(tools.length ? { tools } : {}) };
+          return { text: output || JSON.stringify(structured), ...(structured !== undefined ? { structured } : {}), ...(tools.length ? { tools } : {}), ...(usage.turns ? { usage } : {}) };
         }
         const preview = assistant ? progress(assistant.parts) : "";
         if (preview && preview !== lastProgress) {
@@ -170,6 +192,10 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         }
       }
       const now = Date.now();
+      if (maxSteps !== undefined && usage.turns >= maxSteps) {
+        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
+        throw new Error(`OpenCode session ${sessionId} reached its ${maxSteps}-step maximum before completing`);
+      }
       if (now - startedAt >= maxRuntimeMs) {
         await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
         throw new Error(`OpenCode session ${sessionId} exceeded its ${maxRuntimeMs}ms maximum runtime`);

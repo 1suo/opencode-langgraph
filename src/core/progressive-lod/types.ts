@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentUsage } from "../types.js";
 
 export const ScopeSchema = z.enum(["local", "subsystem", "architectural", "unknown"]);
 export type TaskScope = z.infer<typeof ScopeSchema>;
@@ -32,6 +33,7 @@ export interface PlanNode {
 }
 
 export interface CandidateRefinement {
+  key?: string;
   action: "refine" | "split" | "remove" | "reopen_parent";
   title: string;
   description: string;
@@ -75,7 +77,7 @@ export const ClassificationSchema = z.object({
 });
 
 const RefinementSchema = z.object({
-  action: z.enum(["refine", "split", "remove", "reopen_parent"]), title: z.string().min(1),
+  key: z.string().max(80).optional(), action: z.enum(["refine", "split", "remove", "reopen_parent"]), title: z.string().min(1),
   description: z.string().min(1).max(4000), level: z.string().min(1),
   implementable: z.boolean(), dependencies: z.array(z.string()).max(20).default([]),
   files: z.array(z.string()).max(40).default([]),
@@ -101,6 +103,7 @@ export interface ProgressiveLodState extends Record<string, unknown> {
   phase: string; profile?: TaskProfile; budget: Budget;
   plan: PlanNode[]; activeNodeId?: string; evidence: Evidence[]; constraints: Constraint[];
   analysis?: AnalysisOutput; discoveries: string[]; callsUsed: number; nextId: number;
+  decisions?: Record<string, string>; usage?: AgentUsage;
   startedAt: number; repairAttempts: number; humanQuestion: string; humanAnswer: string;
   implementation: string; verification?: VerificationOutput; result: string;
 }

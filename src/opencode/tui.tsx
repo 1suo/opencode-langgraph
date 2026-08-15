@@ -193,6 +193,14 @@ function printable(value: unknown): string {
   catch { return String(value); }
 }
 
+function compactNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+}
+
+function planId(value: string): number { const parsed = Number(value.replace(/^p/, "")); return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER; }
+
 export function renderPlanTree(events: PluginRunEvent[]): string {
   const runId = latestRunId(events);
   const snapshot = events.filter((event) => event.runId === runId && event.progress).at(-1)?.progress;
@@ -200,9 +208,10 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
   const byParent = new Map<string | undefined, typeof snapshot.nodes>();
   for (const node of snapshot.nodes) byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]);
   const glyph = (value: string) => value === "verified" ? "✓" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
-  const lines = [`${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}${snapshot.callsUsed !== undefined ? ` · calls ${snapshot.callsUsed}/${snapshot.callBudget}` : ""}`];
+  const usage = snapshot.usage;
+  const lines = [`${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}${snapshot.callsUsed !== undefined ? ` · calls ${snapshot.callsUsed}/${snapshot.callBudget}` : ""}${usage ? ` · turns ${usage.turns} · input ${compactNumber(usage.input)} · cache ${compactNumber(usage.cacheRead)}` : ""}`];
   const visit = (parentId: string | undefined, prefix: string) => {
-    const children = (byParent.get(parentId) ?? []).sort((a, b) => a.id.localeCompare(b.id));
+    const children = (byParent.get(parentId) ?? []).sort((a, b) => planId(a.id) - planId(b.id) || a.id.localeCompare(b.id));
     children.forEach((node, index) => {
       const last = index === children.length - 1;
       const detail = [node.level, `depth ${node.depth}`, node.status, node.evidence ? `${node.evidence}e` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).join(" · ");
@@ -400,7 +409,7 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
         </box>
         <Show when={semantic()}>{(value) => (
           <box flexDirection="column">
-            <text fg={theme().textMuted}>{value().phase} · {value().scope ?? "classifying"} · {value().callsUsed ?? 0}/{value().callBudget ?? "?"}</text>
+            <text fg={theme().textMuted}>{value().phase} · {value().scope ?? "classifying"} · {value().callsUsed ?? 0}/{value().callBudget ?? "?"}{value().usage ? ` · ${value().usage!.turns}t · ${compactNumber(value().usage!.input)}in` : ""}</text>
             <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={theme().warning} wrapMode="word">▶ {node().title}</text>}</Show>
           </box>
         )}</Show>
@@ -412,6 +421,7 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
               <text fg={statusColor(event, theme())}>{event.status}</text>
             </box>
             <text fg={theme().textMuted} wrapMode="none">  {event.agent}  {event.model}</text>
+            <Show when={event.usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">  {usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache</text>}</Show>
           </box>
         )}</For>
       </box>

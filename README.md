@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.8.tgz --force
+opencode plugin ./opencode-langgraph-0.5.9.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -102,7 +102,9 @@ export default defineOpenCodeLangGraph({
 })
 ```
 
-Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Override `inactivityTimeoutMs` and `maxRuntimeMs` per agent when a graph needs different limits.
+Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Optional `maxSteps` bounds completed model turns. The built-in preset uses a tool-free two-step classifier and generous role-specific ceilings; custom agents remain step-unlimited unless configured. Override these values per agent when needed.
+
+The F8 plan header and execution view report model turns, uncached input, and cache-read tokens in addition to graph calls. Graph calls count orchestration nodes, not the model turns inside an OpenCode child session.
 
 `model: "inherit"` uses the parent OpenCode message's model. Explicit OpenCode models use `provider/model`. Command models are also supported through `commandModel(...)`.
 
@@ -118,6 +120,8 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`; `langgraph_run` can also specify a graph explicitly.
 
 Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Structured nodes give OpenCode and command models a JSON Schema output contract, parse native structured values or JSON text, and validate with Zod before state mutation. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
+
+For optional anti-overengineering guidance, add `@dietrichgebert/ponytail` once to the global OpenCode plugin list and start with its `lite` mode. Do not also add the checkout-relative Ponytail path unless running from that checkout.
 
 Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer.
 

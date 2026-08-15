@@ -23,6 +23,7 @@ export async function validateConnector(definition: ConnectorDefinition): Promis
     if (definition.models[agent.model]?.backend === "opencode" && agent.tools?.question !== false) diagnostics.push({ code: "MODEL", severity: "error", path: `agents.${name}.tools.question`, message: "OpenCode child agents must disable the question tool; use LangGraph interrupt() for human input" });
     if (agent.inactivityTimeoutMs !== undefined && (!Number.isFinite(agent.inactivityTimeoutMs) || agent.inactivityTimeoutMs <= 0)) diagnostics.push({ code: "CONFIG", severity: "error", path: `agents.${name}.inactivityTimeoutMs`, message: "Agent inactivity timeout must be a positive number" });
     if (agent.maxRuntimeMs !== undefined && (!Number.isFinite(agent.maxRuntimeMs) || agent.maxRuntimeMs <= 0)) diagnostics.push({ code: "CONFIG", severity: "error", path: `agents.${name}.maxRuntimeMs`, message: "Agent maximum runtime must be a positive number" });
+    if (agent.maxSteps !== undefined && (!Number.isInteger(agent.maxSteps) || agent.maxSteps <= 0)) diagnostics.push({ code: "CONFIG", severity: "error", path: `agents.${name}.maxSteps`, message: "Agent maximum steps must be a positive integer" });
   }
   for (const [name, model] of Object.entries(definition.models)) {
     if (model.backend === "opencode" && model.model !== "inherit" && !model.model.includes("/")) diagnostics.push({ code: "MODEL", severity: "error", path: `models.${name}`, message: "OpenCode model must be inherit or provider/model" });

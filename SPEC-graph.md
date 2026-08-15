@@ -21,6 +21,8 @@ The graph is not a general autonomous manager. OpenCode owns chat, models, tools
 9. Read-only requests do not acquire a worktree lease. Change workflows are serialized per canonical worktree.
 10. Every loop is bounded by calls, nodes, context cycles, reopen attempts, repairs, and elapsed time.
 11. Agent calls use an activity-resetting inactivity timeout and a separate absolute runtime ceiling; active tool work is not aborted by a short fixed wall clock.
+12. Analysis prompts contain the active branch, its ancestry and dependencies, relevant evidence and decisions, and only a compact index of unrelated nodes.
+13. Refinement merges are atomic. An unresolved or capacity-truncated branch never proceeds to implementation.
 
 ## 3. Runtime-derived planning levels
 
@@ -56,6 +58,8 @@ interface ProgressiveLodState {
   constraints: Constraint[]
   analysis?: AnalysisOutput
   discoveries: string[]
+  decisions: Record<string, string>
+  usage: AgentUsage
   callsUsed: number
   nextId: number
   startedAt: number
@@ -89,7 +93,7 @@ interface PlanNode {
 }
 ```
 
-Evidence has a stable ID, claim, source, kind, and confidence. Constraints have a stable ID, text, and source. Large tool transcripts stay in OpenCode child sessions or artifacts; state keeps citations and summaries.
+Evidence has a stable ID, claim, source, kind, and confidence. Constraints have a stable ID, text, and source. Decisions retain concise analysis summaries by plan-node ID. Usage aggregates model turns, token categories, and cost. Large tool transcripts stay in OpenCode child sessions or artifacts; state keeps citations and summaries.
 
 ## 5. Structured inference boundary
 
@@ -112,9 +116,9 @@ The evaluator reports a selected candidate, confidence, missing-context state, a
 1. accepts refinements common to all candidates when present;
 2. otherwise accepts the selected candidate;
 3. assigns sequential stable IDs;
-4. filters unknown dependency IDs;
+4. resolves candidate-local dependency keys to stable IDs and filters unknown references;
 5. attaches newly collected evidence;
-6. enforces the node budget and cycle checks;
+6. atomically enforces the live-node budget and cycle checks;
 7. selects the next dependency-ready, shallowest pending node.
 
 Supported dispositions are:
@@ -149,7 +153,7 @@ START
                   └─ exhausted/non-repairable → failed result → END
 ```
 
-Implementation receives the immutable task, constraints, and all ready leaves in dependency order. Verification uses a separate read-only agent role by default, inspects the actual worktree, and records check evidence. A report without corresponding worktree evidence is not success.
+Implementation receives the immutable task, constraints, and all ready leaves in dependency order. Numeric plan ID is the deterministic tie-breaker. Implementation cannot begin while a live branch remains unresolved. Verification uses a separate read-only agent role by default, inspects the actual worktree, and records check evidence. A report without corresponding worktree evidence is not success.
 
 ## 8. Adaptive budgets
 
@@ -159,7 +163,7 @@ Implementation receives the immutable task, constraints, and all ready leaves in
 | subsystem | 24 | 16 | 2 | 3 | 2 | 2 | 30 min |
 | architectural / unknown | 40 | 24 | 3 | 3 | 2 | 2 | 60 min |
 
-Two or three calls are reserved for implementation, verification, and repair. Planning stops before consuming that reserve. Hitting a budget yields the best grounded implementable plan if one exists; otherwise the run ends explicitly without claiming completion.
+Two or three calls are reserved for implementation, verification, and repair. Expanded/removed history remains visible but does not consume live-node capacity. A candidate either fits in full or is retried once in consolidated form; it is never partially merged. Planning stops before consuming the call reserve, and an unresolved plan ends explicitly without mutating the worktree.
 
 ## 9. Persistence, concurrency, and resume
 

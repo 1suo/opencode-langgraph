@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
-import type { GraphProgressSnapshot } from "../core/types.js";
+import type { AgentUsage, GraphProgressSnapshot } from "../core/types.js";
 
 export interface PluginRunEvent {
   at: string;
@@ -17,6 +17,7 @@ export interface PluginRunEvent {
   text?: string;
   state?: unknown;
   sessionId?: string;
+  usage?: AgentUsage;
   mermaid?: string;
   topology?: { nodes: string[]; edges: Array<{ source: string; target: string }> };
   progress?: GraphProgressSnapshot;

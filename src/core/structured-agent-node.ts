@@ -1,13 +1,13 @@
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { z, type ZodType } from "zod";
-import type { AgentRuntime } from "./types.js";
+import type { AgentCallResult, AgentRuntime } from "./types.js";
 
 export interface StructuredAgentNodeOptions<State extends Record<string, unknown>, Output> {
   node?: string;
   agent: string;
   schema: ZodType<Output>;
   prompt: string | ((state: State) => string);
-  output: (value: Output, state: State) => Partial<State>;
+  output: (value: Output, state: State, result: AgentCallResult) => Partial<State>;
   retries?: number;
 }
 
@@ -33,6 +33,6 @@ export function structuredAgentNode<State extends Record<string, unknown>, Outpu
     }
     const parsed = options.schema.safeParse(value);
     if (!parsed.success) throw new Error(`${options.node ?? options.agent} returned invalid structured output: ${z.prettifyError(parsed.error)}`);
-    return options.output(parsed.data, state);
+    return options.output(parsed.data, state, result);
   };
 }

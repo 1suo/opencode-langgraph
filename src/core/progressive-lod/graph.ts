@@ -8,7 +8,8 @@ import { agentNode } from "../agent-node.js";
 import { DurableFileSaver } from "../durable-checkpointer.js";
 import { structuredAgentNode } from "../structured-agent-node.js";
 import type { ConnectorGraph, GraphProgressSnapshot } from "../types.js";
-import { budgetExceeded, implementationOrder, mergeAnalysis, selectActiveNode } from "./plan.js";
+import type { AgentCallResult, AgentUsage } from "../types.js";
+import { budgetExceeded, implementationOrder, liveNodeCount, mergeAnalysis, selectActiveNode } from "./plan.js";
 import { AnalysisSchema, ClassificationSchema, SCOPE_BUDGETS, VerificationSchema, type ProgressiveLodState } from "./types.js";
 
 const ProgressiveState = Annotation.Root({
@@ -17,6 +18,7 @@ const ProgressiveState = Annotation.Root({
   budget: Annotation<ProgressiveLodState["budget"]>, plan: Annotation<ProgressiveLodState["plan"]>, activeNodeId: Annotation<string | undefined>,
   evidence: Annotation<ProgressiveLodState["evidence"]>, constraints: Annotation<ProgressiveLodState["constraints"]>, analysis: Annotation<ProgressiveLodState["analysis"]>,
   discoveries: Annotation<string[]>, callsUsed: Annotation<number>, nextId: Annotation<number>, startedAt: Annotation<number>, repairAttempts: Annotation<number>,
+  decisions: Annotation<Record<string, string>>, usage: Annotation<AgentUsage>,
   humanQuestion: Annotation<string>, humanAnswer: Annotation<string>, implementation: Annotation<string>, verification: Annotation<ProgressiveLodState["verification"]>, result: Annotation<string>,
 });
 
@@ -34,6 +36,7 @@ export function defaultDurableCheckpointer(): DurableFileSaver {
 }
 
 export interface ProgressiveLodOptions {
+  classifierAgent?: string;
   analystAgent: string;
   implementerAgent: string;
   verifierAgent?: string;
@@ -41,12 +44,40 @@ export interface ProgressiveLodOptions {
   checkpointer?: BaseCheckpointSaver;
 }
 
-function compactState(state: ProgressiveLodState) {
+const EMPTY_USAGE: AgentUsage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+function addUsage(current: AgentUsage | undefined, result: AgentCallResult): AgentUsage {
+  const left = current ?? EMPTY_USAGE;
+  const right = result.usage ?? EMPTY_USAGE;
   return {
-    task: state.originalTask, profile: state.profile, active: state.plan.find((node) => node.id === state.activeNodeId),
-    plan: state.plan.map(({ id, parentId, title, description, level, depth, status, dependencies, files }) => ({ id, parentId, title, description, level, depth, status, dependencies, files })),
-    evidence: state.evidence.slice(-12), constraints: state.constraints, discoveries: state.discoveries.slice(-8),
-    budget: { callsUsed: state.callsUsed, calls: state.budget.calls, nodes: state.plan.length, nodeLimit: state.budget.nodes },
+    turns: left.turns + right.turns, input: left.input + right.input, output: left.output + right.output,
+    reasoning: left.reasoning + right.reasoning, cacheRead: left.cacheRead + right.cacheRead,
+    cacheWrite: left.cacheWrite + right.cacheWrite, cost: left.cost + right.cost,
+  };
+}
+
+function compactState(state: ProgressiveLodState) {
+  const active = state.plan.find((node) => node.id === state.activeNodeId);
+  const byId = new Map(state.plan.map((node) => [node.id, node]));
+  const related = new Set<string>();
+  let cursor = active;
+  while (cursor) { related.add(cursor.id); cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined; }
+  const visitDependency = (id: string) => {
+    if (related.has(id)) return;
+    related.add(id);
+    for (const dependency of byId.get(id)?.dependencies ?? []) visitDependency(dependency);
+  };
+  for (const dependency of active?.dependencies ?? []) visitDependency(dependency);
+  const evidenceIds = new Set([...related].flatMap((id) => byId.get(id)?.evidenceIds ?? []));
+  const siblingIds = new Set(state.plan.filter((node) => node.parentId === active?.parentId && node.status === "removed").map((node) => node.id));
+  const decisionIds = new Set([...related, ...siblingIds]);
+  return {
+    task: state.originalTask, profile: state.profile, active,
+    plan: state.plan.map(({ id, parentId, title, description, level, depth, status, dependencies, files }) => ({
+      id, parentId, title, ...(related.has(id) ? { description } : {}), level, depth, status, dependencies, files,
+    })),
+    evidence: state.evidence.filter((item) => evidenceIds.has(item.id)), constraints: state.constraints,
+    decisions: Object.fromEntries(Object.entries(state.decisions ?? {}).filter(([id]) => decisionIds.has(id))),
+    budget: { callsUsed: state.callsUsed, calls: state.budget.calls, liveNodes: liveNodeCount(state.plan), nodeLimit: state.budget.nodes },
   };
 }
 
@@ -59,7 +90,7 @@ Scope: ${state.profile?.scope}
 Active planning level "${active?.level}" at tree depth ${active?.depth}: ${active?.title}\n${active?.description}
 Existing state: ${JSON.stringify(compactState(state))}
 
-Return ${state.budget.candidates} genuinely distinct candidate decompositions when a material decision exists; otherwise return one. Derive the next useful planning level from this task and repository evidence, and name it in each refinement; do not follow a predetermined intent/architecture/components/changes sequence. A branch may become implementable immediately or require any number of refinements within budget. Mark implementable only when the title and description identify a bounded file/symbol-sized change with verification. Dependencies must reference existing plan IDs only. Ask for human input only for a consequential choice that repository evidence cannot resolve.`;
+Reuse supplied grounded evidence and decisions; inspect only claims that remain unresolved. Return ${state.budget.candidates} genuinely distinct candidate decompositions when a material decision exists; otherwise return one. Derive the next useful planning level from this task and repository evidence, and name it in each refinement; do not follow a predetermined intent/architecture/components/changes sequence. A branch may become implementable immediately or require any number of refinements within budget. Mark implementable only when the title and description identify a bounded file/symbol-sized change with verification. At most ${state.budget.nodes - liveNodeCount(state.plan) + 1} live refinements fit. Give each refinement a short unique key; dependencies may reference existing plan IDs or keys in the same candidate. Ask for human input only for a consequential choice that repository evidence cannot resolve.`;
 }
 
 function planForImplementation(state: ProgressiveLodState): string {
@@ -71,24 +102,26 @@ function progress(state: ProgressiveLodState): GraphProgressSnapshot {
     phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId,
     callsUsed: state.callsUsed, callBudget: state.budget.calls,
     summary: state.verification?.summary ?? state.discoveries.at(-1) ?? state.profile?.summary,
+    usage: state.usage,
     nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, level: node.level, depth: node.depth, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence })),
   };
 }
 
 export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGraph<ProgressiveLodState> {
+  const classifier = options.classifierAgent ?? options.analystAgent;
   const analyst = options.analystAgent;
   const verifier = options.verifierAgent ?? analyst;
   const answer = options.answerAgent ?? analyst;
   const builder = new StateGraph(ProgressiveState)
     .addNode("classify", structuredAgentNode<ProgressiveLodState, typeof ClassificationSchema._output>({
-      node: "classify", agent: analyst, schema: ClassificationSchema,
+      node: "classify", agent: classifier, schema: ClassificationSchema,
       prompt: (state) => `Classify the request. route=answer only for a read-only response or investigation; route=change whenever files or external state must change. Scope is local, subsystem, architectural, or unknown. Derive a short planningFrame naming the task-specific top-level decision or outcome; it is not selected from a fixed hierarchy.\n\n${state.originalTask}`,
-      output: (profile, state) => ({ profile, phase: "classified", callsUsed: state.callsUsed + 1 }),
+      output: (profile, state, result) => ({ profile, phase: "classified", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result) }),
     }))
     .addNode("answer", agentNode<ProgressiveLodState>({
       node: "answer", agent: answer,
       prompt: (state) => `Answer or investigate the request directly. Use read-only repository tools when relevant. Do not edit files.\n\n${state.originalTask}`,
-      output: (text, state) => ({ result: text, phase: "completed", callsUsed: state.callsUsed + 1 }),
+      output: (text, state, call) => ({ result: text, phase: "completed", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, call) }),
     }))
     .addNode("initialize", (state: ProgressiveLodState) => ({
       phase: "planning", budget: SCOPE_BUDGETS[state.profile?.scope ?? "unknown"], nextId: 2, activeNodeId: "p1",
@@ -101,7 +134,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     })
     .addNode("analyze", structuredAgentNode<ProgressiveLodState, typeof AnalysisSchema._output>({
       node: "analyze", agent: analyst, schema: AnalysisSchema, prompt: analysisPrompt,
-      output: (analysis, state) => ({ analysis, phase: "evaluating", callsUsed: state.callsUsed + 1 }),
+      output: (analysis, state, result) => ({ analysis, phase: "evaluating", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result) }),
     }))
     .addNode("merge", (state: ProgressiveLodState) => {
       if (!state.analysis) throw new Error("Merge requires analysis");
@@ -116,17 +149,17 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("implement", agentNode<ProgressiveLodState>({
       node: "implement", agent: options.implementerAgent,
       prompt: (state) => `Implement the complete plan in topological order in the current worktree. Inspect before editing, preserve unrelated changes, and run proportionate checks. Do not merely describe edits.\n\nOriginal task: ${state.originalTask}\n\nConstraints: ${JSON.stringify(state.constraints)}\n\nPlan:\n${planForImplementation(state)}`,
-      output: (text, state) => ({ implementation: text, phase: "verifying", callsUsed: state.callsUsed + 1, plan: state.plan.map((node) => node.status === "ready" || node.status === "failed" ? { ...node, status: "implementing" as const } : node) }),
+      output: (text, state, result) => ({ implementation: text, phase: "verifying", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result), plan: state.plan.map((node) => node.status === "ready" || node.status === "failed" ? { ...node, status: "implementing" as const } : node) }),
     }))
     .addNode("verify", structuredAgentNode<ProgressiveLodState, typeof VerificationSchema._output>({
       node: "verify", agent: verifier, schema: VerificationSchema,
       prompt: (state) => `Verify the implementation against the original request and every implementable plan leaf. Inspect the actual diff and run relevant checks. Do not edit files.\n\nTask: ${state.originalTask}\nPlan: ${planForImplementation(state)}\nImplementer report: ${state.implementation}`,
-      output: (verification, state) => ({ verification, phase: verification.passed ? "completed" : "verification-failed", callsUsed: state.callsUsed + 1, plan: state.plan.map((node) => node.status === "implementing" ? { ...node, status: verification.passed ? "verified" as const : "failed" as const } : node) }),
+      output: (verification, state, result) => ({ verification, phase: verification.passed ? "completed" : "verification-failed", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result), plan: state.plan.map((node) => node.status === "implementing" ? { ...node, status: verification.passed ? "verified" as const : "failed" as const } : node) }),
     }))
     .addNode("repair", agentNode<ProgressiveLodState>({
       node: "repair", agent: options.implementerAgent,
       prompt: (state) => `Repair the verified failures in the current worktree, then run focused checks.\n\nTask: ${state.originalTask}\nVerification: ${JSON.stringify(state.verification)}\nPrior implementation: ${state.implementation}`,
-      output: (text, state) => ({ implementation: `${state.implementation}\n\nRepair ${state.repairAttempts + 1}:\n${text}`, repairAttempts: state.repairAttempts + 1, phase: "verifying", callsUsed: state.callsUsed + 1, plan: state.plan.map((node) => node.status === "failed" ? { ...node, status: "implementing" as const } : node) }),
+      output: (text, state, result) => ({ implementation: `${state.implementation}\n\nRepair ${state.repairAttempts + 1}:\n${text}`, repairAttempts: state.repairAttempts + 1, phase: "verifying", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result), plan: state.plan.map((node) => node.status === "failed" ? { ...node, status: "implementing" as const } : node) }),
     }))
     .addNode("reopen", (state: ProgressiveLodState) => {
       const failed = new Set(state.verification?.failedNodeIds ?? []);
@@ -153,9 +186,9 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addEdge("reopen", "analyze").addEdge("repair", "verify").addEdge("finish", END);
   return {
     graph: builder.compile({ checkpointer: options.checkpointer ?? defaultDurableCheckpointer() }),
-    initial: ({ task, directory, worktree, runId }) => ({ runId, originalTask: task, directory, worktree, phase: "classifying", budget: SCOPE_BUDGETS.unknown, plan: [], evidence: [], constraints: [], discoveries: [], callsUsed: 0, nextId: 1, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "" }),
+    initial: ({ task, directory, worktree, runId }) => ({ runId, originalTask: task, directory, worktree, phase: "classifying", budget: SCOPE_BUDGETS.unknown, plan: [], evidence: [], constraints: [], discoveries: [], decisions: {}, usage: { ...EMPTY_USAGE }, callsUsed: 0, nextId: 1, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "" }),
     result: (state) => state.result,
     progress,
-    display: { classify: { phase: "route", agent: analyst }, analyze: { phase: "expand", agent: analyst }, merge: { phase: "reduce" }, human: { phase: "decision" }, implement: { phase: "commit", agent: options.implementerAgent }, verify: { phase: "verify", agent: verifier }, repair: { phase: "repair", agent: options.implementerAgent } },
+    display: { classify: { phase: "route", agent: classifier }, analyze: { phase: "expand", agent: analyst }, merge: { phase: "reduce" }, human: { phase: "decision" }, implement: { phase: "commit", agent: options.implementerAgent }, verify: { phase: "verify", agent: verifier }, repair: { phase: "repair", agent: options.implementerAgent } },
   };
 }
