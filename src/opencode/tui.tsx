@@ -266,8 +266,16 @@ export function readVisibleEvents(rootSessionId: string | undefined, worktree: s
 
 function useEvents(rootSessionId: () => string | undefined, worktree: () => string, stateHome: () => string, userMessageId: () => string | undefined = () => undefined) {
   const read = () => readVisibleEvents(rootSessionId(), worktree(), stateHome(), userMessageId());
-  const [events, setEvents] = createSignal<PluginRunEvent[]>(read());
-  const refresh = () => setEvents(read());
+  const initial = read();
+  let signature = JSON.stringify(initial);
+  const [events, setEvents] = createSignal<PluginRunEvent[]>(initial);
+  const refresh = () => {
+    const next = read();
+    const nextSignature = JSON.stringify(next);
+    if (nextSignature === signature) return;
+    signature = nextSignature;
+    setEvents(next);
+  };
   onMount(() => {
     refresh();
     const timer = setInterval(refresh, 250);
@@ -425,7 +433,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const [rootSessionId] = createSignal(props.rootSessionId);
   const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId);
   const spinner = useSpinner(events, props.api);
-  const layout = createMemo(() => renderEventGraph(events(), spinner()));
+  const layout = createMemo(() => renderEventGraph(events()));
   const planTree = createMemo(() => renderPlanTree(events()));
   const nodes = createMemo(() => executions(events()));
   const currentRun = createMemo(() => latest(events()));
