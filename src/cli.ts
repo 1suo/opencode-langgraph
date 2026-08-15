@@ -8,7 +8,7 @@ import { assertValidConnector, validateConnector } from "./core/validate.js";
 
 function repo(value: string): string { return fs.realpathSync(value); }
 
-const program = new Command().name("opencode-langgraph").description("Explicit LangGraph connector for OpenCode").version("0.6.1");
+const program = new Command().name("opencode-langgraph").description("Explicit LangGraph connector for OpenCode").version("0.6.2");
 
 program.command("init").description(`create ${typedConfigFile}`).option("--repo <path>", "target repository", process.cwd()).action((options) => {
   process.stdout.write(`${writeConnectorConfig(repo(options.repo))}\n`);

@@ -354,6 +354,31 @@ describe("progressive planning graph", () => {
     expect(scoutCalls).toBe(1);
   });
 
+  it("forks an aborted child session after a call-budget approval", async () => {
+    const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    const scoutSessions: Array<{ strategy: string; sessionId?: string } | undefined> = [];
+    let scoutCalls = 0;
+    const runtime = { call: async (input: { node: string; session?: { strategy: string; sessionId?: string } }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "bounded", planningFrame: "behavior", readOnly: false, risks: [] } };
+      if (input.node === "scout:p1") {
+        scoutSessions.push(input.session);
+        scoutCalls++;
+        if (scoutCalls === 1) return { text: "", sessionId: "scout-aborted", usage: { turns: 8, input: 30_000, output: 100, reasoning: 0, cacheRead: 100_000, cacheWrite: 0, cost: .01 }, budgetStop: { kind: "budget", metric: "turns", used: 8, limit: 8 } };
+        return { text: "", sessionId: "scout-fork", structured: { summary: "grounded", evidence: [], constraints: [], unresolved: [] } };
+      }
+      if (input.node === "decide:p1") return { text: "", sessionId: "decider", structured: decisionValue("ready", { objective: "fix", targets: ["src/a.ts"], acceptanceCriteria: ["works"], verification: ["npm test"] }) };
+      if (input.node === "implement:p1") return { text: "", sessionId: "impl", structured: { status: "completed", summary: "fixed", changedFiles: ["src/a.ts"], checks: [], blocker: "" } };
+      if (input.node === "verify") return { text: "", sessionId: "verify", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const config = { recursionLimit: 64, configurable: { thread_id: "budget-continue", langgraphOpenCodeRuntime: runtime } };
+    const paused = await configured.graph.invoke(configured.initial({ task: "bounded", directory: "/repo", worktree: "/repo", runId: "budget-continue" }), config);
+    expect(isInterrupted(paused)).toBe(true);
+    const resumed = await configured.graph.invoke(new Command({ resume: "continue" }), config);
+    expect(configured.progress?.(resumed)).toMatchObject({ phase: "completed" });
+    expect(scoutSessions).toEqual([{ strategy: "fresh" }, { strategy: "fork", sessionId: "scout-aborted" }]);
+  });
+
   it("does not acquire the worktree for direct answers", async () => {
     const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", checkpointer: new MemorySaver() });
     let leases = 0;

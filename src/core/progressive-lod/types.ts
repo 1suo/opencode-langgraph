@@ -192,5 +192,6 @@ export interface ProgressiveLodState extends Record<string, unknown> {
   implementationResults: Record<string, ImplementationResult>; verification?: VerificationOutput;
   repairAttempts: number; pendingBudget?: PendingBudget; budgetGrants: Record<string, number>;
   resumeRole?: PendingBudget["role"];
+  resumeFromAbortedSession?: boolean;
   humanQuestion: string; humanAnswer: string; result: string;
 }
