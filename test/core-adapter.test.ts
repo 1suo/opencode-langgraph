@@ -236,8 +236,8 @@ describe("progressive planning reducer", () => {
   const leaf = { objective: "change behavior", targets: ["src/a.ts"], acceptanceCriteria: ["behavior is correct"], verification: ["npm test"] };
   const decision = (value: Partial<DetailDecision>): DetailDecision => ({ disposition: "ready", summary: "bounded", options: [], selectedOption: "", confidence: 1, question: "", children: [], leaf, ...value });
 
-  it("keeps descriptive task-derived levels while enforcing structural dispositions", () => {
-    const level = "repository-specific planning boundary with a concrete ownership seam";
+  it("does not reject a task-derived planning frame because its prose exceeds an arbitrary length", () => {
+    const level = "repository-specific planning boundary with a concrete ownership seam ".repeat(20);
     expect(ClassificationSchema.parse({ route: "change", scope: "architectural", summary: "change", planningFrame: level, readOnly: false, risks: [] }).planningFrame).toBe(level);
     expect(DetailDecisionSchema.parse(decision({ disposition: "refine", leaf: undefined, children: [{ key: "next", title: "next", description: "next", level, dependencies: [] }] })).children[0].level).toBe(level);
     expect(() => applyDecision(state(), decision({ disposition: "ready", children: [{ key: "bad", title: "bad", description: "bad", level: "bad", dependencies: [] }] }))).toThrow("no children");

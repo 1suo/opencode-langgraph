@@ -133,7 +133,7 @@ export const SCOPE_BUDGETS: Record<TaskScope, ScopeBudget> = {
 
 export const ClassificationSchema = z.object({
   route: z.enum(["answer", "change"]), scope: ScopeSchema, summary: z.string().min(1).max(500),
-  planningFrame: z.string().min(1).max(500), readOnly: z.boolean(), risks: z.array(z.string().max(500)).max(8).default([]),
+  planningFrame: z.string().min(1), readOnly: z.boolean(), risks: z.array(z.string().max(500)).max(8).default([]),
 });
 
 const EvidenceSchema = z.object({
@@ -156,7 +156,7 @@ export const DetailDecisionSchema = z.object({
   summary: z.string().min(1).max(1200),
   options: z.array(z.object({ id: z.string().min(1).max(40), label: z.string().min(1).max(160), rationale: z.string().max(400), tradeoff: z.string().max(400) })).max(3).default([]),
   selectedOption: z.string().max(40).default(""), confidence: z.number().min(0).max(1), question: z.string().max(700).default(""),
-  children: z.array(z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(300), description: z.string().min(1).max(1200), level: z.string().min(1).max(300), dependencies: z.array(z.string().max(80)).max(12).default([]) })).max(8).default([]),
+  children: z.array(z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(300), description: z.string().min(1).max(1200), level: z.string().min(1), dependencies: z.array(z.string().max(80)).max(12).default([]) })).max(8).default([]),
   leaf: LeafSchema.optional(),
 });
 
