@@ -2,7 +2,6 @@
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { renderMermaidASCII } from "beautiful-mermaid";
 import path from "node:path";
 import { loadConnectorDefinition } from "../core/config.js";
 import { adoptHomeGraphState, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, type PluginRunEvent } from "./store.js";
@@ -31,15 +30,6 @@ function latest(events: PluginRunEvent[]): PluginRunEvent[] {
 
 function latestRunId(events: PluginRunEvent[]): string | undefined {
   return events.findLast((event) => event.node === "__start__")?.runId ?? events.at(-1)?.runId;
-}
-
-function ordered(events: PluginRunEvent[]): PluginRunEvent[] {
-  const runId = latestRunId(events);
-  const current = events.filter((event) => event.runId === runId);
-  const topology = current.find((event) => event.topology)?.topology;
-  if (!topology) return latest(events);
-  const byNode = new Map(latest(events).map((event) => [event.node, event]));
-  return topology.nodes.map((node) => byNode.get(node) ?? { ...current[0], node, status: "pending", agent: "—", model: "—" });
 }
 
 interface AsciiGraph {
@@ -123,28 +113,51 @@ export function graphNavigationLayer(controls: GraphControls) {
   };
 }
 
-function mermaidId(value: string): string {
-  return `n_${value.replace(/[^A-Za-z0-9_]/g, "_")}`;
+interface ExecutionWindowItem { event?: PluginRunEvent; omitted?: number }
+
+function executionWindow(items: PluginRunEvent[], focus: number, limit = 7): ExecutionWindowItem[] {
+  if (items.length <= limit) return items.map((event) => ({ event }));
+  const visible = Math.max(1, limit - 2);
+  const start = Math.max(0, Math.min(items.length - visible, focus - Math.floor(visible / 2)));
+  const end = start + visible;
+  return [
+    ...(start ? [{ omitted: start }] : []),
+    ...items.slice(start, end).map((event) => ({ event })),
+    ...(end < items.length ? [{ omitted: items.length - end }] : []),
+  ];
 }
 
-function renderSource(events: PluginRunEvent[], nodes: PluginRunEvent[], activeGlyph: string): string {
-  const topology = events.findLast((event) => event.topology)?.topology;
-  if (!topology) return "";
-  const lines = ["graph TD"];
-  for (const event of nodes) {
-    const name = event.node === "__start__" ? "START" : event.node === "__end__" ? "END" : event.node.replaceAll("_", " ");
-    const label = `${status(event, activeGlyph)} ${name}`.replaceAll('"', "'");
-    lines.push(`  ${mermaidId(event.node)}["${label}"]`);
+function middleEllipsis(value: string, limit: number): string {
+  if ([...value].length <= limit) return value;
+  const left = Math.ceil((limit - 1) / 2);
+  const right = Math.floor((limit - 1) / 2);
+  return `${[...value].slice(0, left).join("")}…${[...value].slice(-right).join("")}`;
+}
+
+function executionState(event: PluginRunEvent): string {
+  const progress = event.progress;
+  const active = progress?.nodes.find((node) => node.id === progress.activeNodeId);
+  return [progress?.phase, active ? `${active.id} ${active.title}` : progress?.scope, event.agent !== "langgraph" ? event.agent : event.runId].filter(Boolean).join(" · ");
+}
+
+export function renderEventGraph(events: PluginRunEvent[], activeGlyph = "▶", focus?: number): AsciiGraph {
+  const nodes = executions(events);
+  if (!nodes.length) return { width: 0, height: 0, canvas: "" };
+  const selected = Math.max(0, Math.min(focus ?? nodes.length - 1, nodes.length - 1));
+  const lines: string[] = [];
+  for (const item of executionWindow(nodes, selected)) {
+    if (lines.length) lines.push("      │");
+    if (item.omitted) {
+      lines.push(`      ⋮  ${item.omitted} execution${item.omitted === 1 ? "" : "s"} collapsed`);
+      continue;
+    }
+    const event = item.event!;
+    const name = event.node === "__start__" ? "START" : event.node === "__end__" ? "END" : event.node.replaceAll("_", " ").toUpperCase();
+    lines.push(`${status(event, activeGlyph)}  ${name}  [${event.status.toUpperCase()}]`);
+    const state = executionState(event);
+    if (state) lines.push(`   └─ ${middleEllipsis(state, 72)}`);
   }
-  for (const edge of topology.edges) lines.push(`  ${mermaidId(edge.source)} --> ${mermaidId(edge.target)}`);
-  return lines.join("\n");
-}
-
-export function renderEventGraph(events: PluginRunEvent[], activeGlyph = "▶"): AsciiGraph {
-  const nodes = ordered(events);
-  const source = renderSource(events, nodes, activeGlyph);
-  if (!nodes.length || !source) return { width: 0, height: 0, canvas: "" };
-  const canvas = renderMermaidASCII(source, { colorMode: "none", paddingX: 3, paddingY: 2, boxBorderPadding: 1 });
+  const canvas = lines.join("\n");
   const rows = canvas.split("\n");
   return { canvas, width: Math.max(0, ...rows.map((row) => [...row].length)), height: rows.length };
 }
@@ -209,13 +222,22 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
   for (const node of snapshot.nodes) byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]);
   const glyph = (value: string) => value === "verified" ? "✓" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
   const usage = snapshot.usage;
-  const lines = [`${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}${snapshot.callsUsed !== undefined ? ` · calls ${snapshot.callsUsed}/${snapshot.callBudget}` : ""}${usage ? ` · turns ${usage.turns} · input ${compactNumber(usage.input)} · cache ${compactNumber(usage.cacheRead)}` : ""}`];
+  const calls = snapshot.callsUsed !== undefined && snapshot.callBudget !== undefined ? Math.min(1, snapshot.callsUsed / snapshot.callBudget) : undefined;
+  const callBar = calls === undefined ? "" : `${"█".repeat(Math.round(calls * 10))}${"░".repeat(10 - Math.round(calls * 10))}`;
+  const lines = [
+    `LOD  ${snapshot.phase.toUpperCase()}${snapshot.scope ? ` / ${snapshot.scope.toUpperCase()}` : ""}`,
+    snapshot.callsUsed !== undefined ? `CALLS  ${callBar} ${snapshot.callsUsed}/${snapshot.callBudget ?? "?"}${usage ? `   TURNS ${usage.turns}` : ""}` : "",
+    usage ? `TOKENS  ${compactNumber(usage.input)} input · ${compactNumber(usage.cacheRead)} cached` : "",
+    "",
+  ].filter((line, index, all) => line || index === all.length - 1);
   const visit = (parentId: string | undefined, prefix: string) => {
     const children = (byParent.get(parentId) ?? []).sort((a, b) => planId(a.id) - planId(b.id) || a.id.localeCompare(b.id));
     children.forEach((node, index) => {
       const last = index === children.length - 1;
-      const detail = [node.level, `depth ${node.depth}`, node.status, node.evidence ? `${node.evidence}e` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).join(" · ");
-      lines.push(`${prefix}${last ? "└─" : "├─"} ${glyph(node.status)} ${node.title}  ${detail}`);
+      const branch = `${prefix}${last ? "└─" : "├─"}`;
+      const continuation = `${prefix}${last ? "   " : "│  "}`;
+      const metrics = [`LOD ${node.depth}`, node.status.toUpperCase(), node.evidence ? `${node.evidence} EVIDENCE` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).map((value) => `[${value}]`).join(" ");
+      lines.push(`${branch} ${glyph(node.status)} ${node.id}  ${node.title}`, `${continuation}   ${node.level}`, `${continuation}   ${metrics}`);
       visit(node.id, `${prefix}${last ? "   " : "│  "}`);
     });
   };
@@ -375,7 +397,7 @@ USE
 /run-graph <task> once · /graph-cancel stop
 
 VIEW
-1 plan · G topology · 2 executions · 3 output · T state
+1 plan · G run graph · 2 executions · 3 output · T state
 
 DESIGN · .opencode/langgraph.ts
 1. Annotation.Root → StateGraph → compile(checkpointer)
@@ -433,12 +455,12 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const [rootSessionId] = createSignal(props.rootSessionId);
   const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId);
   const spinner = useSpinner(events, props.api);
-  const layout = createMemo(() => renderEventGraph(events()));
   const planTree = createMemo(() => renderPlanTree(events()));
   const nodes = createMemo(() => executions(events()));
   const currentRun = createMemo(() => latest(events()));
   const [scrollPosition, setScrollPosition] = createSignal({ x: 0, y: 0 });
   const [selected, setSelected] = createSignal(initialSelection(events()));
+  const layout = createMemo(() => renderEventGraph(events(), spinner(), selected()));
   const [pane, setPane] = createSignal<"plan" | "topology" | "nodes" | "output">(planTree() ? "plan" : "topology");
   const [detail, setDetail] = createSignal<"output" | "state">("output");
   const [keymapReady, setKeymapReady] = createSignal(false);
@@ -538,7 +560,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={theme().textMuted}>{currentRun().at(-1)?.graph ?? "no run"} · {currentRun().at(-1)?.runId ?? "idle"}</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
-        <box onMouseUp={() => activatePane(planTree() ? "plan" : "topology")} width="62%" flexShrink={0} border={true} borderColor={pane() === "plan" || pane() === "topology" ? theme().primary : theme().border} title={pane() === "topology" ? ` TOPOLOGY [G] · PLAN [1] · PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "ARROWS")}] ` : ` PLAN [1] · TOPOLOGY [G] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} overflow="hidden">
+        <box onMouseUp={() => activatePane(planTree() ? "plan" : "topology")} width="62%" flexShrink={0} border={true} borderColor={pane() === "plan" || pane() === "topology" ? theme().primary : theme().border} title={pane() === "topology" ? ` RUN GRAPH [G] · PLAN [1] · PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "ARROWS")}] ` : ` PLAN [1] · RUN GRAPH [G] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} overflow="hidden">
           <Show when={pane() === "plan" && planTree()} fallback={
             <Show when={layout().canvas} fallback={<text fg={theme().textMuted}>No LangGraph execution has run in this project.</text>}>
               <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height} flexShrink={0}>

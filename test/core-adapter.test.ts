@@ -12,7 +12,7 @@ import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
 import { applyVerification, implementationOrder, liveNodeCount, mergeAnalysis, reopenFailedPlan } from "../src/core/progressive-lod/plan.js";
 import { AnalysisSchema, ClassificationSchema, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
-import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
+import { implementationReportedBlocker, progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
 
@@ -276,6 +276,41 @@ describe("progressive planning reducer", () => {
 });
 
 describe("progressive planning graph", () => {
+  it("replans omitted prerequisites instead of repairing a blocked leaf", async () => {
+    const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    let analysisCalls = 0;
+    let implementationCalls = 0;
+    let repairCalls = 0;
+    let replanningPrompt = "";
+    const runtime = { call: async (input: { node: string; prompt: string }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "align capability", planningFrame: "capability contract", readOnly: false, risks: [] } };
+      if (input.node === "analyze") {
+        analysisCalls++;
+        if (analysisCalls > 1) replanningPrompt = input.prompt;
+        return { text: "", structured: { summary: analysisCalls === 1 ? "docs leaf" : "complete code leaf", evidence: [], constraints: [], candidates: [{ name: "direct", rationale: "", refinements: [{ key: "leaf", action: "refine", title: analysisCalls === 1 ? "Update docs" : "Implement contract and docs", description: analysisCalls === 1 ? "Document behavior after code passes" : "Implement prerequisites, tests, and owner docs", level: "verified contract", implementable: true, dependencies: [], files: ["src/a.ts"] }] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } } };
+      }
+      if (input.node === "implement") {
+        implementationCalls++;
+        return { text: implementationCalls === 1 ? "## Blocker\nThe leaf omits required code prerequisites." : "implemented complete contract" };
+      }
+      if (input.node === "repair") { repairCalls++; return { text: "unexpected repair" }; }
+      if (input.node === "verify") return { text: "", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const result = await configured.graph.invoke(configured.initial({ task: "align", directory: "/repo", worktree: "/repo", runId: "blocked" }), { configurable: { thread_id: "blocked", langgraphOpenCodeRuntime: runtime } });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed" });
+    expect(analysisCalls).toBe(2);
+    expect(implementationCalls).toBe(2);
+    expect(repairCalls).toBe(0);
+    expect(replanningPrompt).toContain("Implementation reported that the selected plan omitted required prerequisite work");
+  });
+
+  it("recognizes only explicit implementation blocker markers", () => {
+    expect(implementationReportedBlocker("BLOCKED: missing prerequisite")).toBe(true);
+    expect(implementationReportedBlocker("Work checked.\n\n## Blocker\nMissing prerequisite.")).toBe(true);
+    expect(implementationReportedBlocker("Implemented blocker handling and tests.")).toBe(false);
+  });
+
   it("derives a task-specific hierarchy deeper than the documentation example", async () => {
     const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
     let leases = 0;
@@ -550,7 +585,7 @@ describe("OpenCode graph viewer", () => {
     expect(graphHelpText()).toContain("/graph-select");
     expect(graphHelpText()).toContain(".opencode/langgraph.ts");
     expect(graphHelpText()).toContain("defineGraph({ graph, initial, result, progress? })");
-    expect(graphHelpText()).toContain("G topology");
+    expect(graphHelpText()).toContain("G run graph");
   });
 
   it("ships the TUI framework as runtime dependencies", () => {
@@ -590,18 +625,20 @@ describe("OpenCode graph viewer", () => {
     }
   });
 
-  it("renders cyclic topology without parsing canonical Mermaid", () => {
-    const base = { at: "now", runId: "run", rootSessionId: "root", graph: "default", status: "pending", agent: "—", model: "—" };
-    const topology = { nodes: ["start", "work", "retry", "end"], edges: [
-      { source: "start", target: "work" }, { source: "work", target: "retry" },
-      { source: "retry", target: "work" }, { source: "work", target: "end" },
-    ] };
-    const mermaid = "graph TD;\n\tcanonical_only --> ignored;";
-    const layout = renderEventGraph([{ ...base, node: "start", topology, mermaid }]);
-    expect(layout.canvas).toContain("start");
-    expect(layout.canvas).toContain("work");
-    expect(layout.canvas).toContain("retry");
-    expect(layout.canvas).not.toContain("canonical only");
+  it("renders the actual execution states and collapses both sides of the focus", () => {
+    const base = { at: "now", runId: "run", rootSessionId: "root", graph: "default", status: "completed", agent: "analyst", model: "test/model" };
+    const events = Array.from({ length: 10 }, (_, index) => ({
+      ...base,
+      node: `step_${index}`,
+      ...(index === 4 ? { status: "active", progress: { phase: "planning", scope: "subsystem", activeNodeId: "p2", nodes: [{ id: "p2", title: "Resolve controller state", level: "controller", depth: 1, status: "active" }] } } : {}),
+    }));
+    const layout = renderEventGraph(events, "▶", 4);
+    expect(layout.canvas).toContain("2 executions collapsed");
+    expect(layout.canvas).toContain("3 executions collapsed");
+    expect(layout.canvas).toContain("▶  STEP 4  [ACTIVE]");
+    expect(layout.canvas).toContain("planning · p2 Resolve controller state · analyst");
+    expect(layout.canvas).not.toContain("STEP 0");
+    expect(layout.canvas).not.toContain("STEP 9");
     expect(layout.width).toBeGreaterThan(0);
     expect(layout.height).toBeGreaterThan(0);
   });
@@ -612,9 +649,11 @@ describe("OpenCode graph viewer", () => {
       { id: "p1", title: "Requested behavior", level: "observable outcome", depth: 0, status: "removed" },
       { id: "p2", parentId: "p1", title: "Session handoff", level: "state transition", depth: 1, status: "active", evidence: 2, confidence: .8 },
     ] } }]);
-    expect(tree).toContain("planning · subsystem · calls 3/24");
-    expect(tree).toContain("└─ ▶ Session handoff");
-    expect(tree).toContain("state transition · depth 1");
+    expect(tree).toContain("LOD  PLANNING / SUBSYSTEM");
+    expect(tree).toContain("CALLS  █░░░░░░░░░ 3/24");
+    expect(tree).toContain("└─ ▶ p2  Session handoff");
+    expect(tree).toContain("state transition");
+    expect(tree).toContain("[LOD 1] [ACTIVE] [2 EVIDENCE] [80%]");
   });
 
   it("keeps the most recently started execution visible when runs overlap", () => {

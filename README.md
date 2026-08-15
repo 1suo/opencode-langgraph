@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.13.tgz --force
+opencode plugin ./opencode-langgraph-0.5.14.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -37,7 +37,7 @@ Every agent-backed graph node runs in an isolated OpenCode child session. Graph 
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies read-only requests, derives a task-specific planning hierarchy for change requests, implements grounded leaves in dependency order, and verifies or repairs the result. The lightweight classifier and direct read-only answer roles use `deepseek/deepseek-v4-flash`; planning, verification, implementation, and repair inherit the parent OpenCode model. The four-level hierarchy in `SPEC-graph.md` is only an example; it is neither hardcoded nor configuration. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies read-only requests, derives a task-specific planning hierarchy for change requests, implements grounded leaves in dependency order, and verifies or repairs the result. An explicit implementation blocker reopens its parent planning branch instead of retrying the same incomplete leaf. The lightweight classifier and direct read-only answer roles use `deepseek/deepseek-v4-flash`; planning, verification, implementation, and repair inherit the parent OpenCode model. The four-level hierarchy in `SPEC-graph.md` is only an example; it is neither hardcoded nor configuration. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
@@ -125,7 +125,7 @@ For optional anti-overengineering guidance, add `@dietrichgebert/ponytail` once 
 
 Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer.
 
-The F8 viewer opens on the semantic plan tree. Press `G` for compiled topology, `2` for node executions, `3` for output, and `T` for raw state. Navigation hints live in panel headers.
+The F8 viewer opens on the semantic plan tree. Press `G` for the focused execution-state graph, `2` for node executions, `3` for output, and `T` for raw state. Long execution traces collapse independently before and after the selected execution. Navigation hints live in panel headers.
 
 Run `opencode-langgraph validate` after edits and `opencode-langgraph graph` to preview the compiled topology. Restart OpenCode after changing plugin code or configuration.
 

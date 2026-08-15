@@ -25,6 +25,7 @@ The graph is not a general autonomous manager. OpenCode owns chat, models, tools
 13. Refinement merges are atomic. An unresolved or capacity-truncated branch never proceeds to implementation.
 14. Verifier failure targets are validated stable plan IDs. Invalid or absent IDs fall back to the failed implementation set; recovery never invokes analysis without an active node.
 15. Child sessions receive one explicit task type: classification, planning refinement, implementation, verification, or bounded repair. Planning and verification are read-only and cannot silently become implementation.
+16. An implementer that reports an explicit blocker cannot enter repair on the same incomplete leaf. The controller reopens its parent branch so omitted prerequisites become part of a new bounded plan.
 
 ## 3. Runtime-derived planning levels
 
@@ -218,7 +219,7 @@ The prompt legend is exactly:
 F8 opens the semantic plan tree when progress is available. The viewer exposes:
 
 - `1`: plan tree;
-- `G`: compiled graph topology;
+- `G`: focused graph of actual execution states, with older and newer spans collapsed independently around the selection;
 - `2`: node executions;
 - `3`: selected execution output;
 - `T`: selected execution state;

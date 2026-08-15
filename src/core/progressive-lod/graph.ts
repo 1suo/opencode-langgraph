@@ -98,6 +98,10 @@ function planForImplementation(state: ProgressiveLodState): string {
   return implementationOrder(state.plan).map((node, index) => `${index + 1}. [${node.id}] ${node.title}\n${node.description}\nFiles: ${node.files.join(", ") || "discover as needed"}\nDepends on: ${node.dependencies.join(", ") || "none"}`).join("\n\n");
 }
 
+export function implementationReportedBlocker(text: string): boolean {
+  return /(?:^|\n)\s*(?:#{1,6}\s*)?(?:BLOCKED\s*:|Blocker\s*:?(?=\s*(?:\n|$)))/m.test(text);
+}
+
 function progress(state: ProgressiveLodState): GraphProgressSnapshot {
   return {
     phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId,
@@ -149,9 +153,21 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     })
     .addNode("implement", agentNode<ProgressiveLodState>({
       node: "implement", agent: options.implementerAgent,
-      prompt: (state) => `Task type: implementation. Implement only the bounded ready leaves below, in topological order, in the current worktree. Inspect before editing, preserve unrelated changes, and run proportionate checks. Do not redesign the plan or merely describe edits; report a blocker instead of silently expanding scope.\n\nOriginal task: ${state.originalTask}\n\nConstraints: ${JSON.stringify(state.constraints)}\n\nPlan:\n${planForImplementation(state)}`,
+      prompt: (state) => `Task type: implementation. Implement only the bounded ready leaves below, in topological order, in the current worktree. Inspect before editing, preserve unrelated changes, and run proportionate checks. Do not redesign the plan or merely describe edits. If the plan omits required prerequisite work or cannot be executed within its stated scope, do not attempt a partial repair: begin the response with exactly BLOCKED: and explain what the plan must include.\n\nOriginal task: ${state.originalTask}\n\nConstraints: ${JSON.stringify(state.constraints)}\n\nPlan:\n${planForImplementation(state)}`,
       output: (text, state, result) => ({ implementation: text, phase: "verifying", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result), plan: state.plan.map((node) => node.status === "ready" || node.status === "failed" ? { ...node, status: "implementing" as const } : node) }),
     }))
+    .addNode("replan_blocker", (state: ProgressiveLodState) => {
+      const failedIds = state.plan.filter((node) => node.status === "implementing").map((node) => node.id);
+      const failedPlan = state.plan.map((node) => node.status === "implementing" ? { ...node, status: "failed" as const } : node);
+      const reopened = reopenFailedPlan(failedPlan, failedIds, state.budget.reopens);
+      const summary = `Implementation reported that the selected plan omitted required prerequisite work: ${state.implementation}`;
+      return {
+        verification: { passed: false, summary, checks: [], failedNodeIds: failedIds, repairable: false, architecturalMismatch: true },
+        plan: reopened.plan, activeNodeId: reopened.activeNodeId,
+        discoveries: [...state.discoveries, `Reopened ${reopened.reopenedNodeIds.join(", ") || "no branch"} after implementation blocker.`],
+        phase: reopened.activeNodeId ? "planning" : "verification-failed",
+      };
+    })
     .addNode("verify", structuredAgentNode<ProgressiveLodState, typeof VerificationSchema._output>({
       node: "verify", agent: verifier, schema: VerificationSchema,
       prompt: (state) => `Task type: independent verification. Inspect the actual diff and run relevant read-only checks against the original request and every implementable plan leaf. Do not edit or repair files. failedNodeIds must contain only exact bracketed plan IDs from the plan below (for example p2), never semantic labels; return an empty list only when no specific leaf can be identified.\n\nTask: ${state.originalTask}\nPlan: ${planForImplementation(state)}\nImplementer report: ${state.implementation}`,
@@ -175,7 +191,8 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addConditionalEdges("classify", (state: ProgressiveLodState) => state.profile?.route ?? "answer", { answer: "answer", change: "acquire" })
     .addEdge("answer", END).addConditionalEdges("acquire", (state: ProgressiveLodState) => state.plan.length ? "analyze" : "initialize", { analyze: "analyze", initialize: "initialize" }).addEdge("initialize", "analyze").addEdge("analyze", "merge")
     .addConditionalEdges("merge", (state: ProgressiveLodState) => state.humanQuestion ? "human" : state.activeNodeId ? (!budgetExceeded(state) ? "analyze" : "finish") : state.plan.some((node) => node.status === "ready" || node.status === "failed") ? "implement" : "finish", { human: "human", analyze: "analyze", implement: "implement", finish: "finish" })
-    .addEdge("human", "acquire").addEdge("implement", "verify")
+    .addEdge("human", "acquire").addConditionalEdges("implement", (state: ProgressiveLodState) => implementationReportedBlocker(state.implementation) ? "replan" : "verify", { replan: "replan_blocker", verify: "verify" })
+    .addConditionalEdges("replan_blocker", (state: ProgressiveLodState) => state.activeNodeId && !budgetExceeded(state) ? "analyze" : "finish", { analyze: "analyze", finish: "finish" })
     .addConditionalEdges("verify", (state: ProgressiveLodState) => state.verification?.passed ? "finish" : state.verification?.architecturalMismatch && state.callsUsed < state.budget.calls - state.budget.reservedCalls ? "reopen" : state.verification?.repairable && state.repairAttempts < state.budget.repairs && state.callsUsed < state.budget.calls ? "repair" : "finish", { finish: "finish", reopen: "reopen", repair: "repair" })
     .addConditionalEdges("reopen", (state: ProgressiveLodState) => state.activeNodeId && !budgetExceeded(state) ? "analyze" : "finish", { analyze: "analyze", finish: "finish" })
     .addEdge("repair", "verify").addEdge("finish", END);
