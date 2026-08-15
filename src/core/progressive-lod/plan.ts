@@ -1,4 +1,4 @@
-import type { AnalysisOutput, Constraint, Evidence, PlanNode, ProgressiveLodState } from "./types.js";
+import type { AnalysisOutput, Constraint, Evidence, PlanNode, ProgressiveLodState, VerificationOutput } from "./types.js";
 
 function key(value: string): string { return value.trim().toLocaleLowerCase().replace(/\s+/g, " "); }
 function planNumber(value: string): number { const parsed = Number(value.replace(/^p/, "")); return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER; }
@@ -25,6 +25,46 @@ export function selectActiveNode(nodes: PlanNode[]): PlanNode | undefined {
   return nodes
     .filter((node) => (node.status === "pending" || node.status === "active") && node.dependencies.every((id) => done.has(id)))
     .sort((left, right) => left.depth - right.depth || byPlanId(left, right))[0];
+}
+
+function verifiedFailureIds(nodes: PlanNode[], requested: string[]): Set<string> {
+  const eligible = new Set(nodes.filter((node) => node.status === "implementing" || node.status === "failed").map((node) => node.id));
+  const valid = new Set(requested.filter((id) => eligible.has(id)));
+  return valid.size ? valid : eligible;
+}
+
+export function applyVerification(nodes: PlanNode[], verification: VerificationOutput): PlanNode[] {
+  const failed = verification.passed ? new Set<string>() : verifiedFailureIds(nodes, verification.failedNodeIds);
+  return nodes.map((node) => node.status === "implementing"
+    ? { ...node, status: verification.passed || !failed.has(node.id) ? "verified" as const : "failed" as const }
+    : node);
+}
+
+export interface ReopenResult { plan: PlanNode[]; activeNodeId?: string; reopenedNodeIds: string[] }
+
+export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenLimit: number): ReopenResult {
+  const failedIds = verifiedFailureIds(nodes, requested);
+  const failedNodes = nodes.filter((node) => failedIds.has(node.id));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const reopenIds = new Set(failedNodes
+    .map((node) => node.parentId ?? node.id)
+    .filter((id) => (byId.get(id)?.reopenCount ?? reopenLimit) < reopenLimit));
+  const invalidIds = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (reopenIds.has(node.id) || !node.parentId || (!reopenIds.has(node.parentId) && !invalidIds.has(node.parentId)) || invalidIds.has(node.id)) continue;
+      invalidIds.add(node.id);
+      changed = true;
+    }
+  }
+  const plan = nodes.map((node) => reopenIds.has(node.id)
+    ? { ...node, status: "pending" as const, reopenCount: node.reopenCount + 1 }
+    : invalidIds.has(node.id) ? { ...node, status: "removed" as const } : node);
+  const active = selectActiveNode(plan);
+  if (active) active.status = "active";
+  return { plan, activeNodeId: active?.id, reopenedNodeIds: [...reopenIds] };
 }
 
 function commonRefinements(output: AnalysisOutput) {

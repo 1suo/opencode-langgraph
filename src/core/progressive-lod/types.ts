@@ -64,10 +64,10 @@ export interface Budget {
 }
 
 export const SCOPE_BUDGETS: Record<TaskScope, Budget> = {
-  local: { calls: 12, nodes: 8, candidates: 2, contextCyclesPerNode: 2, reopens: 1, repairs: 1, minutes: 15, reservedCalls: 2 },
-  subsystem: { calls: 24, nodes: 16, candidates: 2, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 30, reservedCalls: 3 },
-  architectural: { calls: 40, nodes: 24, candidates: 3, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 60, reservedCalls: 3 },
-  unknown: { calls: 40, nodes: 24, candidates: 3, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 60, reservedCalls: 3 },
+  local: { calls: 12, nodes: 6, candidates: 2, contextCyclesPerNode: 2, reopens: 1, repairs: 1, minutes: 15, reservedCalls: 2 },
+  subsystem: { calls: 24, nodes: 12, candidates: 2, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 30, reservedCalls: 3 },
+  architectural: { calls: 40, nodes: 16, candidates: 3, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 60, reservedCalls: 3 },
+  unknown: { calls: 40, nodes: 16, candidates: 3, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 60, reservedCalls: 3 },
 };
 
 export const ClassificationSchema = z.object({

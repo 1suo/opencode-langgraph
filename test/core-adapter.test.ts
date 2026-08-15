@@ -10,7 +10,7 @@ import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGra
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
-import { implementationOrder, liveNodeCount, mergeAnalysis } from "../src/core/progressive-lod/plan.js";
+import { applyVerification, implementationOrder, liveNodeCount, mergeAnalysis, reopenFailedPlan } from "../src/core/progressive-lod/plan.js";
 import { AnalysisSchema, ClassificationSchema, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
 import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
@@ -249,6 +249,25 @@ describe("progressive planning reducer", () => {
     const base = state().plan[0];
     expect(implementationOrder([{ ...base, id: "p10", status: "ready" }, { ...base, id: "p2", status: "ready" }]).map((node) => node.id)).toEqual(["p2", "p10"]);
   });
+
+  it("validates verifier targets and safely reopens after semantic labels", () => {
+    const root = { ...state().plan[0], status: "removed" as const };
+    const leaves = [
+      { ...root, id: "p2", parentId: "p1", title: "designer", status: "implementing" as const },
+      { ...root, id: "p3", parentId: "p1", title: "contract test", status: "implementing" as const },
+    ];
+    const exact = applyVerification([root, ...leaves], { passed: false, summary: "designer mismatch", checks: [], failedNodeIds: ["p2"], repairable: true, architecturalMismatch: true });
+    expect(exact.find((node) => node.id === "p2")?.status).toBe("failed");
+    expect(exact.find((node) => node.id === "p3")?.status).toBe("verified");
+
+    const semantic = applyVerification([root, ...leaves], { passed: false, summary: "mismatch", checks: [], failedNodeIds: ["designer-create-filtering"], repairable: true, architecturalMismatch: true });
+    expect(semantic.filter((node) => node.status === "failed").map((node) => node.id)).toEqual(["p2", "p3"]);
+    const reopened = reopenFailedPlan(semantic, ["designer-create-filtering"], 1);
+    expect(reopened.activeNodeId).toBe("p1");
+    expect(reopened.reopenedNodeIds).toEqual(["p1"]);
+    expect(reopened.plan.find((node) => node.id === "p1")).toMatchObject({ status: "active", reopenCount: 1 });
+    expect(reopened.plan.filter((node) => node.parentId === "p1").every((node) => node.status === "removed")).toBe(true);
+  });
 });
 
 describe("progressive planning graph", () => {
@@ -287,6 +306,32 @@ describe("progressive planning graph", () => {
     const result = await configured.graph.invoke(configured.initial({ task: "fix typo", directory: "/repo", worktree: "/repo", runId: "short" }), { configurable: { thread_id: "short", langgraphOpenCodeRuntime: runtime } });
     expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 4 });
     expect(configured.progress?.(result)?.nodes.at(-1)).toMatchObject({ level: "verified text edit", depth: 1, status: "verified" });
+  });
+
+  it("replans an architectural mismatch with invalid verifier labels without losing the active node", async () => {
+    const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    let analysisCalls = 0;
+    let verificationCalls = 0;
+    const prompts = new Map<string, string[]>();
+    const runtime = { call: async (input: { node: string; prompt: string }) => {
+      prompts.set(input.node, [...(prompts.get(input.node) ?? []), input.prompt]);
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "align capability", planningFrame: "capability contract", readOnly: false, risks: [] } };
+      if (input.node === "analyze") {
+        analysisCalls++;
+        return { text: "", structured: { summary: analysisCalls === 1 ? "initial leaf" : "replanned leaf", evidence: [], constraints: [], candidates: [{ name: "direct", rationale: "", refinements: [{ key: "leaf", action: "refine", title: analysisCalls === 1 ? "Align designer" : "Align canonical contract", description: "bounded implementation with test", level: "verified contract", implementable: true, dependencies: [], files: ["src/a.ts"] }] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } } };
+      }
+      if (input.node === "implement") return { text: "implemented" };
+      if (input.node === "verify" && verificationCalls++ === 0) return { text: "", structured: { passed: false, summary: "architectural mismatch", checks: [], failedNodeIds: ["designer-create-filtering"], repairable: true, architecturalMismatch: true } };
+      if (input.node === "verify") return { text: "", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const result = await configured.graph.invoke(configured.initial({ task: "align", directory: "/repo", worktree: "/repo", runId: "reopen" }), { configurable: { thread_id: "reopen", langgraphOpenCodeRuntime: runtime } });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 7 });
+    expect(configured.progress?.(result)?.nodes.filter((node) => node.status === "verified")).toHaveLength(1);
+    expect(prompts.get("analyze")?.at(-1)).toContain("Replanning reason: architectural mismatch");
+    expect(prompts.get("analyze")?.at(-1)).toContain("Task type: planning refinement");
+    expect(prompts.get("implement")?.at(-1)).toContain("Task type: implementation");
+    expect(prompts.get("verify")?.at(-1)).toContain("failedNodeIds must contain only exact bracketed plan IDs");
   });
 
   it("omits unrelated full descriptions from subsequent branch prompts", async () => {

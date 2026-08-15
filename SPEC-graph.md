@@ -23,6 +23,8 @@ The graph is not a general autonomous manager. OpenCode owns chat, models, tools
 11. Agent calls use an activity-resetting inactivity timeout and a separate absolute runtime ceiling; active tool work is not aborted by a short fixed wall clock.
 12. Analysis prompts contain the active branch, its ancestry and dependencies, relevant evidence and decisions, and only a compact index of unrelated nodes.
 13. Refinement merges are atomic. An unresolved or capacity-truncated branch never proceeds to implementation.
+14. Verifier failure targets are validated stable plan IDs. Invalid or absent IDs fall back to the failed implementation set; recovery never invokes analysis without an active node.
+15. Child sessions receive one explicit task type: classification, planning refinement, implementation, verification, or bounded repair. Planning and verification are read-only and cannot silently become implementation.
 
 ## 3. Runtime-derived planning levels
 
@@ -159,11 +161,11 @@ Implementation receives the immutable task, constraints, and all ready leaves in
 
 | Scope | Calls | Plan nodes | Candidates | Context/node | Reopens | Repairs | Wall time |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| local | 12 | 8 | 2 | 2 | 1 | 1 | 15 min |
-| subsystem | 24 | 16 | 2 | 3 | 2 | 2 | 30 min |
-| architectural / unknown | 40 | 24 | 3 | 3 | 2 | 2 | 60 min |
+| local | 12 | 6 | 2 | 2 | 1 | 1 | 15 min |
+| subsystem | 24 | 12 | 2 | 3 | 2 | 2 | 30 min |
+| architectural / unknown | 40 | 16 | 3 | 3 | 2 | 2 | 60 min |
 
-Two or three calls are reserved for implementation, verification, and repair. Expanded/removed history remains visible but does not consume live-node capacity. A candidate either fits in full or is retried once in consolidated form; it is never partially merged. Planning stops before consuming the call reserve, and an unresolved plan ends explicitly without mutating the worktree.
+Two or three calls are reserved for implementation, verification, and repair. Expanded/removed history remains visible but does not consume live-node capacity. A candidate either fits in full or is retried once in consolidated form; it is never partially merged. Closely coupled code, tests, owner documentation, and bookkeeping stay in one implementable leaf rather than becoming orchestration-only leaves. Planning stops before consuming the call reserve, and an unresolved plan ends explicitly without mutating the worktree.
 
 ## 9. Persistence, concurrency, and resume
 

@@ -133,7 +133,9 @@ async function postRootMessage(
 async function postGraphResult(plugin: PluginInput, internalMessages: Set<string>, sessionID: string, parentMessageID: string, model: { providerID: string; modelID: string } | undefined, result: GraphExecution): Promise<void> {
   const text = result.interrupted
     ? `LangGraph ${result.graph} paused for human input. Ask the user this question and nothing else:\n${result.output}`
-    : `LangGraph ${result.graph} completed. Present this result directly; do not repeat its edits or rerun it:\n${result.output}`;
+    : result.failed
+      ? `LangGraph ${result.graph} ended without verified success. Report this result directly; do not claim completion or rerun it:\n${result.output}`
+      : `LangGraph ${result.graph} completed. Present this result directly; do not repeat its edits or rerun it:\n${result.output}`;
   await postRootMessage(plugin, internalMessages, sessionID, parentMessageID, model, text);
 }
 
@@ -145,6 +147,7 @@ async function postGraphFailure(plugin: PluginInput, internalMessages: Set<strin
 interface GraphExecution {
   output: string;
   interrupted: boolean;
+  failed: boolean;
   runId: string;
   graph: string;
 }
@@ -204,15 +207,17 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
       const requests = result.__interrupt__.map((item) => item.value);
       const output = JSON.stringify(requests, null, 2);
       emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__interrupt__", status: "interrupted", agent: "human", model: "input", text: output, state: result, progress: configured.progress?.(result) });
-      return { runId, graph: graphName, output, interrupted: true };
+      return { runId, graph: graphName, output, interrupted: true, failed: false };
     }
     const output = configured.result ? configured.result(result) : typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
-    emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: configured.progress?.(result) });
-    writeStoredRun({ ...saved, status: "completed" });
-    return { runId, graph: graphName, output, interrupted: false };
+    const finalProgress = configured.progress?.(result);
+    const failed = finalProgress?.phase === "failed";
+    emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: failed ? "failed" : "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: finalProgress });
+    writeStoredRun({ ...saved, status: failed ? "failed" : "completed" });
+    return { runId, graph: graphName, output, interrupted: false, failed };
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
-    emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: "failed", agent: "langgraph", model: "langgraph", text });
+    emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });
     writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
     throw error;
   } finally {
@@ -250,16 +255,18 @@ async function executeResume(
       writeStoredRun({ ...saved, status: "interrupted" });
       const output = JSON.stringify(result.__interrupt__.map((item) => item.value), null, 2);
       emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__interrupt__", status: "interrupted", agent: "human", model: "input", text: output, state: result, progress: configured.progress?.(result) });
-      return { runId: saved.runId, graph: saved.graph, output, interrupted: true };
+      return { runId: saved.runId, graph: saved.graph, output, interrupted: true, failed: false };
     }
     const output = configured.result ? configured.result(result) : typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
-    writeStoredRun({ ...saved, status: "completed" });
-    emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: configured.progress?.(result) });
-    return { runId: saved.runId, graph: saved.graph, output, interrupted: false };
+    const finalProgress = configured.progress?.(result);
+    const failed = finalProgress?.phase === "failed";
+    writeStoredRun({ ...saved, status: failed ? "failed" : "completed" });
+    emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: failed ? "failed" : "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: finalProgress });
+    return { runId: saved.runId, graph: saved.graph, output, interrupted: false, failed };
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
-    emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: "failed", agent: "langgraph", model: "langgraph", text });
+    emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });
     throw error;
   } finally {
     lease?.release();
@@ -285,7 +292,7 @@ function graphTool(plugin: PluginInput) {
         directory: context.directory, worktree: context.worktree, parentModel,
         signal: context.abort, ask: context.ask, metadata: context.metadata,
       });
-      return { title: result.interrupted ? "LangGraph · input required" : `LangGraph · ${result.graph}`, output: result.interrupted ? `The graph is paused. Ask the user for this input, then call langgraph_resume with runId ${result.runId}:\n${result.output}` : result.output, metadata: { runId: result.runId, graph: result.graph, interrupted: result.interrupted } };
+      return { title: result.interrupted ? "LangGraph · input required" : result.failed ? "LangGraph · verification failed" : `LangGraph · ${result.graph}`, output: result.interrupted ? `The graph is paused. Ask the user for this input, then call langgraph_resume with runId ${result.runId}:\n${result.output}` : result.output, metadata: { runId: result.runId, graph: result.graph, interrupted: result.interrupted, failed: result.failed } };
     },
   });
 }
@@ -303,7 +310,7 @@ function resumeTool(plugin: PluginInput) {
       if (saved.status !== "interrupted") throw new Error(`LangGraph run is ${saved.status}, not interrupted`);
       const parent = await plugin.client.session.message({ path: { id: context.sessionID, messageID: context.messageID }, query: { directory: context.directory }, throwOnError: true });
       const result = await executeResume(plugin, saved, args.answer, messageModel(parent.data.info), context.abort, context.ask);
-      return { title: result.interrupted ? "LangGraph · more input required" : `LangGraph · ${saved.graph}`, output: result.interrupted ? `Ask the user, then call langgraph_resume again with runId ${saved.runId}:\n${result.output}` : result.output, metadata: { runId: saved.runId, interrupted: result.interrupted } };
+      return { title: result.interrupted ? "LangGraph · more input required" : result.failed ? "LangGraph · verification failed" : `LangGraph · ${saved.graph}`, output: result.interrupted ? `Ask the user, then call langgraph_resume again with runId ${saved.runId}:\n${result.output}` : result.output, metadata: { runId: saved.runId, interrupted: result.interrupted, failed: result.failed } };
     },
   });
 }
