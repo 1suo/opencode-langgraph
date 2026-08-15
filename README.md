@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.0.tgz --force
+opencode plugin ./opencode-langgraph-0.5.1.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -56,7 +56,7 @@ Any compiled LangGraph can be connected by supplying models, agents, graphs, and
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph"
 import {
   agentNode,
-  defaultSqliteCheckpointer,
+  defaultDurableCheckpointer,
   defineGraph,
   defineOpenCodeLangGraph,
   opencodeModel,
@@ -76,7 +76,7 @@ const graph = new StateGraph(State)
   }))
   .addEdge(START, "answer")
   .addEdge("answer", END)
-  .compile({ checkpointer: defaultSqliteCheckpointer() })
+  .compile({ checkpointer: defaultDurableCheckpointer() })
 
 export default defineOpenCodeLangGraph({
   version: 1,
@@ -115,7 +115,7 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 
 Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Native OpenCode models receive JSON Schema directly for structured nodes; command models receive the schema in their prompt and must return JSON. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
 
-Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores checkpoints in SQLite; custom graphs can provide any persistent LangGraph checkpointer.
+Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer.
 
 The F8 viewer opens on the semantic plan tree. Press `G` for compiled topology, `2` for node executions, `3` for output, and `T` for raw state. Navigation hints live in panel headers.
 

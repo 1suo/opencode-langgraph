@@ -4,8 +4,8 @@ import path from "node:path";
 import { Annotation, END, START, StateGraph, interrupt } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { RunnableConfig } from "@langchain/core/runnables";
-import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { agentNode } from "../agent-node.js";
+import { DurableFileSaver } from "../durable-checkpointer.js";
 import { structuredAgentNode } from "../structured-agent-node.js";
 import type { ConnectorGraph, GraphProgressSnapshot } from "../types.js";
 import { budgetExceeded, implementationOrder, mergeAnalysis, selectActiveNode } from "./plan.js";
@@ -20,16 +20,16 @@ const ProgressiveState = Annotation.Root({
   humanQuestion: Annotation<string>, humanAnswer: Annotation<string>, implementation: Annotation<string>, verification: Annotation<ProgressiveLodState["verification"]>, result: Annotation<string>,
 });
 
-const durableSavers = new Map<string, SqliteSaver>();
-export function defaultSqliteCheckpointer(): SqliteSaver {
+const durableSavers = new Map<string, DurableFileSaver>();
+export function defaultDurableCheckpointer(): DurableFileSaver {
   const stateBase = process.env.OPENCODE_LANGGRAPH_STATE_HOME || path.join(os.homedir(), ".local", "state");
   const directory = path.join(stateBase, "opencode-langgraph");
   fs.mkdirSync(directory, { recursive: true });
-  const file = path.join(directory, "checkpoints.sqlite");
-  const existing = durableSavers.get(file);
+  const checkpointDirectory = path.join(directory, "checkpoints");
+  const existing = durableSavers.get(checkpointDirectory);
   if (existing) return existing;
-  const saver = SqliteSaver.fromConnString(file);
-  durableSavers.set(file, saver);
+  const saver = new DurableFileSaver(checkpointDirectory);
+  durableSavers.set(checkpointDirectory, saver);
   return saver;
 }
 
@@ -148,7 +148,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addConditionalEdges("verify", (state: ProgressiveLodState) => state.verification?.passed ? "finish" : state.verification?.architecturalMismatch && state.callsUsed < state.budget.calls - state.budget.reservedCalls ? "reopen" : state.verification?.repairable && state.repairAttempts < state.budget.repairs && state.callsUsed < state.budget.calls ? "repair" : "finish", { finish: "finish", reopen: "reopen", repair: "repair" })
     .addEdge("reopen", "analyze").addEdge("repair", "verify").addEdge("finish", END);
   return {
-    graph: builder.compile({ checkpointer: options.checkpointer ?? defaultSqliteCheckpointer() }),
+    graph: builder.compile({ checkpointer: options.checkpointer ?? defaultDurableCheckpointer() }),
     initial: ({ task, directory, worktree, runId }) => ({ runId, originalTask: task, directory, worktree, phase: "classifying", lods: DEFAULT_LODS, budget: SCOPE_BUDGETS.unknown, plan: [], evidence: [], constraints: [], discoveries: [], callsUsed: 0, nextId: 1, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "" }),
     result: (state) => state.result,
     progress,

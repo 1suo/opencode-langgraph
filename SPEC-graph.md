@@ -158,10 +158,10 @@ Two or three calls are reserved for implementation, verification, and repair. Pl
 
 ## 9. Persistence, concurrency, and resume
 
-The built-in graph uses a SQLite LangGraph checkpointer at:
+The built-in graph uses an atomic, dependency-free, per-thread file checkpointer under:
 
 ```text
-$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints.sqlite
+$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints/
 ```
 
 When the environment variable is absent, the base is `~/.local/state`. Run metadata and semantic event history live beside the database.
@@ -177,7 +177,7 @@ The production surface is:
 ```ts
 progressiveLodGraph(options)
 structuredAgentNode(options)
-defaultSqliteCheckpointer()
+defaultDurableCheckpointer()
 defineGraph({ graph, initial, result, progress? })
 ```
 
@@ -218,7 +218,7 @@ A release is production-ready when:
 1. zero-config read-only and change requests both complete with inherited OpenCode models;
 2. schema-invalid decisions fail without mutating plan state;
 3. deterministic merge, common-refinement acceptance, stable IDs, selection, cycles, and budget exits are unit tested;
-4. SQLite checkpoints resume after process reconstruction;
+4. durable checkpoints resume after process reconstruction;
 5. concurrent change runs serialize while read-only runs do not wait;
 6. interrupt releases the lease and the next user message resumes the same run;
 7. verification can pass, repair, reopen, or terminate explicitly within budget;

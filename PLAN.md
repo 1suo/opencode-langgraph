@@ -14,7 +14,7 @@ The OpenCode root agent calls `langgraph_run` only when graph orchestration adds
 
 External CLIs use the command model backend: prompt on stdin, answer on stdout, logs on stderr, graph worktree as cwd, and abort propagation.
 
-LangGraph `interrupt()` pauses the graph in the SQLite checkpointer. The next root user message resumes the same run; `langgraph_resume` also permits explicit `Command.resume` control.
+LangGraph `interrupt()` pauses the graph in an atomic per-thread durable checkpointer. The next root user message resumes the same run; `langgraph_resume` also permits explicit `Command.resume` control.
 
 ## Configuration
 

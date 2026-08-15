@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, isInterrupted } from "@langchain/langgraph";
-import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
@@ -14,6 +13,7 @@ import type { ConnectorDefinition } from "../src/core/types.js";
 import { mergeAnalysis } from "../src/core/progressive-lod/plan.js";
 import { DEFAULT_LODS, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
 import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
+import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
 
 function graph(terminates = true) {
@@ -201,21 +201,18 @@ describe("worktree queue", () => {
 });
 
 describe("durable checkpoints", () => {
-  it("resumes an interrupt through a separately opened SQLite saver", async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-sqlite-"));
-    const file = path.join(directory, "checkpoints.sqlite");
+  it("resumes an interrupt through a separately opened durable saver", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-checkpoints-"));
     const State = Annotation.Root({ answer: Annotation<string> });
-    const compile = (saver: SqliteSaver) => new StateGraph(State)
+    const compile = (saver: DurableFileSaver) => new StateGraph(State)
       .addNode("ask", () => ({ answer: interrupt("question") as string }))
       .addEdge(START, "ask").addEdge("ask", END).compile({ checkpointer: saver });
-    const firstSaver = SqliteSaver.fromConnString(file);
+    const firstSaver = new DurableFileSaver(directory);
     const first = await compile(firstSaver).invoke({ answer: "" }, { configurable: { thread_id: "durable" } });
     expect(isInterrupted(first)).toBe(true);
-    firstSaver.db.close();
-    const secondSaver = SqliteSaver.fromConnString(file);
+    const secondSaver = new DurableFileSaver(directory);
     const resumed = await compile(secondSaver).invoke(new Command({ resume: "yes" }), { configurable: { thread_id: "durable" } });
     expect(resumed.answer).toBe("yes");
-    secondSaver.db.close();
   });
 });
 
