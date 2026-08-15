@@ -128,16 +128,6 @@ function mermaidId(value: string): string {
 }
 
 function renderSource(events: PluginRunEvent[], nodes: PluginRunEvent[], activeGlyph: string): string {
-  const canonical = events.findLast((event) => event.mermaid)?.mermaid;
-  if (canonical) {
-    const lines = canonical.trim().replace(/;\s*$/gm, "").replaceAll("&nbsp;", " ").split("\n");
-    const declarations = nodes.map((event) => {
-      const name = event.node === "__start__" ? "START" : event.node === "__end__" ? "END" : event.node.replaceAll("_", " ");
-      return `  ${event.node}["${`${status(event, activeGlyph)} ${name}`.replaceAll('"', "'")}"]`;
-    });
-    lines.splice(1, 0, ...declarations);
-    return lines.join("\n");
-  }
   const topology = events.findLast((event) => event.topology)?.topology;
   if (!topology) return "";
   const lines = ["graph TD"];

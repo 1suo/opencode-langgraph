@@ -381,18 +381,18 @@ describe("OpenCode graph viewer", () => {
     }
   });
 
-  it("renders cyclic graphs with beautiful-mermaid", () => {
+  it("renders cyclic topology without parsing canonical Mermaid", () => {
     const base = { at: "now", runId: "run", rootSessionId: "root", graph: "default", status: "pending", agent: "—", model: "—" };
     const topology = { nodes: ["start", "work", "retry", "end"], edges: [
       { source: "start", target: "work" }, { source: "work", target: "retry" },
       { source: "retry", target: "work" }, { source: "work", target: "end" },
     ] };
-    const mermaid = "graph TD;\n\tstart --> work;\n\twork -. &nbsp;retry&nbsp; .-> retry;\n\tretry --> work;\n\twork --> end;";
+    const mermaid = "graph TD;\n\tcanonical_only --> ignored;";
     const layout = renderEventGraph([{ ...base, node: "start", topology, mermaid }]);
     expect(layout.canvas).toContain("start");
     expect(layout.canvas).toContain("work");
     expect(layout.canvas).toContain("retry");
-    expect(layout.canvas).toContain("┆");
+    expect(layout.canvas).not.toContain("canonical only");
     expect(layout.width).toBeGreaterThan(0);
     expect(layout.height).toBeGreaterThan(0);
   });
