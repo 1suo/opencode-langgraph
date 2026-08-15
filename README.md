@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.6.tgz --force
+opencode plugin ./opencode-langgraph-0.5.7.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -87,6 +87,8 @@ export default defineOpenCodeLangGraph({
       opencodeAgent: "build",
       systemPrompt: "Complete the graph node accurately.",
       tools: { question: false },
+      inactivityTimeoutMs: 5 * 60_000,
+      maxRuntimeMs: 30 * 60_000,
     },
   },
   graphs: {
@@ -99,6 +101,8 @@ export default defineOpenCodeLangGraph({
   defaultGraph: "default",
 })
 ```
+
+Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Override `inactivityTimeoutMs` and `maxRuntimeMs` per agent when a graph needs different limits.
 
 `model: "inherit"` uses the parent OpenCode message's model. Explicit OpenCode models use `provider/model`. Command models are also supported through `commandModel(...)`.
 

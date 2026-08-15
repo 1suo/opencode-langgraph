@@ -48,6 +48,17 @@ describe("typed graph validation", () => {
     expect((await validateConnector(definition)).map((item) => item.code)).toEqual(expect.arrayContaining(["REFERENCE", "GRAPH"]));
   });
 
+  it("rejects non-positive agent timeout settings", async () => {
+    const definition: ConnectorDefinition = {
+      version: 1,
+      models: { current: { backend: "opencode", model: "inherit" } },
+      agents: { worker: { model: "current", systemPrompt: "work", tools: { question: false }, inactivityTimeoutMs: 0, maxRuntimeMs: -1 } },
+      graphs: { default: { graph: graph(), initial: () => ({ result: "" }) } },
+      defaultGraph: "default",
+    };
+    expect((await validateConnector(definition)).map((item) => item.path)).toEqual(expect.arrayContaining(["agents.worker.inactivityTimeoutMs", "agents.worker.maxRuntimeMs"]));
+  });
+
   it("uses the production progressive-LOD workflow as the zero-config preset", async () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-config-"));
     expect((await loadConnectorDefinition(project)).defaultGraph).toBe("progressive-lod");
@@ -116,6 +127,45 @@ describe("OpenCode child-session runtime", () => {
     await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" } })).resolves.toMatchObject({ structured: { decision: "go" } });
     expect(prompt.body.format).toBeUndefined();
     expect(prompt.body.parts[0].text).toContain("Return only a JSON value matching this JSON Schema");
+  });
+
+  it("keeps a child session alive while tool activity advances", async () => {
+    let polls = 0;
+    let aborted = false;
+    const client = { session: {
+      create: async () => ({ data: { id: "child" } }),
+      promptAsync: async () => ({ data: undefined }),
+      status: async () => ({ data: polls < 4 ? { child: { type: "busy" } } : {} }),
+      messages: async () => ({ data: polls++ < 4
+        ? [{ info: { id: `assistant-${polls}`, role: "assistant" }, parts: [{ id: `reasoning-${polls}`, type: "reasoning", text: `step ${polls}` }] }]
+        : [{ info: { id: "assistant-final", role: "assistant" }, parts: [{ id: "text-final", type: "text", text: "done" }] }] }),
+      abort: async () => { aborted = true; return { data: true }; },
+    } };
+    const definition: ConnectorDefinition = {
+      version: 1, models: { current: { backend: "opencode", model: "inherit" } },
+      agents: { worker: { model: "current", systemPrompt: "work", tools: { question: false }, inactivityTimeoutMs: 25, maxRuntimeMs: 500 } }, graphs: {}, defaultGraph: "default",
+    };
+    const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+    await expect(runtime.call({ agent: "worker", node: "work", prompt: "work", state: {} })).resolves.toMatchObject({ text: "done" });
+    expect(polls).toBeGreaterThan(4);
+    expect(aborted).toBe(false);
+  });
+
+  it("aborts a child session only after genuine inactivity", async () => {
+    let aborted = false;
+    const client = { session: {
+      create: async () => ({ data: { id: "child" } }), promptAsync: async () => ({ data: undefined }),
+      status: async () => ({ data: { child: { type: "busy" } } }),
+      messages: async () => ({ data: [{ info: { id: "assistant", role: "assistant" }, parts: [{ id: "reasoning", type: "reasoning", text: "unchanged" }] }] }),
+      abort: async () => { aborted = true; return { data: true }; },
+    } };
+    const definition: ConnectorDefinition = {
+      version: 1, models: { current: { backend: "opencode", model: "inherit" } },
+      agents: { worker: { model: "current", systemPrompt: "work", tools: { question: false }, inactivityTimeoutMs: 25, maxRuntimeMs: 500 } }, graphs: {}, defaultGraph: "default",
+    };
+    const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+    await expect(runtime.call({ agent: "worker", node: "work", prompt: "work", state: {} })).rejects.toThrow("was inactive for 25ms");
+    expect(aborted).toBe(true);
   });
 });
 

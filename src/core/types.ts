@@ -20,6 +20,8 @@ export interface AgentDefinition {
   opencodeAgent?: string;
   systemPrompt: string;
   tools?: Record<string, boolean>;
+  inactivityTimeoutMs?: number;
+  maxRuntimeMs?: number;
 }
 
 export interface GraphDisplayNode {

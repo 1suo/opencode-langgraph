@@ -20,6 +20,7 @@ The graph is not a general autonomous manager. OpenCode owns chat, models, tools
 8. Human input uses LangGraph `interrupt()`, not a child agent's question tool.
 9. Read-only requests do not acquire a worktree lease. Change workflows are serialized per canonical worktree.
 10. Every loop is bounded by calls, nodes, context cycles, reopen attempts, repairs, and elapsed time.
+11. Agent calls use an activity-resetting inactivity timeout and a separate absolute runtime ceiling; active tool work is not aborted by a short fixed wall clock.
 
 ## 3. Runtime-derived planning levels
 

@@ -34,6 +34,14 @@ function progress(parts: Part[]): string {
   }).join("\n").trim();
 }
 
+function activityFingerprint(messages: Array<{ info: { id?: string; role: string }; parts: Part[] }>): string {
+  return JSON.stringify(messages.map((message) => [message.info.id, message.info.role, message.parts.map((part) => {
+    if (part.type === "text" || part.type === "reasoning") return [part.id, part.type, part.text.length];
+    if (part.type === "tool") return [part.id, part.type, (part.state as Record<string, unknown>).status];
+    return [part.id, part.type];
+  })]));
+}
+
 function toolTraces(parts: Part[]): AgentToolTrace[] {
   const traces: AgentToolTrace[] = [];
   for (const part of parts) {
@@ -118,7 +126,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         } as never,
         throwOnError: true,
       });
-      const output = await this.waitForAnswer(sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`);
+      const output = await this.waitForAnswer(sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000);
       this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId });
       return { ...output, sessionId };
     } catch (error) {
@@ -130,15 +138,23 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string): Promise<Omit<AgentCallResult, "sessionId">> {
-    const deadline = Date.now() + 90_000;
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number): Promise<Omit<AgentCallResult, "sessionId">> {
+    const startedAt = Date.now();
+    let lastActivityAt = startedAt;
+    let lastFingerprint = "";
     let lastProgress = "";
-    while (Date.now() < deadline) {
+    const pollIntervalMs = Math.min(250, Math.max(10, Math.floor(inactivityTimeoutMs / 4)));
+    while (true) {
       if (this.options.signal.aborted) throw this.options.signal.reason ?? new Error("LangGraph run aborted");
       const status = await this.options.plugin.client.session.status({ query: { directory: this.options.directory }, throwOnError: true });
       const current = status.data[sessionId];
+      const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      const fingerprint = activityFingerprint(messages.data);
+      if (fingerprint !== lastFingerprint) {
+        lastFingerprint = fingerprint;
+        lastActivityAt = Date.now();
+      }
       if (!current || current.type === "idle") {
-        const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true });
         const assistant = [...messages.data].reverse().find((message) => message.info.role === "assistant");
         if (assistant?.info.role === "assistant" && assistant.info.error) throw new Error(`OpenCode agent failed: ${JSON.stringify(assistant.info.error)}`);
         const output = assistant ? text(assistant.parts) : "";
@@ -153,9 +169,16 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
           this.options.onEvent?.({ node, status: "active", agent, model, text: preview, sessionId });
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      const now = Date.now();
+      if (now - startedAt >= maxRuntimeMs) {
+        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
+        throw new Error(`OpenCode session ${sessionId} exceeded its ${maxRuntimeMs}ms maximum runtime`);
+      }
+      if (now - lastActivityAt >= inactivityTimeoutMs) {
+        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
+        throw new Error(`OpenCode session ${sessionId} was inactive for ${inactivityTimeoutMs}ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
-    await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
-    throw new Error(`OpenCode session ${sessionId} timed out`);
   }
 }
