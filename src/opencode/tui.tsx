@@ -387,60 +387,8 @@ function showGraphHelp(api: TuiPluginApi): void {
   }));
 }
 
-function useApiEvents(api: TuiPluginApi, rootSessionId: () => string | undefined, fallback: () => PluginRunEvent[], onRoot?: (id: string) => void) {
-  const [events, setEvents] = createSignal<PluginRunEvent[]>(fallback());
-  const refresh = async () => {
-    let root = rootSessionId();
-    let children;
-    if (root) {
-      children = await api.client.session.children({ sessionID: root, directory: projectPath(api) }).catch(() => ({ data: [] }));
-    } else {
-      const sessions = await api.client.session.list({ directory: projectPath(api), roots: true, limit: 200 }).catch(() => ({ data: [] }));
-      const roots = (sessions.data ?? []).sort((left, right) => right.time.updated - left.time.updated);
-      for (const candidate of roots) {
-        const candidateChildren = await api.client.session.children({ sessionID: candidate.id, directory: projectPath(api) }).catch(() => ({ data: [] }));
-        if ((candidateChildren.data ?? []).some((child) => child.title.startsWith("LangGraph · "))) {
-          root = candidate.id;
-          children = candidateChildren;
-          onRoot?.(root);
-          break;
-        }
-      }
-    }
-    if (!root || !children) { setEvents(fallback()); return; }
-    const graphChildren = (children.data ?? []).filter((child) => child.title.startsWith("LangGraph · "));
-    if (!graphChildren.length) { setEvents(fallback()); return; }
-    const statuses = await api.client.session.status({ directory: projectPath(api) }).catch(() => ({ data: {} }));
-    const diskEvents = fallback();
-    const runMetadata = diskEvents.findLast((event) => event.topology || event.mermaid);
-    if (!runMetadata) { setEvents(diskEvents); return; }
-    const currentRun = diskEvents.filter((event) => event.runId === runMetadata.runId);
-    const sessionIds = new Set(currentRun.flatMap((event) => event.sessionId ? [event.sessionId] : []));
-    const currentChildren = graphChildren.filter((child) => sessionIds.has(child.id));
-    const mapped = await Promise.all(currentChildren.map(async (child) => {
-      const parts = child.title.split(" · ");
-      const messages = await api.client.session.messages({ sessionID: child.id, directory: projectPath(api), limit: 20 }).catch(() => ({ data: [] }));
-      const assistant = [...(messages.data ?? [])].reverse().find((message) => message.info.role === "assistant");
-      const output = assistant?.parts.filter((part) => part.type === "text").map((part) => part.text).join("").trim();
-      const statusMap = statuses.data as Record<string, { type: string }> | undefined;
-      const current = statusMap?.[child.id];
-      return { at: new Date(child.time.updated).toISOString(), runId: runMetadata.runId, rootSessionId: root, graph: runMetadata.graph, node: parts[1] ?? child.title, status: current && current.type !== "idle" ? "active" : output ? "completed" : "pending", agent: parts[2] ?? child.agent ?? "agent", model: child.model ? `${child.model.providerID}/${child.model.id}` : "inherit", text: output, sessionId: child.id, mermaid: runMetadata.mermaid, topology: runMetadata.topology } satisfies PluginRunEvent;
-    }));
-    const mappedNodes = new Set(mapped.map((event) => event.node));
-    const merged = currentRun.filter((event) => !mappedNodes.has(event.node));
-    for (const event of mapped) {
-      const stored = currentRun.findLast((candidate) => candidate.node === event.node);
-      merged.push({ ...event, ...stored, status: event.status === "active" ? "active" : stored?.status ?? event.status, text: event.text || stored?.text, mermaid: runMetadata.mermaid, topology: runMetadata.topology });
-    }
-    setEvents(merged);
-  };
-  onMount(() => { void refresh(); const timer = setInterval(() => void refresh(), 500); onCleanup(() => clearInterval(timer)); });
-  return events;
-}
-
 function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
-  const disk = useEvents(() => props.session_id, () => projectPath(props.api), () => stateHome(props.api));
-  const events = useApiEvents(props.api, () => props.session_id, disk);
+  const events = useEvents(() => props.session_id, () => projectPath(props.api), () => stateHome(props.api));
   const nodes = createMemo(() => executions(events()).slice(-6));
   const spinner = useSpinner(events, props.api);
   const theme = () => props.api.theme.current;
@@ -474,9 +422,8 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
 }
 
 function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMessageId?: string }) {
-  const [rootSessionId, setRootSessionId] = createSignal(props.rootSessionId);
-  const disk = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId);
-  const events = useApiEvents(props.api, rootSessionId, disk, setRootSessionId);
+  const [rootSessionId] = createSignal(props.rootSessionId);
+  const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId);
   const spinner = useSpinner(events, props.api);
   const layout = createMemo(() => renderEventGraph(events(), spinner()));
   const planTree = createMemo(() => renderPlanTree(events()));
