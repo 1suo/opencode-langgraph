@@ -105,6 +105,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     });
     this.options.signal.addEventListener("abort", abort, { once: true });
     try {
+      const schemaInstruction = input.schema ? `\n\nReturn only a JSON value matching this JSON Schema. Do not use Markdown fences:\n${JSON.stringify(input.schema)}` : "";
       await this.options.plugin.client.session.promptAsync({
         path: { id: sessionId },
         query: { directory: this.options.directory },
@@ -113,8 +114,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
           model: selected,
           system: agent.systemPrompt,
           tools: agent.tools,
-          format: input.schema ? { type: "json_schema", schema: input.schema, retryCount: input.retryCount ?? 2 } : undefined,
-          parts: [{ type: "text", text: input.prompt }],
+          parts: [{ type: "text", text: `${input.prompt}${schemaInstruction}` }],
         } as never,
         throwOnError: true,
       });

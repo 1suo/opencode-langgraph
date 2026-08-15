@@ -102,7 +102,7 @@ describe("OpenCode child-session runtime", () => {
     await expect(runtime.call({ agent: "worker", node: "work", prompt: "task", state: {} })).resolves.toMatchObject({ text: "seen: system" });
   });
 
-  it("passes JSON Schema to OpenCode and returns validated structured data", async () => {
+  it("passes JSON Schema as a portable OpenCode prompt contract and accepts structured data", async () => {
     let prompt: any;
     const client = { session: {
       create: async () => ({ data: { id: "child" } }),
@@ -114,7 +114,8 @@ describe("OpenCode child-session runtime", () => {
     const definition: ConnectorDefinition = { version: 1, models: { current: { backend: "opencode", model: "inherit" } }, agents: { planner: { model: "current", systemPrompt: "decide", tools: { question: false } } }, graphs: {}, defaultGraph: "default" };
     const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
     await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" } })).resolves.toMatchObject({ structured: { decision: "go" } });
-    expect(prompt.body.format).toMatchObject({ type: "json_schema", retryCount: 2 });
+    expect(prompt.body.format).toBeUndefined();
+    expect(prompt.body.parts[0].text).toContain("Return only a JSON value matching this JSON Schema");
   });
 });
 

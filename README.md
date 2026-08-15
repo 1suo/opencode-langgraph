@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.1.tgz --force
+opencode plugin ./opencode-langgraph-0.5.2.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -113,7 +113,7 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 5. Wrap the compiled graph with `defineGraph({ graph, initial, result })`. `initial` maps an OpenCode message into graph state; `result` maps final state back into the root chat.
 6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`; `langgraph_run` can also specify a graph explicitly.
 
-Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Native OpenCode models receive JSON Schema directly for structured nodes; command models receive the schema in their prompt and must return JSON. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
+Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Structured nodes give OpenCode and command models a JSON Schema output contract, parse native structured values or JSON text, and validate with Zod before state mutation. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
 
 Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer.
 

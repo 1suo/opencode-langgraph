@@ -94,7 +94,7 @@ Three decisions are schema-constrained:
 - analysis: evidence, constraints, candidate refinements, and evaluation;
 - verification: pass/fail, checks, failed leaves, repairability, and architectural mismatch.
 
-OpenCode-backed agents receive native `json_schema` output format with two bounded provider retries. Command-backed agents receive the JSON Schema in the prompt and must return JSON. The connector parses and validates both paths. Invalid output fails the node visibly; it is never partially merged.
+OpenCode-backed and command-backed agents receive the JSON Schema as a portable prompt contract and must return JSON. When a runtime provides a native structured value the connector consumes it directly; otherwise it parses assistant text. Both paths are validated with Zod. Invalid output fails the node visibly; it is never partially merged.
 
 Completed tool traces may record tool, status, title, input, output, error, and metadata. These traces support observability but do not become plan truth without explicit evidence entries.
 
