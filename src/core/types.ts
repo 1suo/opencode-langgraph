@@ -35,6 +35,26 @@ export interface AgentUsage {
   cost: number;
 }
 
+export interface AgentCallLimits {
+  maxTurns?: number;
+  maxInputTokens?: number;
+  maxCacheReadTokens?: number;
+  maxContextTokens?: number;
+  maxCost?: number;
+}
+
+export interface AgentSessionDirective {
+  strategy: "fresh" | "continue" | "fork";
+  sessionId?: string;
+}
+
+export interface AgentBudgetStop {
+  kind: "budget";
+  metric: "turns" | "input" | "cacheRead" | "context" | "cost" | "calls" | "minutes";
+  used: number;
+  limit: number;
+}
+
 export interface GraphDisplayNode {
   label?: string;
   phase?: string;
@@ -61,6 +81,18 @@ export interface ConnectorDefinition {
 export interface ConnectorPresetConfig {
   version: 1;
   preset: "progressive-lod";
+  options?: ProgressiveLodPresetOptions;
+}
+
+export type ProgressivePresetRole = "classifier" | "scout" | "decider" | "answer" | "implementer" | "verifier" | "repair";
+export interface ProgressivePresetBudget {
+  calls?: number; nodes?: number; contextCyclesPerNode?: number; reopens?: number; repairs?: number; minutes?: number;
+  maxTurns?: number; maxInputTokens?: number; maxCacheReadTokens?: number; maxCost?: number;
+}
+export interface ProgressiveLodPresetOptions {
+  models?: Partial<Record<ProgressivePresetRole, "inherit" | `${string}/${string}`>>;
+  roleLimits?: Partial<Record<Exclude<ProgressivePresetRole, "answer">, AgentCallLimits>>;
+  budgets?: Partial<Record<"local" | "subsystem" | "architectural" | "unknown", ProgressivePresetBudget>>;
 }
 
 export type ConnectorConfig = ConnectorDefinition | ConnectorPresetConfig;
@@ -73,6 +105,8 @@ export interface AgentCall {
   schema?: Record<string, unknown>;
   schemaName?: string;
   retryCount?: number;
+  session?: AgentSessionDirective;
+  limits?: AgentCallLimits;
 }
 
 export interface AgentCallResult {
@@ -81,6 +115,7 @@ export interface AgentCallResult {
   structured?: unknown;
   tools?: AgentToolTrace[];
   usage?: AgentUsage;
+  budgetStop?: AgentBudgetStop;
 }
 
 export interface AgentToolTrace {
@@ -99,7 +134,7 @@ export interface GraphProgressNode {
   title: string;
   level: string;
   depth: number;
-  status: "pending" | "active" | "ready" | "implementing" | "verified" | "failed" | "removed";
+  status: "pending" | "active" | "expanded" | "ready" | "implementing" | "implemented" | "verified" | "failed" | "removed";
   dependencies?: string[];
   evidence?: number;
   confidence?: number;

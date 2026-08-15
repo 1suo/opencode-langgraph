@@ -205,7 +205,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
       input.metadata?.({ title: `LangGraph · ${event.node}`, metadata: { runId, graph: graphName, ...event } });
     },
   });
-  const saved: StoredRun = { runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, status: "running" };
+  const saved: StoredRun = { checkpointVersion: graphName === "progressive-lod" ? 2 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, status: "running" };
   writeStoredRun(saved);
   let lease: WorktreeLease | undefined;
   const acquire = async () => {
@@ -221,7 +221,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
   const initialState = configured.initial({ task: input.task, directory: input.directory, worktree: input.worktree, runId });
   emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__start__", status: "active", agent: "langgraph", model: "langgraph", state: initialState, mermaid, topology, progress: configured.progress?.(initialState) });
   try {
-    const result = await configured.graph.invoke(initialState, { configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
+    const result = await configured.graph.invoke(initialState, { recursionLimit: 512, configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const requests = result.__interrupt__.map((item) => item.value);
@@ -254,6 +254,7 @@ async function executeResume(
   signal = new AbortController().signal,
   ask?: ExecuteGraphInput["ask"],
 ): Promise<GraphExecution> {
+  if (saved.graph === "progressive-lod" && saved.checkpointVersion !== 2) throw new Error("This interrupted progressive-lod run uses the pre-0.6 checkpoint schema and cannot be resumed. Start a new message to create a clean 0.6 run.");
   const definition = await loadConnectorDefinition(saved.worktree);
   assertValidConnector(await validateConnector(definition));
   const configured = definition.graphs[saved.graph];
@@ -273,7 +274,7 @@ async function executeResume(
   const acquire = async () => { if (!lease) lease = await acquireWorktree(saved.worktree, signal); };
   writeStoredRun({ ...saved, status: "running" });
   try {
-    const result = await configured.graph.invoke(new Command({ resume: answer }), { configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
+    const result = await configured.graph.invoke(new Command({ resume: answer }), { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const output = JSON.stringify(result.__interrupt__.map((item) => item.value), null, 2);

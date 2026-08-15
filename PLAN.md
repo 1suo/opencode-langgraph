@@ -10,7 +10,7 @@
 
 ## Connection
 
-The OpenCode root agent calls `langgraph_run` only when graph orchestration adds value. Each agent-backed LangGraph node creates a fresh OpenCode child session linked to the root session. The node supplies the configured OpenCode agent, inherited or explicit provider/model, system prompt, tools, and task prompt. The child session's completed assistant text is written into LangGraph state. State is the only cross-node memory, keeping retries and parallel branches reproducible.
+The OpenCode root agent calls `langgraph_run` only when graph orchestration adds value. An agent-backed node creates, continues, or forks an OpenCode child session as explicitly requested by the graph. Typed graph state—not a replayed transcript—is the cross-role contract. The production preset keeps scouting branch-local, makes each detail decision in a fresh tool-free session, isolates implementation leaves, and continues a leaf session only for bounded repair.
 
 External CLIs use the command model backend: prompt on stdin, answer on stdout, logs on stderr, graph worktree as cwd, and abort propagation.
 

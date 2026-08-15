@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
-import type { AgentCall, AgentCallResult, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition } from "../core/types.js";
+import type { AgentBudgetStop, AgentCall, AgentCallLimits, AgentCallResult, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition } from "../core/types.js";
 import { registerPermissionHandler } from "./permissions.js";
 
 export interface OpenCodeRuntimeOptions {
@@ -57,6 +57,20 @@ function sessionUsage(messages: Array<{ info: { id?: string; role: string; finis
   return usage;
 }
 
+function subtractUsage(total: AgentUsage, baseline: AgentUsage): AgentUsage {
+  return {
+    turns: Math.max(0, total.turns - baseline.turns), input: Math.max(0, total.input - baseline.input),
+    output: Math.max(0, total.output - baseline.output), reasoning: Math.max(0, total.reasoning - baseline.reasoning),
+    cacheRead: Math.max(0, total.cacheRead - baseline.cacheRead), cacheWrite: Math.max(0, total.cacheWrite - baseline.cacheWrite),
+    cost: Math.max(0, total.cost - baseline.cost),
+  };
+}
+
+function latestContextTokens(messages: Array<{ info: { role: string; finish?: string; tokens?: { input?: number; cache?: { read?: number } } } }>): number {
+  const latest = [...messages].reverse().find((message) => message.info.role === "assistant" && message.info.finish);
+  return (latest?.info.tokens?.input ?? 0) + (latest?.info.tokens?.cache?.read ?? 0);
+}
+
 function toolTraces(parts: Part[]): AgentToolTrace[] {
   const traces: AgentToolTrace[] = [];
   for (const part of parts) {
@@ -70,6 +84,20 @@ function toolTraces(parts: Part[]): AgentToolTrace[] {
     if (state.status === "error") traces.push({ tool: part.tool, status: "error", input: state.input, error: String(state.error ?? "Tool failed") });
   }
   return traces;
+}
+
+function newToolTraces(messages: Array<{ parts: Part[] }>, baselinePartIds: Set<string>): AgentToolTrace[] {
+  return messages.flatMap((message) => message.parts.filter((part) => !baselinePartIds.has(part.id))).flatMap((part) => toolTraces([part]));
+}
+
+function exceededBudget(usage: AgentUsage, contextTokens: number, limits: AgentCallLimits): AgentBudgetStop | undefined {
+  const checks: Array<[AgentBudgetStop["metric"], number, number | undefined]> = [
+    ["turns", usage.turns, limits.maxTurns], ["input", usage.input, limits.maxInputTokens],
+    ["cacheRead", usage.cacheRead, limits.maxCacheReadTokens], ["context", contextTokens, limits.maxContextTokens],
+    ["cost", usage.cost, limits.maxCost],
+  ];
+  const exceeded = checks.find(([, used, limit]) => limit !== undefined && used >= limit);
+  return exceeded ? { kind: "budget", metric: exceeded[0], used: exceeded[1], limit: exceeded[2]! } : undefined;
 }
 
 function parseCommandStructured(output: string): unknown {
@@ -108,12 +136,28 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
     const selected = model.model === "inherit" ? this.options.parentModel : modelId(model.model);
     if (!selected) throw new Error(`Agent ${input.agent} inherits a model, but the parent OpenCode message did not provide one`);
-    const created = await this.options.plugin.client.session.create({
-      body: { parentID: this.options.parentSessionId, title: `LangGraph · ${input.node} · ${input.agent}` },
-      query: { directory: this.options.directory },
-      throwOnError: true,
-    });
-    const sessionId = created.data.id;
+    let sessionId: string;
+    if (input.session?.strategy === "continue") {
+      if (!input.session.sessionId) throw new Error(`Agent ${input.agent} requested session continuation without a session ID`);
+      sessionId = input.session.sessionId;
+    } else if (input.session?.strategy === "fork") {
+      if (!input.session.sessionId) throw new Error(`Agent ${input.agent} requested session fork without a session ID`);
+      const forked = await this.options.plugin.client.session.fork({ path: { id: input.session.sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      sessionId = forked.data.id;
+    } else {
+      const created = await this.options.plugin.client.session.create({
+        body: { parentID: this.options.parentSessionId, title: `LangGraph · ${input.node} · ${input.agent}` },
+        query: { directory: this.options.directory },
+        throwOnError: true,
+      });
+      sessionId = created.data.id;
+    }
+    const reusingSession = input.session?.strategy === "continue" || input.session?.strategy === "fork";
+    const before = reusingSession
+      ? await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true })
+      : { data: [] as Array<{ info: { id?: string; role: string; finish?: string; cost?: number; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } }; parts: Part[] }> };
+    const baselineUsage = sessionUsage(before.data);
+    const baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
     this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId });
     const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } }); };
     const unregisterPermission = registerPermissionHandler(sessionId, async (permission) => {
@@ -141,7 +185,11 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         } as never,
         throwOnError: true,
       });
-      const output = await this.waitForAnswer(sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000, agent.maxSteps);
+      const output = await this.waitForAnswer(
+        sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`,
+        agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
+        { maxTurns: agent.maxSteps, ...input.limits }, baselineUsage, baselinePartIds,
+      );
       this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: output.usage });
       return { ...output, sessionId };
     } catch (error) {
@@ -153,7 +201,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number, maxSteps?: number): Promise<Omit<AgentCallResult, "sessionId">> {
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, baselineUsage: AgentUsage, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastFingerprint = "";
@@ -165,7 +213,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const status = await this.options.plugin.client.session.status({ query: { directory: this.options.directory }, throwOnError: true });
       const current = status.data[sessionId];
       const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true });
-      const usage = sessionUsage(messages.data);
+      const usage = subtractUsage(sessionUsage(messages.data), baselineUsage);
       const usageFingerprint = JSON.stringify(usage);
       if (usageFingerprint !== lastUsage) {
         lastUsage = usageFingerprint;
@@ -182,7 +230,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         const output = assistant ? text(assistant.parts) : "";
         const structured = assistant?.info.role === "assistant" ? (assistant.info as typeof assistant.info & { structured?: unknown }).structured : undefined;
         if (output || structured !== undefined) {
-          const tools = assistant ? toolTraces(assistant.parts) : [];
+          const tools = newToolTraces(messages.data, baselinePartIds);
           return { text: output || JSON.stringify(structured), ...(structured !== undefined ? { structured } : {}), ...(tools.length ? { tools } : {}), ...(usage.turns ? { usage } : {}) };
         }
         const preview = assistant ? progress(assistant.parts) : "";
@@ -192,9 +240,11 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         }
       }
       const now = Date.now();
-      if (maxSteps !== undefined && usage.turns >= maxSteps) {
+      const budgetStop = exceededBudget(usage, latestContextTokens(messages.data), limits);
+      if (budgetStop) {
         await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
-        throw new Error(`OpenCode session ${sessionId} reached its ${maxSteps}-step maximum before completing`);
+        const tools = newToolTraces(messages.data, baselinePartIds);
+        return { text: "", usage, budgetStop, ...(tools.length ? { tools } : {}) };
       }
       if (now - startedAt >= maxRuntimeMs) {
         await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });

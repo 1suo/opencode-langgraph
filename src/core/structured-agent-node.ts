@@ -25,6 +25,7 @@ export function structuredAgentNode<State extends Record<string, unknown>, Outpu
       schemaName: options.node ?? options.agent,
       retryCount: options.retries ?? 2,
     });
+    if (result.budgetStop) throw new Error(`${options.node ?? options.agent} reached its ${result.budgetStop.metric} budget (${result.budgetStop.used}/${result.budgetStop.limit})`);
     let value = result.structured;
     if (value === undefined) {
       const fenced = result.text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];

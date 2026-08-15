@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { progressiveLodGraph } from "./progressive-lod/graph.js";
-import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, OpenCodeModel } from "./types.js";
+import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, OpenCodeModel, ProgressiveLodPresetOptions, ProgressivePresetRole } from "./types.js";
+import { DEFAULT_ROLE_LIMITS } from "./progressive-lod/types.js";
 
 export const typedConfigFile = path.join(".opencode", "langgraph.ts");
 
@@ -29,29 +30,35 @@ export async function loadConnectorDefinition(repo: string): Promise<ConnectorDe
   const coreEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
   const jiti = createJiti(import.meta.url, { interopDefault: true, alias: { "opencode-langgraph": coreEntry } });
   const config = await jiti.import<ConnectorConfig>(file, { default: true });
-  return "preset" in config ? presetDefinition(config.preset) : config;
+  return "preset" in config ? presetDefinition(config.preset, config.options) : config;
 }
 
-function presetDefinition(preset: ConnectorPresetConfig["preset"]): ConnectorDefinition {
-  if (preset === "progressive-lod") return progressiveLodPresetDefinition();
-  throw new Error(`Unknown LangGraph connector preset: ${String(preset)}. Version 0.5 uses progressive-lod.`);
+function presetDefinition(preset: ConnectorPresetConfig["preset"], options?: ProgressiveLodPresetOptions): ConnectorDefinition {
+  if (preset === "progressive-lod") return progressiveLodPresetDefinition(options);
+  throw new Error(`Unknown LangGraph connector preset: ${String(preset)}. Version 0.6 uses progressive-lod.`);
 }
 
-function progressiveLodPresetDefinition(): ConnectorDefinition {
+function progressiveLodPresetDefinition(options: ProgressiveLodPresetOptions = {}): ConnectorDefinition {
+  const defaults: Record<ProgressivePresetRole, "inherit" | `${string}/${string}`> = {
+    classifier: "deepseek/deepseek-v4-flash", scout: "deepseek/deepseek-v4-flash", decider: "inherit", answer: "deepseek/deepseek-v4-flash",
+    implementer: "inherit", verifier: "inherit", repair: "inherit",
+  };
+  const modelName = (role: ProgressivePresetRole) => `${role}-model`;
+  const models = Object.fromEntries((Object.keys(defaults) as ProgressivePresetRole[]).map((role) => [modelName(role), opencodeModel({ model: options.models?.[role] ?? defaults[role] })]));
+  const turns = (role: Exclude<ProgressivePresetRole, "answer">) => options.roleLimits?.[role]?.maxTurns ?? DEFAULT_ROLE_LIMITS[role].maxTurns;
   return {
     version: 1,
-    models: {
-      current: opencodeModel({ model: "inherit" }),
-      flash: opencodeModel({ model: "deepseek/deepseek-v4-flash" }),
-    },
+    models,
     agents: {
-      classifier: { model: "flash", opencodeAgent: "plan", systemPrompt: "Classify the supplied request directly. Do not inspect the repository or call tools. Produce exact structured output.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: 2 },
-      analyst: { model: "current", opencodeAgent: "plan", systemPrompt: "Ground planning claims in supplied evidence and inspect only unresolved repository facts. Produce exact structured output when requested.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 48 },
-      answer: { model: "flash", opencodeAgent: "plan", systemPrompt: "Answer accurately from the request and repository evidence when needed.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
-      verifier: { model: "current", opencodeAgent: "plan", systemPrompt: "Verify the actual worktree against the task and plan. Do not edit files. Produce exact structured output.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
-      implementer: { model: "current", opencodeAgent: "build", systemPrompt: "Implement the complete bounded plan in the current worktree and verify your edits. Preserve unrelated user work.", tools: { question: false }, maxSteps: 64 },
+      classifier: { model: modelName("classifier"), opencodeAgent: "plan", systemPrompt: "Classify the supplied request directly. Do not inspect the repository or call tools. Produce exact structured output.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: turns("classifier") },
+      scout: { model: modelName("scout"), opencodeAgent: "plan", systemPrompt: "Inspect only the active branch and return concise repository evidence. Do not design, decompose, or edit.", tools: { read: true, grep: true, glob: true, bash: true, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: turns("scout") },
+      decider: { model: modelName("decider"), opencodeAgent: "plan", systemPrompt: "Make one planning disposition from supplied typed evidence. Do not inspect the repository or call tools.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: turns("decider") },
+      answer: { model: modelName("answer"), opencodeAgent: "plan", systemPrompt: "Answer accurately from the request and repository evidence when needed.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
+      verifier: { model: modelName("verifier"), opencodeAgent: "plan", systemPrompt: "Verify the actual worktree once against all implemented leaf contracts. Do not edit files. Produce exact structured output.", tools: { read: true, grep: true, glob: true, bash: true, edit: false, write: false, question: false, task: false }, maxSteps: turns("verifier") },
+      implementer: { model: modelName("implementer"), opencodeAgent: "build", systemPrompt: "Implement exactly one cohesive leaf and verify its focused acceptance criteria. Preserve unrelated user work.", tools: { question: false, task: false }, maxSteps: turns("implementer") },
+      repair: { model: modelName("repair"), opencodeAgent: "build", systemPrompt: "Repair exactly one previously implemented leaf from verifier findings and rerun its focused checks.", tools: { question: false, task: false }, maxSteps: turns("repair") },
     },
-    graphs: { "progressive-lod": progressiveLodGraph({ classifierAgent: "classifier", analystAgent: "analyst", answerAgent: "answer", verifierAgent: "verifier", implementerAgent: "implementer" }) },
+    graphs: { "progressive-lod": progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", answerAgent: "answer", verifierAgent: "verifier", implementerAgent: "implementer", repairAgent: "repair", roleLimits: options.roleLimits, budgets: options.budgets }) },
     defaultGraph: "progressive-lod",
   };
 }

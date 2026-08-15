@@ -220,7 +220,7 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
   if (!snapshot?.nodes.length) return "";
   const byParent = new Map<string | undefined, typeof snapshot.nodes>();
   for (const node of snapshot.nodes) byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]);
-  const glyph = (value: string) => value === "verified" ? "✓" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
+  const glyph = (value: string) => value === "verified" ? "✓" : value === "implemented" ? "■" : value === "expanded" ? "◇" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
   const usage = snapshot.usage;
   const calls = snapshot.callsUsed !== undefined && snapshot.callBudget !== undefined ? Math.min(1, snapshot.callsUsed / snapshot.callBudget) : undefined;
   const callBar = calls === undefined ? "" : `${"█".repeat(Math.round(calls * 10))}${"░".repeat(10 - Math.round(calls * 10))}`;

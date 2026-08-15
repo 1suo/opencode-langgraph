@@ -1,81 +1,44 @@
 # Progressive LOD graph — production specification
 
-Status: normative for `opencode-langgraph` 0.5.x.
+Status: normative for `opencode-langgraph` 0.6.x.
 
-## 1. Purpose
+## Purpose and ownership
 
-The default graph turns an OpenCode user message into a repository-grounded result. It spends inference according to task scope, progressively refines only the active plan branch, makes state mutations deterministic, implements bounded leaves in dependency order, and verifies the actual result.
+The default graph turns one OpenCode user message into a repository-grounded, verified result. OpenCode owns chat, models, tools, permissions, and child sessions. LangGraph owns typed orchestration state, deterministic routing, checkpoints, budgets, and interrupts.
 
-The graph is not a general autonomous manager. OpenCode owns chat, models, tools, permissions, and child sessions. LangGraph owns orchestration, checkpoints, interrupts, and resume. The connector maps between them.
+The graph is a controller, not another general agent. It gives each role one task type and transfers only the typed context that role needs.
 
-## 2. Invariants
+## Invariants
 
-1. `originalTask` is immutable.
-2. Model output never mutates plan state directly. It crosses a JSON Schema boundary and is validated with Zod; deterministic code applies it.
-3. Repository claims cite evidence. Inferences are labeled and carry confidence.
-4. Only the active branch is projected into an analysis prompt. Global constraints and relevant dependencies remain visible.
-5. Stable plan IDs are assigned by the merge reducer, never by a model.
-6. Dependency and hierarchy cycles are rejected.
-7. A node is implementable only when it describes a bounded file/symbol-sized change and a verification target.
-8. Human input uses LangGraph `interrupt()`, not a child agent's question tool.
-9. Read-only requests do not acquire a worktree lease. Change workflows are serialized per canonical worktree.
-10. Every loop is bounded by calls, nodes, context cycles, reopen attempts, repairs, and elapsed time.
-11. Agent calls use an activity-resetting inactivity timeout and a separate absolute runtime ceiling; active tool work is not aborted by a short fixed wall clock.
-12. Analysis prompts contain the active branch, its ancestry and dependencies, relevant evidence and decisions, and only a compact index of unrelated nodes.
-13. Refinement merges are atomic. An unresolved or capacity-truncated branch never proceeds to implementation.
-14. Verifier failure targets are validated stable plan IDs. Invalid or absent IDs fall back to the failed implementation set; recovery never invokes analysis without an active node.
-15. Child sessions receive one explicit task type: classification, planning refinement, implementation, verification, or bounded repair. Planning and verification are read-only and cannot silently become implementation.
-16. An implementer that reports an explicit blocker cannot enter repair on the same incomplete leaf. The controller reopens its parent branch so omitted prerequisites become part of a new bounded plan.
+1. `originalTask` is immutable and every new root message creates a separate run.
+2. Model output crosses a Zod-validated JSON Schema boundary before deterministic reducers can change plan state.
+3. Repository claims have cited evidence; inference is labeled and confidence-bounded.
+4. Planning levels are derived from the task. Depth is structural metadata, not a hardcoded LOD taxonomy.
+5. `split` creates unresolved concerns only. It cannot manufacture implementation-ready leaves.
+6. `ready` applies to exactly one active concern and requires targets, acceptance criteria, and verification commands.
+7. Stable IDs, dependency resolution, node selection, cycle checks, and status transitions are controller code—not model judgment.
+8. Implementation starts only after every live planning concern is resolved, then runs one cohesive leaf per child session in dependency order.
+9. Verification is one independent aggregate pass after all leaves. Repair continues only the failed leaf session; an omitted prerequisite or architectural mismatch reopens planning.
+10. Human and budget decisions use LangGraph `interrupt()`. No hidden timeout or turn extension can continue spending.
+11. Read-only requests do not acquire a worktree lease. Change runs serialize per canonical worktree.
+12. Checkpoint schema 2 is a clean 0.6 boundary. Pre-0.6 interrupted progressive runs fail with an explicit restart message; they are not guessed or migrated.
 
-## 3. Runtime-derived planning levels
+## Role separation and context
 
-The graph does not define, configure, or count toward a fixed hierarchy of semantic levels. Classification derives a task-specific planning frame, and each analysis step names the next useful decision boundary from the task and repository evidence. Tree `depth` is structural metadata only. It neither names a level nor determines when implementation begins.
+| Role | Default model | Tools | Session rule | Output |
+|---|---|---|---|---|
+| classifier | DeepSeek V4 Flash | none | fresh | route and task profile |
+| scout | DeepSeek V4 Flash | read-only repository tools | fresh root; continue refinement; fork split | cited facts only |
+| decider | inherited | none | fresh per decision; continue only after a budget pause | one disposition |
+| implementer | inherited | build tools, no subagents | fresh per leaf | files and focused checks |
+| verifier | inherited | read-only repository tools | one fresh aggregate pass | leaf-specific verdicts |
+| repair | inherited | build tools, no subagents | continue failed leaf | bounded repair artifacts |
 
-For example, one task might happen to decompose as:
+The scout receives the active node, its ancestry, global constraints, relevant evidence, concise decisions, and compact dependency results. Unrelated nodes are title/status indexes only. A dependency never imports an unrelated sibling's full description or transcript.
 
-| LOD | Name | Required decision |
-|---:|---|---|
-| 0 | intent | Outcome, scope, direction, and definition of done |
-| 1 | architecture | Ownership boundaries and system contracts |
-| 2 | components | Components, interfaces, dependencies, and test surfaces |
-| 3 | changes | File/symbol-sized edits with verification |
+OpenCode transcripts remain in their child sessions. Durable graph state keeps normalized facts, constraints, contracts, summaries, IDs, usage totals, and child-session references. Evidence is fingerprint-deduplicated. Tool transcripts and candidate trees are not copied between roles.
 
-That table is illustrative, not architecture or defaults. A typo may produce an implementable leaf immediately; a cross-system change may use different names, branch unevenly, or descend beyond four levels. Refinement stops when a leaf is grounded, bounded to file/symbol-sized work, and has a verification target, or when a budget is exhausted.
-
-## 4. State contract
-
-The checkpointed state remains compact and JSON-serializable:
-
-```ts
-interface ProgressiveLodState {
-  runId: string
-  originalTask: string
-  directory: string
-  worktree: string
-  phase: string
-  profile?: TaskProfile
-  budget: Budget
-  plan: PlanNode[]
-  activeNodeId?: string
-  evidence: Evidence[]
-  constraints: Constraint[]
-  analysis?: AnalysisOutput
-  discoveries: string[]
-  decisions: Record<string, string>
-  usage: AgentUsage
-  callsUsed: number
-  nextId: number
-  startedAt: number
-  repairAttempts: number
-  humanQuestion: string
-  humanAnswer: string
-  implementation: string
-  verification?: VerificationOutput
-  result: string
-}
-```
-
-`PlanNode` is a flat durable representation of a tree:
+## Plan state
 
 ```ts
 interface PlanNode {
@@ -85,160 +48,104 @@ interface PlanNode {
   description: string
   level: string
   depth: number
-  status: "pending" | "active" | "ready" | "implementing" |
-          "verified" | "failed" | "removed"
+  status: "pending" | "active" | "expanded" | "ready" |
+          "implementing" | "implemented" | "verified" |
+          "failed" | "removed"
   dependencies: string[]
-  files: string[]
   evidenceIds: string[]
   confidence: number
   contextCycles: number
   reopenCount: number
+  leaf?: {
+    objective: string
+    targets: string[]
+    acceptanceCriteria: string[]
+    verification: string[]
+  }
+  scoutSessionId?: string
+  scoutSessionMode?: "fresh" | "continue" | "fork"
 }
 ```
 
-Evidence has a stable ID, claim, source, kind, and confidence. Constraints have a stable ID, text, and source. Decisions retain concise analysis summaries by plan-node ID. Usage aggregates model turns, token categories, and cost. Large tool transcripts stay in OpenCode child sessions or artifacts; state keeps citations and summaries.
+The full state is versioned and JSON-serializable. It also stores task profile, budgets, evidence, constraints, concise decisions, per-role usage, implementation session IDs and results, aggregate verification, repair/reopen counters, pending interrupt data, and final result.
 
-## 5. Structured inference boundary
+## Planning reducer
 
-Three decisions are schema-constrained:
+The tool-free decider chooses exactly one disposition:
 
-- classification: route, scope, summary, task-specific planning frame, read-only flag, risks;
-- analysis: evidence, constraints, candidate refinements with task-specific level names, and evaluation;
-- verification: pass/fail, checks, failed leaves, repairability, and architectural mismatch.
+- `ready`: one bounded leaf and no children;
+- `refine`: exactly one pending child, continuing scout context;
+- `split`: at least two pending children, each forking scout context;
+- `remove`: invalidate the concern;
+- `reopen_parent`: discard stale descendants and revisit their parent;
+- `interrupt`: ask one consequential question repository inspection cannot settle.
 
-OpenCode-backed and command-backed agents receive the JSON Schema as a portable prompt contract and must return JSON. When a runtime provides a native structured value the connector consumes it directly; otherwise it parses assistant text. Both paths are validated with Zod. Invalid output fails the node visibly; it is never partially merged.
+Alternatives are at most three short option summaries. They are not fully expanded competing plans. The reducer assigns IDs, resolves sibling dependency keys, attaches evidence, enforces capacity atomically, rejects cycles, and activates the shallowest dependency-ready pending node.
 
-Completed tool traces may record tool, status, title, input, output, error, and metadata. These traces support observability but do not become plan truth without explicit evidence entries.
-
-## 6. Candidate evaluation and merge
-
-Analysis returns one candidate when the next step is mechanical and multiple candidates when a material choice exists. Candidate count is capped by scope.
-
-The evaluator reports a selected candidate, confidence, missing-context state, and any irreducible human question. The reducer then:
-
-1. accepts refinements common to all candidates when present;
-2. otherwise accepts the selected candidate;
-3. assigns sequential stable IDs;
-4. resolves candidate-local dependency keys to stable IDs and filters unknown references;
-5. attaches newly collected evidence;
-6. atomically enforces the live-node budget and cycle checks;
-7. selects the next dependency-ready, shallowest pending node.
-
-Supported dispositions are:
-
-- `refine`: replace the active planning concern with a more detailed child chosen for this task;
-- `split`: create multiple children for independent or dependent work;
-- `remove`: invalidate work no longer needed;
-- `reopen_parent`: return to a higher-level decision after contradictory evidence.
-
-More-context requests may repeat analysis only up to the per-node limit. A human interrupt is reserved for consequential ambiguity that repository inspection cannot settle.
-
-## 7. Execution flow
+## Execution flow
 
 ```text
-START
-  → classify
-    ├─ answer → read-only agent → END
-    └─ change → acquire worktree lease
-         → initialize root plan
-         → analyze active projection
-         → deterministic merge/evaluate
-           ├─ more context → analyze
-           ├─ human decision → interrupt → release lease
-           │                    next user message → reacquire → analyze
-           ├─ next branch → analyze
-           └─ implementable leaves
-                → implement in topological order
-                → verify actual diff/checks
+classify
+  ├─ answer → END
+  └─ change → acquire lease → initialize root
+       → guard budget
+       → scout active branch
+       → tool-free decision
+       → deterministic merge
+          ├─ next concern → scout
+          ├─ human/budget interrupt → resume or stop
+          └─ all concerns resolved
+               → implement one leaf at a time
+               → one aggregate verifier
                   ├─ pass → END
-                  ├─ bounded repair → verify
-                  ├─ architectural mismatch → reopen → analyze
-                  └─ exhausted/non-repairable → failed result → END
+                  ├─ bounded leaf repair → verify
+                  ├─ architectural mismatch/blocker → reopen planning
+                  └─ exhausted/non-repairable → failed END
 ```
 
-Implementation receives the immutable task, constraints, and all ready leaves in dependency order. Numeric plan ID is the deterministic tie-breaker. Implementation cannot begin while a live branch remains unresolved. Verification uses a separate read-only agent role by default, inspects the actual worktree, and records check evidence. A report without corresponding worktree evidence is not success.
+One implementation leaf contains tightly coupled production code, focused tests, owner documentation, and required bookkeeping. Creating separate orchestration leaves for those parts is invalid unless they are genuinely independent deliverables.
 
-## 8. Adaptive budgets
+## Budgets
 
-| Scope | Calls | Plan nodes | Candidates | Context/node | Reopens | Repairs | Wall time |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| local | 12 | 6 | 2 | 2 | 1 | 1 | 15 min |
-| subsystem | 24 | 12 | 2 | 3 | 2 | 2 | 30 min |
-| architectural / unknown | 40 | 16 | 3 | 3 | 2 | 2 | 60 min |
+| Scope | Calls | Nodes | Context cycles/node | Reopens | Repairs | Turns | Fresh input | Cache reads | Cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| local | 12 | 6 | 2 | 1 | 1 | 24 | 100k | 1m | $0.03 |
+| subsystem | 24 | 12 | 3 | 2 | 2 | 48 | 250k | 3m | $0.08 |
+| architectural/unknown | 40 | 16 | 3 | 2 | 2 | 80 | 500k | 6m | $0.15 |
 
-Two or three calls are reserved for implementation, verification, and repair. Expanded/removed history remains visible but does not consume live-node capacity. A candidate either fits in full or is retried once in consolidated form; it is never partially merged. Closely coupled code, tests, owner documentation, and bookkeeping stay in one implementable leaf rather than becoming orchestration-only leaves. Planning stops before consuming the call reserve, and an unresolved plan ends explicitly without mutating the worktree.
+Every role also has per-call caps for turns, fresh input, cache reads, and live context. The default implementer cap is 32 turns; scout 8; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a cap reached on its final turn. A cap reached while still busy aborts that child call and interrupts the graph with exact usage plus `continue`, `narrow: …`, and `stop` choices.
 
-## 9. Persistence, concurrency, and resume
+The 0.5 failure baseline for the same corrective task was about 86 model turns, 200k fresh input, 10.18m cache-read tokens, and $0.209 without a verified completion. The 0.6 controller must stop or request approval before reaching that envelope. Optimization is accepted only when task quality and core flow remain intact; token reduction alone is not success.
 
-The built-in graph uses an atomic, dependency-free, per-thread file checkpointer under:
-
-```text
-$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints/
-```
-
-When the environment variable is absent, the base is `~/.local/state`. Run metadata and semantic event history live beside the database.
-
-Change workflows use a filesystem FIFO queue keyed by the canonical worktree path. The owner file has a heartbeat; stale owners and tickets are recovered. A lease is released on completion, failure, cancellation, or human interruption. Resumed work reacquires the lease before it can modify the worktree.
-
-Each user message normally creates a new run and is linked by `userMessageId`. If the latest run in that root OpenCode session is interrupted, the next user message is treated as its answer and resumes its checkpoint instead. `/graph-cancel` aborts an active or queued run.
-
-## 10. Public connector API
-
-The production surface is:
+## Configuration
 
 ```ts
-progressiveLodGraph(options)
-structuredAgentNode(options)
-defaultDurableCheckpointer()
-defineGraph({ graph, initial, result, progress? })
+export default defineOpenCodeLangGraph({
+  version: 1,
+  preset: "progressive-lod",
+  options: {
+    models: {
+      scout: "deepseek/deepseek-v4-flash",
+      implementer: "inherit",
+    },
+    roleLimits: {
+      implementer: { maxTurns: 32, maxContextTokens: 96_000 },
+    },
+    budgets: {
+      subsystem: { calls: 24, maxCost: 0.08 },
+    },
+  },
+})
 ```
 
-The zero-config definition and generated config use:
+All options are optional. Model values are `inherit` or `provider/model`. Role limits support turns, fresh input, cache reads, live context, and cost. Scope budgets support calls, nodes, context cycles, reopen/repair counts, time, aggregate turns/tokens/cache, and cost. Arbitrary user-defined LangGraphs remain first-class.
 
-```ts
-{ version: 1, preset: "progressive-lod" }
-```
+## Persistence and UI
 
-The preset routes classification and direct read-only answers to
-`deepseek/deepseek-v4-flash`. Repository planning, independent verification,
-implementation, and repair inherit the parent OpenCode model so high-judgment
-and mutating work keeps the user's selected quality tier.
+Checkpoints live below `$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints/`, or `~/.local/state` by default. Run metadata links every execution to its root session and originating user message. The next root message resumes only an interrupted run; otherwise it creates a new run.
 
-The removed cooling preset and factory have no compatibility alias. Loading the removed preset produces a migration error.
+The prompt legend is `[F7] graph:off|{actual graph name} · [F8] view · [F9] help`. F8 opens the semantic plan tree. Status glyphs distinguish expanded (`◇`), ready (`◆`), active (`▶`), implemented (`■`), verified (`✓`), failed (`×`), and removed (`·`). Navigation hints remain in panel headers.
 
-Custom graphs remain first-class. They may use inherited OpenCode models, explicit `provider/model` selections, or command models such as Codex CLI. Authentication belongs to OpenCode or the command, not this connector.
+## Release acceptance
 
-## 11. TUI contract
-
-The prompt legend is exactly:
-
-```text
-[F7] graph:off|{actual graph name} · [F8] view · [F9] help
-```
-
-F8 opens the semantic plan tree when progress is available. The viewer exposes:
-
-- `1`: plan tree;
-- `G`: focused graph of actual execution states, with older and newer spans collapsed independently around the selection;
-- `2`: node executions;
-- `3`: selected execution output;
-- `T`: selected execution state;
-- arrows or configured navigation keys: select, pan, or scroll;
-- `Tab`: cycle panes; `Esc`/`Q`: return.
-
-Key hints belong in panel headers. There is no detached legend consuming content space. The sidebar shows the current phase, scope, inference budget, active plan node, and recent executions.
-
-## 12. Acceptance criteria
-
-A release is production-ready when:
-
-1. zero-config read-only and change requests both complete with inherited OpenCode models;
-2. schema-invalid decisions fail without mutating plan state;
-3. deterministic merge, common-refinement acceptance, stable IDs, selection, cycles, and budget exits are unit tested;
-4. task-specific planning levels support both immediate implementable leaves and hierarchies deeper than the illustrative four-level example;
-5. durable checkpoints resume after process reconstruction;
-6. concurrent change runs serialize while read-only runs do not wait;
-7. interrupt releases the lease and the next user message resumes the same run;
-8. verification can pass, repair, reopen, or terminate explicitly within budget;
-9. F8 renders plan-first state linked to the originating OpenCode message;
-10. package build, typecheck, tests, npm pack/publish, clean npm install, and a live OpenCode load all succeed.
+A production release requires typecheck and tests; reducer tests for dispositions, dependencies, projections, reopen, and budgets; an end-to-end graph test proving one leaf per implementer and one aggregate verifier; package build/pack; a clean npm install; and a live OpenCode request linked to visible TUI progress. Live usage is compared with the 0.5 baseline and reported without claiming savings that were not measured.

@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.14.tgz --force
+opencode plugin ./opencode-langgraph-0.6.0.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -33,11 +33,11 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
 - `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
 
-Every agent-backed graph node runs in an isolated OpenCode child session. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
+Every agent-backed graph node runs in an OpenCode child session. The production graph continues scout context down a refinement chain, forks it at a split, uses a fresh tool-free decider for each decision, and isolates every implementation leaf. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies read-only requests, derives a task-specific planning hierarchy for change requests, implements grounded leaves in dependency order, and verifies or repairs the result. An explicit implementation blocker reopens its parent planning branch instead of retrying the same incomplete leaf. The lightweight classifier and direct read-only answer roles use `deepseek/deepseek-v4-flash`; planning, verification, implementation, and repair inherit the parent OpenCode model. The four-level hierarchy in `SPEC-graph.md` is only an example; it is neither hardcoded nor configuration. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies the message, scouts only the active concern, makes a tool-free detail decision, implements one cohesive leaf per session, and verifies all leaves once. A blocked leaf reopens planning instead of entering a blind repair loop. Classifier, scout, and direct-answer roles use `deepseek/deepseek-v4-flash`; the decider, verifier, implementer, and repair roles inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
@@ -45,8 +45,15 @@ import { defineOpenCodeLangGraph } from "opencode-langgraph"
 export default defineOpenCodeLangGraph({
   version: 1,
   preset: "progressive-lod",
+  options: {
+    models: { scout: "deepseek/deepseek-v4-flash", verifier: "inherit" },
+    roleLimits: { implementer: { maxTurns: 32, maxCost: 0.08 } },
+    budgets: { subsystem: { calls: 24, maxCost: 0.08 } },
+  },
 })
 ```
+
+All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` caps a call by turns, fresh input, cache reads, live context, or cost; `budgets` caps the complete run by classified scope. Reaching a cap pauses for `continue`, `narrow: …`, or `stop` instead of silently granting another long loop.
 
 ### Connect an arbitrary graph
 
@@ -102,7 +109,7 @@ export default defineOpenCodeLangGraph({
 })
 ```
 
-Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Optional `maxSteps` bounds completed model turns. The built-in preset uses a tool-free two-step classifier and generous role-specific ceilings; custom agents remain step-unlimited unless configured. Override these values per agent when needed.
+Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Optional `maxSteps` bounds completed model turns. The built-in controller also enforces token, live-context, cache-read, cost, and whole-run budgets. Custom agents remain step-unlimited unless configured.
 
 The F8 plan header and execution view report model turns, uncached input, and cache-read tokens in addition to graph calls. Graph calls count orchestration nodes, not the model turns inside an OpenCode child session.
 

@@ -1,6 +1,6 @@
 {
   "name": "opencode-langgraph",
-  "version": "0.5.14",
+  "version": "0.6.0",
   "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
   "bin": {

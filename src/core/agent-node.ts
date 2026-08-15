@@ -15,6 +15,7 @@ export function agentNode<State extends Record<string, unknown>>(options: AgentN
     if (!runtime) throw new Error("LangGraph agent node was invoked without an OpenCode runtime");
     const prompt = typeof options.prompt === "function" ? options.prompt(state) : options.prompt;
     const result = await runtime.call({ agent: options.agent, prompt, node: node ?? options.agent, state });
+    if (result.budgetStop) throw new Error(`${node ?? options.agent} reached its ${result.budgetStop.metric} budget (${result.budgetStop.used}/${result.budgetStop.limit})`);
     return typeof options.output === "function" ? options.output(result.text, state, result) : { [options.output]: result.text } as Partial<State>;
   };
 }

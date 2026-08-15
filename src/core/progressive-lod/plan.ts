@@ -1,161 +1,171 @@
-import type { AnalysisOutput, Constraint, Evidence, PlanNode, ProgressiveLodState, VerificationOutput } from "./types.js";
+import { createHash } from "node:crypto";
+import type { DetailDecision, Evidence, PlanNode, ProgressiveLodState, ResearchPacket, VerificationOutput } from "./types.js";
 
-function key(value: string): string { return value.trim().toLocaleLowerCase().replace(/\s+/g, " "); }
 function planNumber(value: string): number { const parsed = Number(value.replace(/^p/, "")); return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER; }
 function byPlanId(left: PlanNode, right: PlanNode): number { return planNumber(left.id) - planNumber(right.id) || left.id.localeCompare(right.id); }
-export function liveNodeCount(nodes: PlanNode[]): number { return nodes.filter((node) => node.status !== "removed").length; }
+export function liveNodeCount(nodes: PlanNode[]): number { return nodes.filter((node) => node.status !== "removed" && node.status !== "expanded").length; }
 
 export function assertAcyclic(nodes: PlanNode[]): void {
-  const ids = new Set(nodes.map((node) => node.id));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
   const visiting = new Set<string>();
   const visited = new Set<string>();
-  const byId = new Map(nodes.map((node) => [node.id, node]));
   const visit = (id: string) => {
     if (visiting.has(id)) throw new Error(`Plan dependency cycle at ${id}`);
     if (visited.has(id)) return;
     visiting.add(id);
-    for (const dependency of byId.get(id)?.dependencies ?? []) if (ids.has(dependency)) visit(dependency);
+    for (const dependency of byId.get(id)?.dependencies ?? []) if (byId.has(dependency)) visit(dependency);
     visiting.delete(id); visited.add(id);
   };
-  for (const id of ids) visit(id);
+  for (const node of nodes) visit(node.id);
+}
+
+function planningResolved(node: PlanNode | undefined): boolean {
+  return !node || node.status === "ready" || node.status === "implemented" || node.status === "verified" || node.status === "expanded" || node.status === "removed";
 }
 
 export function selectActiveNode(nodes: PlanNode[]): PlanNode | undefined {
-  const done = new Set(nodes.filter((node) => node.status === "verified" || node.status === "removed").map((node) => node.id));
-  return nodes
-    .filter((node) => (node.status === "pending" || node.status === "active") && node.dependencies.every((id) => done.has(id)))
-    .sort((left, right) => left.depth - right.depth || byPlanId(left, right))[0];
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  return nodes.filter((node) => node.status === "pending" && node.dependencies.every((id) => planningResolved(byId.get(id))))
+    .sort((a, b) => a.depth - b.depth || byPlanId(a, b))[0];
+}
+
+export function mergeResearch(state: ProgressiveLodState, raw: Omit<ResearchPacket, "evidence" | "constraints"> & { evidence: Array<Omit<Evidence, "id" | "fingerprint">>; constraints: Array<{ text: string; source: string }> }): Pick<ProgressiveLodState, "evidence" | "constraints" | "research"> {
+  const evidence = [...state.evidence];
+  for (const item of raw.evidence) {
+    const fingerprint = createHash("sha256").update(`${item.source}\0${item.claim}\0${item.excerpt}`).digest("hex").slice(0, 16);
+    if (evidence.some((existing) => existing.fingerprint === fingerprint)) continue;
+    evidence.push({ ...item, id: `e${evidence.length + 1}`, fingerprint });
+  }
+  const constraints = [...state.constraints];
+  for (const item of raw.constraints) if (!constraints.some((existing) => existing.text === item.text && existing.source === item.source)) constraints.push({ ...item, id: `c${constraints.length + 1}` });
+  const added = evidence.slice(state.evidence.length);
+  return { evidence, constraints, research: { summary: raw.summary, unresolved: raw.unresolved, evidence: added, constraints: constraints.slice(state.constraints.length) } };
+}
+
+export interface DecisionMerge {
+  plan: PlanNode[];
+  activeNodeId?: string;
+  nextId: number;
+  humanQuestion: string;
+  decisions: Record<string, string>;
+}
+
+export function applyDecision(state: ProgressiveLodState, decision: DetailDecision): DecisionMerge {
+  const plan = state.plan.map((node) => ({ ...node, dependencies: [...node.dependencies], evidenceIds: [...node.evidenceIds] }));
+  const target = plan.find((node) => node.id === state.activeNodeId);
+  if (!target) throw new Error("Detail decision requires an active plan node");
+  if (decision.options.length && !decision.options.some((option) => option.id === decision.selectedOption)) throw new Error("Selected decision option does not exist");
+  const evidenceIds = state.research?.evidence.map((item) => item.id) ?? [];
+  target.evidenceIds = [...new Set([...target.evidenceIds, ...evidenceIds])];
+  target.confidence = decision.confidence;
+  target.contextCycles++;
+  const decisions = { ...state.decisions, [target.id]: decision.summary };
+  let nextId = state.nextId;
+  let humanQuestion = "";
+
+  if (decision.disposition === "ready") {
+    if (!decision.leaf || decision.children.length) throw new Error("Ready disposition requires one leaf contract and no children");
+    target.leaf = decision.leaf;
+    target.status = "ready";
+  } else if (decision.disposition === "refine" || decision.disposition === "split") {
+    const required = decision.disposition === "refine" ? 1 : 2;
+    if (decision.children.length < required || (decision.disposition === "refine" && decision.children.length !== 1)) throw new Error(`${decision.disposition} disposition has invalid child count`);
+    if (liveNodeCount(plan) - 1 + decision.children.length > state.budget.nodes) throw new Error("Detail decision exceeds the live plan-node budget");
+    const localIds = new Map(decision.children.map((child, index) => [child.key, `p${nextId + index}`]));
+    target.status = "expanded";
+    for (const child of decision.children) {
+      const id = `p${nextId++}`;
+      plan.push({
+        id, parentId: target.id, title: child.title, description: child.description, level: child.level, depth: target.depth + 1,
+        status: "pending", dependencies: child.dependencies.map((dependency) => localIds.get(dependency) ?? dependency).filter((dependency) => plan.some((node) => node.id === dependency) || [...localIds.values()].includes(dependency)),
+        evidenceIds: [...target.evidenceIds], confidence: decision.confidence, contextCycles: 0, reopenCount: 0,
+        scoutSessionId: target.scoutSessionId, scoutSessionMode: decision.disposition === "refine" ? "continue" : target.scoutSessionId ? "fork" : "fresh", scoutTurns: target.scoutTurns,
+      });
+    }
+  } else if (decision.disposition === "remove") {
+    target.status = "removed";
+  } else if (decision.disposition === "reopen_parent") {
+    const parent = plan.find((node) => node.id === target.parentId);
+    if (!parent || parent.reopenCount >= state.budget.reopens) throw new Error("Plan parent cannot be reopened");
+    target.status = "removed"; parent.status = "pending"; parent.reopenCount++;
+  } else {
+    target.status = "active";
+    humanQuestion = decision.question || `Clarify ${target.title}`;
+  }
+  assertAcyclic(plan);
+  const active = humanQuestion ? target : selectActiveNode(plan);
+  if (active && active.status === "pending") active.status = "active";
+  return { plan, activeNodeId: active?.id, nextId, humanQuestion, decisions };
+}
+
+export function nextImplementationLeaf(nodes: PlanNode[]): PlanNode | undefined {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const resolved = (id: string, seen = new Set<string>()): boolean => {
+    if (seen.has(id)) return false;
+    const dependency = byId.get(id);
+    if (!dependency || dependency.status === "removed" || dependency.status === "implemented" || dependency.status === "verified") return true;
+    if (dependency.status !== "expanded") return false;
+    const children = nodes.filter((node) => node.parentId === id && node.status !== "removed");
+    return children.length > 0 && children.every((child) => resolved(child.id, new Set([...seen, id])));
+  };
+  return nodes.filter((node) => node.status === "ready" && node.dependencies.every((id) => resolved(id))).sort(byPlanId)[0];
+}
+
+export function implementationOrder(nodes: PlanNode[]): PlanNode[] {
+  const ready = nodes.filter((node) => node.status === "ready" || node.status === "failed");
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const leafDependencies = (id: string, seen = new Set<string>()): string[] => {
+    if (seen.has(id)) throw new Error(`Plan dependency cycle at ${id}`);
+    const dependency = byId.get(id);
+    if (!dependency || dependency.status !== "expanded") return [id];
+    const children = nodes.filter((node) => node.parentId === id && node.status !== "removed");
+    return children.flatMap((child) => leafDependencies(child.id, new Set([...seen, id])));
+  };
+  const result: PlanNode[] = [];
+  const remaining = new Map(ready.map((node) => [node.id, node]));
+  while (remaining.size) {
+    const available = [...remaining.values()].filter((node) => node.dependencies.flatMap((id) => leafDependencies(id)).every((id) => !remaining.has(id))).sort(byPlanId);
+    if (!available.length) throw new Error("Implementable plan contains a dependency cycle");
+    for (const node of available) { result.push(node); remaining.delete(node.id); }
+  }
+  return result;
 }
 
 function verifiedFailureIds(nodes: PlanNode[], requested: string[]): Set<string> {
-  const eligible = new Set(nodes.filter((node) => node.status === "implementing" || node.status === "failed").map((node) => node.id));
+  const eligible = new Set(nodes.filter((node) => node.status === "implemented" || node.status === "implementing" || node.status === "failed").map((node) => node.id));
   const valid = new Set(requested.filter((id) => eligible.has(id)));
   return valid.size ? valid : eligible;
 }
 
 export function applyVerification(nodes: PlanNode[], verification: VerificationOutput): PlanNode[] {
   const failed = verification.passed ? new Set<string>() : verifiedFailureIds(nodes, verification.failedNodeIds);
-  return nodes.map((node) => node.status === "implementing"
+  return nodes.map((node) => node.status === "implemented" || node.status === "implementing"
     ? { ...node, status: verification.passed || !failed.has(node.id) ? "verified" as const : "failed" as const }
     : node);
 }
 
-export interface ReopenResult { plan: PlanNode[]; activeNodeId?: string; reopenedNodeIds: string[] }
-
-export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenLimit: number): ReopenResult {
+export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenLimit: number): { plan: PlanNode[]; activeNodeId?: string; reopenedNodeIds: string[] } {
   const failedIds = verifiedFailureIds(nodes, requested);
   const failedNodes = nodes.filter((node) => failedIds.has(node.id));
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const reopenIds = new Set(failedNodes
-    .map((node) => node.parentId ?? node.id)
-    .filter((id) => (byId.get(id)?.reopenCount ?? reopenLimit) < reopenLimit));
-  const invalidIds = new Set<string>();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const node of nodes) {
-      if (reopenIds.has(node.id) || !node.parentId || (!reopenIds.has(node.parentId) && !invalidIds.has(node.parentId)) || invalidIds.has(node.id)) continue;
-      invalidIds.add(node.id);
-      changed = true;
+  const reopenIds = new Set(failedNodes.map((node) => node.parentId ?? node.id).filter((id) => (byId.get(id)?.reopenCount ?? reopenLimit) < reopenLimit));
+  const invalid = new Set<string>();
+  for (const root of reopenIds) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of nodes) if (node.parentId && (node.parentId === root || invalid.has(node.parentId)) && !invalid.has(node.id)) { invalid.add(node.id); changed = true; }
     }
   }
-  const plan = nodes.map((node) => reopenIds.has(node.id)
-    ? { ...node, status: "pending" as const, reopenCount: node.reopenCount + 1 }
-    : invalidIds.has(node.id) ? { ...node, status: "removed" as const } : node);
+  const plan = nodes.map((node) => reopenIds.has(node.id) ? { ...node, status: "pending" as const, reopenCount: node.reopenCount + 1, leaf: undefined }
+    : invalid.has(node.id) ? { ...node, status: "removed" as const } : node);
   const active = selectActiveNode(plan);
   if (active) active.status = "active";
   return { plan, activeNodeId: active?.id, reopenedNodeIds: [...reopenIds] };
 }
 
-function commonRefinements(output: AnalysisOutput) {
-  const candidates = output.candidates;
-  if (candidates.length < 2) return [];
-  return candidates[0].refinements.filter((refinement) => candidates.every((candidate) => candidate.refinements.some((other) => key(other.title) === key(refinement.title) && other.action === refinement.action)));
-}
-
-export interface MergeResult { plan: PlanNode[]; evidence: Evidence[]; constraints: Constraint[]; nextId: number; activeNodeId?: string; humanQuestion: string; discoveries: string[]; decisions: Record<string, string> }
-
-export function mergeAnalysis(state: ProgressiveLodState, output: AnalysisOutput): MergeResult {
-  const active = state.plan.find((node) => node.id === state.activeNodeId);
-  if (!active) throw new Error("Cannot merge analysis without an active plan node");
-  output = { ...output, candidates: output.candidates.slice(0, state.budget.candidates) };
-  const evidence = [...state.evidence, ...output.evidence.map((item, index) => ({ ...item, id: `e${state.evidence.length + index + 1}` } satisfies Evidence))];
-  const constraints = [...state.constraints, ...output.constraints.map((item, index) => ({ ...item, id: `c${state.constraints.length + index + 1}` } satisfies Constraint))];
-  const plan = state.plan.map((node) => ({ ...node, dependencies: [...node.dependencies], files: [...node.files], evidenceIds: [...node.evidenceIds] }));
-  const target = plan.find((node) => node.id === active.id)!;
-  target.contextCycles++;
-  const decisions = { ...(state.decisions ?? {}), [target.id]: output.summary };
-  if (output.evaluation.needsHuman) {
-    target.status = "active";
-    return { plan, evidence, constraints, nextId: state.nextId, activeNodeId: target.id, humanQuestion: output.evaluation.question || `Clarify ${target.title}`, discoveries: [...state.discoveries, output.summary], decisions };
-  }
-  if (output.evaluation.needsMoreContext && target.contextCycles < state.budget.contextCyclesPerNode) {
-    target.status = "active";
-    return { plan, evidence, constraints, nextId: state.nextId, activeNodeId: target.id, humanQuestion: "", discoveries: [...state.discoveries, output.summary], decisions };
-  }
-  const selected = output.candidates[Math.min(output.evaluation.selected, output.candidates.length - 1)];
-  const shared = commonRefinements(output);
-  const refinements = shared.length ? shared : selected.refinements;
-  if (!refinements.length) throw new Error("Analysis produced no mergeable refinement");
-  const additions = refinements.filter((refinement) => refinement.action === "refine" || refinement.action === "split");
-  const available = state.budget.nodes - liveNodeCount(plan) + 1;
-  if (additions.length > available) {
-    target.status = "active";
-    const issue = `Refinement for ${target.id} requires ${additions.length} live nodes but only ${available} remain; consolidate without dropping required work.`;
-    if (target.contextCycles > 1) throw new Error(issue);
-    return { plan, evidence, constraints, nextId: state.nextId, activeNodeId: target.id, humanQuestion: "", discoveries: [...state.discoveries, issue], decisions };
-  }
-  const localIds = new Map<string, string>();
-  let assignedId = state.nextId;
-  for (const refinement of additions) {
-    if (refinement.key) localIds.set(refinement.key, `p${assignedId}`);
-    assignedId++;
-  }
-  let nextId = state.nextId;
-  target.status = "removed";
-  for (const refinement of refinements) {
-    if (refinement.action === "remove") continue;
-    if (refinement.action === "reopen_parent") {
-      const parent = plan.find((node) => node.id === target.parentId);
-      if (parent && parent.reopenCount < state.budget.reopens) {
-        const invalid = new Set([parent.id]);
-        let changed = true;
-        while (changed) {
-          changed = false;
-          for (const node of plan) if (node.parentId && invalid.has(node.parentId) && !invalid.has(node.id)) { invalid.add(node.id); changed = true; }
-        }
-        for (const node of plan) if (node.id !== parent.id && invalid.has(node.id)) node.status = "removed";
-        parent.status = "pending"; parent.reopenCount++;
-      }
-      continue;
-    }
-    const id = `p${nextId++}`;
-    plan.push({
-      id, parentId: target.id, title: refinement.title, description: refinement.description,
-      level: refinement.level, depth: target.depth + 1, status: refinement.implementable ? "ready" : "pending",
-      dependencies: refinement.dependencies.map((dependency) => localIds.get(dependency) ?? dependency).filter((dependency) => plan.some((node) => node.id === dependency) || [...localIds.values()].includes(dependency)),
-      files: refinement.files, evidenceIds: output.evidence.length ? evidence.slice(-output.evidence.length).map((item) => item.id) : [],
-      confidence: output.evaluation.confidence, contextCycles: 0, reopenCount: 0,
-    });
-  }
-  assertAcyclic(plan);
-  const next = selectActiveNode(plan);
-  if (next) next.status = "active";
-  return { plan, evidence, constraints, nextId, activeNodeId: next?.id, humanQuestion: "", discoveries: [...state.discoveries, output.summary], decisions };
-}
-
 export function budgetExceeded(state: ProgressiveLodState): boolean {
-  return state.callsUsed >= state.budget.calls - state.budget.reservedCalls || Date.now() - state.startedAt >= state.budget.minutes * 60_000;
-}
-
-export function implementationOrder(nodes: PlanNode[]): PlanNode[] {
-  const ready = nodes.filter((node) => node.status === "ready" || node.status === "failed");
-  const result: PlanNode[] = [];
-  const remaining = new Map(ready.map((node) => [node.id, node]));
-  while (remaining.size) {
-    const available = [...remaining.values()].filter((node) => node.dependencies.every((id) => !remaining.has(id))).sort(byPlanId);
-    if (!available.length) throw new Error("Implementable plan contains a dependency cycle");
-    for (const node of available) { result.push(node); remaining.delete(node.id); }
-  }
-  return result;
+  const multiplier = (state.budgetGrants.global ?? 0) + 1;
+  return state.callsUsed >= state.budget.calls * multiplier || state.usage.turns >= state.budget.maxTurns * multiplier || state.usage.input >= state.budget.maxInputTokens * multiplier
+    || state.usage.cacheRead >= state.budget.maxCacheReadTokens * multiplier || state.usage.cost >= state.budget.maxCost * multiplier || Date.now() - state.startedAt >= state.budget.minutes * 60_000 * multiplier;
 }

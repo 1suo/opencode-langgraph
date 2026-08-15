@@ -24,6 +24,7 @@ export interface PluginRunEvent {
 }
 
 export interface StoredRun {
+  checkpointVersion?: number;
   runId: string;
   rootSessionId: string;
   userMessageId: string;
