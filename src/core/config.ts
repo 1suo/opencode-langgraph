@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
-import { progressiveCoolingGraph } from "./preset.js";
+import { progressiveLodGraph } from "./progressive-lod/graph.js";
 import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, OpenCodeModel } from "./types.js";
 
 export const typedConfigFile = path.join(".opencode", "langgraph.ts");
@@ -25,7 +25,7 @@ export function defineOpenCodeLangGraph<const Config extends ConnectorConfig>(co
 
 export async function loadConnectorDefinition(repo: string): Promise<ConnectorDefinition> {
   const file = path.join(repo, typedConfigFile);
-  if (!fs.existsSync(file)) return neolitPresetDefinition();
+  if (!fs.existsSync(file)) return progressiveLodPresetDefinition();
   const coreEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
   const jiti = createJiti(import.meta.url, { interopDefault: true, alias: { "opencode-langgraph": coreEntry } });
   const config = await jiti.import<ConnectorConfig>(file, { default: true });
@@ -33,21 +33,20 @@ export async function loadConnectorDefinition(repo: string): Promise<ConnectorDe
 }
 
 function presetDefinition(preset: ConnectorPresetConfig["preset"]): ConnectorDefinition {
-  if (preset === "neolit") return neolitPresetDefinition();
-  throw new Error(`Unknown LangGraph connector preset: ${preset}`);
+  if (preset === "progressive-lod") return progressiveLodPresetDefinition();
+  throw new Error(`Unknown LangGraph connector preset: ${String(preset)}. Version 0.5 uses progressive-lod.`);
 }
 
-function neolitPresetDefinition(): ConnectorDefinition {
+function progressiveLodPresetDefinition(): ConnectorDefinition {
   return {
     version: 1,
     models: { current: opencodeModel({ model: "inherit" }) },
     agents: {
-      context: { model: "current", opencodeAgent: "explore", systemPrompt: "Build repository-grounded context for downstream agents.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false } },
-      planner: { model: "current", opencodeAgent: "plan", systemPrompt: "Make grounded, minimal, decision-complete plans.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false } },
-      implementer: { model: "current", opencodeAgent: "build", systemPrompt: "Implement the approved task and verify the result.", tools: { question: false } },
+      analyst: { model: "current", opencodeAgent: "plan", systemPrompt: "Ground every planning and verification claim in repository evidence. Produce exact structured output when requested.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false } },
+      implementer: { model: "current", opencodeAgent: "build", systemPrompt: "Implement the complete bounded plan in the current worktree and verify your edits. Preserve unrelated user work.", tools: { question: false } },
     },
-    graphs: { default: progressiveCoolingGraph({ contextAgent: "context", plannerAgent: "planner", implementerAgent: "implementer" }) },
-    defaultGraph: "default",
+    graphs: { "progressive-lod": progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer" }) },
+    defaultGraph: "progressive-lod",
   };
 }
 
@@ -64,7 +63,7 @@ export function defaultConnectorConfigSource(importFrom = "opencode-langgraph"):
 
 export default defineOpenCodeLangGraph({
   version: 1,
-  preset: "neolit",
+  preset: "progressive-lod",
 });
 `;
 }

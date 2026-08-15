@@ -33,6 +33,7 @@ export interface ConnectorGraph<State extends Record<string, unknown> = Record<s
   graph: CompiledStateGraph<any, any, any, any, any, any, any, any, any>;
   initial(input: { task: string; directory: string; worktree: string; runId: string }): State;
   result?(state: State): string;
+  progress?(state: State): GraphProgressSnapshot | undefined;
   display?: Record<string, GraphDisplayNode>;
 }
 
@@ -46,7 +47,7 @@ export interface ConnectorDefinition {
 
 export interface ConnectorPresetConfig {
   version: 1;
-  preset: "neolit";
+  preset: "progressive-lod";
 }
 
 export type ConnectorConfig = ConnectorDefinition | ConnectorPresetConfig;
@@ -56,11 +57,47 @@ export interface AgentCall {
   prompt: string;
   node: string;
   state: Record<string, unknown>;
+  schema?: Record<string, unknown>;
+  schemaName?: string;
+  retryCount?: number;
 }
 
 export interface AgentCallResult {
   text: string;
   sessionId?: string;
+  structured?: unknown;
+  tools?: AgentToolTrace[];
+}
+
+export interface AgentToolTrace {
+  tool: string;
+  status: "completed" | "error";
+  title?: string;
+  input?: unknown;
+  output?: string;
+  error?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface GraphProgressNode {
+  id: string;
+  parentId?: string;
+  title: string;
+  lod: number;
+  status: "pending" | "active" | "ready" | "implementing" | "verified" | "failed" | "removed";
+  dependencies?: string[];
+  evidence?: number;
+  confidence?: number;
+}
+
+export interface GraphProgressSnapshot {
+  phase: string;
+  scope?: string;
+  activeNodeId?: string;
+  callsUsed?: number;
+  callBudget?: number;
+  summary?: string;
+  nodes: GraphProgressNode[];
 }
 
 export interface AgentRuntime {

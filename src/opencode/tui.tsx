@@ -52,6 +52,7 @@ export interface GraphControls {
   back(): void;
   cycle(): void;
   graph(): void;
+  topology(): void;
   nodes(): void;
   output(): void;
   state(): void;
@@ -74,6 +75,7 @@ export function graphNavigationLayer(controls: GraphControls) {
       { name: "langgraph.graph.back", title: "Return from LangGraph", run: controls.back },
       { name: "langgraph.pane.next", title: "LangGraph: focus next pane", run: controls.cycle },
       { name: "langgraph.view.graph", title: "LangGraph: focus graph", run: controls.graph },
+      { name: "langgraph.view.topology", title: "LangGraph: show topology", run: controls.topology },
       { name: "langgraph.view.nodes", title: "LangGraph: focus executions", run: controls.nodes },
       { name: "langgraph.view.output", title: "LangGraph: focus output", run: controls.output },
       { name: "langgraph.view.state", title: "LangGraph: inspect state", run: controls.state },
@@ -94,7 +96,7 @@ export function graphNavigationLayer(controls: GraphControls) {
       { key: "q", cmd: "langgraph.graph.back" },
       { key: "tab", cmd: "langgraph.pane.next" },
       { key: "1", cmd: "langgraph.view.graph" },
-      { key: "g", cmd: "langgraph.view.graph" },
+      { key: "g", cmd: "langgraph.view.topology" },
       { key: "2", cmd: "langgraph.view.nodes" },
       { key: "n", cmd: "langgraph.view.nodes" },
       { key: "3", cmd: "langgraph.view.output" },
@@ -199,6 +201,28 @@ function printable(value: unknown): string {
   if (value === undefined) return "No state captured for this execution.";
   try { return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item, 2); }
   catch { return String(value); }
+}
+
+export function renderPlanTree(events: PluginRunEvent[]): string {
+  const runId = latestRunId(events);
+  const snapshot = events.filter((event) => event.runId === runId && event.progress).at(-1)?.progress;
+  if (!snapshot?.nodes.length) return "";
+  const byParent = new Map<string | undefined, typeof snapshot.nodes>();
+  for (const node of snapshot.nodes) byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]);
+  const glyph = (value: string) => value === "verified" ? "✓" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
+  const lines = [`${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}${snapshot.callsUsed !== undefined ? ` · calls ${snapshot.callsUsed}/${snapshot.callBudget}` : ""}`];
+  const visit = (parentId: string | undefined, prefix: string) => {
+    const children = (byParent.get(parentId) ?? []).sort((a, b) => a.id.localeCompare(b.id));
+    children.forEach((node, index) => {
+      const last = index === children.length - 1;
+      const detail = [`L${node.lod}`, node.status, node.evidence ? `${node.evidence}e` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).join(" · ");
+      lines.push(`${prefix}${last ? "└─" : "├─"} ${glyph(node.status)} ${node.title}  ${detail}`);
+      visit(node.id, `${prefix}${last ? "   " : "│  "}`);
+    });
+  };
+  visit(undefined, "");
+  if (snapshot.summary) lines.push("", snapshot.summary);
+  return lines.join("\n");
 }
 
 function executions(events: PluginRunEvent[]): PluginRunEvent[] {
@@ -341,12 +365,16 @@ export function graphHelpText(): string {
 
 USE
 /graph-select choose · /graph-toggle auto
-/run-graph <task> once
+/run-graph <task> once · /graph-cancel stop
+
+VIEW
+1 plan · G topology · 2 executions · 3 output · T state
 
 DESIGN · .opencode/langgraph.ts
 1. Annotation.Root → StateGraph → compile(checkpointer)
-2. defineGraph({ graph, initial, result }) maps I/O
-3. defineOpenCodeLangGraph registers graphs + default
+2. agentNode(text) or structuredAgentNode(Zod) at model boundaries
+3. defineGraph({ graph, initial, result, progress? }) maps I/O
+4. defineOpenCodeLangGraph registers graphs + default
 
 CLI · opencode-langgraph init · validate · graph`;
 }
@@ -416,6 +444,7 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
   const nodes = createMemo(() => executions(events()).slice(-6));
   const spinner = useSpinner(events, props.api);
   const theme = () => props.api.theme.current;
+  const semantic = createMemo(() => events().filter((event) => event.progress).at(-1)?.progress);
   return (
     <Show when={nodes().length > 0}>
       <box paddingTop={1} flexDirection="column" gap={1}>
@@ -423,6 +452,12 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
           <text fg={theme().text}><b>LANGGRAPH</b></text>
           <text fg={theme().textMuted}>{events().at(-1)?.graph ?? "graph"}</text>
         </box>
+        <Show when={semantic()}>{(value) => (
+          <box flexDirection="column">
+            <text fg={theme().textMuted}>{value().phase} · {value().scope ?? "classifying"} · {value().callsUsed ?? 0}/{value().callBudget ?? "?"}</text>
+            <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={theme().warning} wrapMode="word">▶ {node().title}</text>}</Show>
+          </box>
+        )}</Show>
         <For each={nodes()}>{(event) => (
           <box flexDirection="column">
             <box flexDirection="row" gap={1}>
@@ -444,18 +479,20 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const events = useApiEvents(props.api, rootSessionId, disk, setRootSessionId);
   const spinner = useSpinner(events, props.api);
   const layout = createMemo(() => renderEventGraph(events(), spinner()));
+  const planTree = createMemo(() => renderPlanTree(events()));
   const nodes = createMemo(() => executions(events()));
   const currentRun = createMemo(() => latest(events()));
   const [scrollPosition, setScrollPosition] = createSignal({ x: 0, y: 0 });
   const [selected, setSelected] = createSignal(initialSelection(events()));
-  const [pane, setPane] = createSignal<"graph" | "nodes" | "output">("graph");
+  const [pane, setPane] = createSignal<"plan" | "topology" | "nodes" | "output">(planTree() ? "plan" : "topology");
   const [detail, setDetail] = createSignal<"output" | "state">("output");
   const [keymapReady, setKeymapReady] = createSignal(false);
   let canvas: BoxRenderable | undefined;
   let outputBox: ScrollBoxRenderable | undefined;
+  let planBox: ScrollBoxRenderable | undefined;
   const theme = () => props.api.theme.current;
   const selectedEvent = createMemo(() => nodes()[Math.min(selected(), Math.max(0, nodes().length - 1))]);
-  const activatePane = (value: "graph" | "nodes" | "output") => {
+  const activatePane = (value: "plan" | "topology" | "nodes" | "output") => {
     setPane(value);
     props.api.renderer.requestRender();
   };
@@ -481,8 +518,9 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   };
   const controls: GraphControls = {
     back,
-    cycle: () => activatePane(pane() === "graph" ? "nodes" : pane() === "nodes" ? "output" : "graph"),
-    graph: () => activatePane("graph"),
+    cycle: () => activatePane(pane() === "plan" ? "topology" : pane() === "topology" ? "nodes" : pane() === "nodes" ? "output" : "plan"),
+    graph: () => activatePane("plan"),
+    topology: () => activatePane("topology"),
     nodes: () => activatePane("nodes"),
     output: () => { setDetail("output"); activatePane("output"); outputBox?.scrollTo(0); },
     state: () => { setDetail("state"); activatePane("output"); outputBox?.scrollTo(0); },
@@ -492,28 +530,36 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     up: () => {
       if (pane() === "nodes") selectPrevious();
       else if (pane() === "output") outputBox?.scrollBy(-3);
-      else moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 4) }));
+      else if (pane() === "plan") planBox?.scrollBy(-3);
+      else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 4) }));
     },
     down: () => {
       if (pane() === "nodes") selectNext();
       else if (pane() === "output") outputBox?.scrollBy(3);
-      else moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 4) }));
+      else if (pane() === "plan") planBox?.scrollBy(3);
+      else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 4) }));
     },
-    left: () => { if (pane() === "graph") moveGraph(({ x, y }) => ({ x: Math.max(0, x - 8), y })); },
-    right: () => { if (pane() === "graph") moveGraph(({ x, y }) => ({ x: Math.min(Math.max(0, layout().width - 20), x + 8), y })); },
+    left: () => { if (pane() === "topology") moveGraph(({ x, y }) => ({ x: Math.max(0, x - 8), y })); },
+    right: () => { if (pane() === "topology") moveGraph(({ x, y }) => ({ x: Math.min(Math.max(0, layout().width - 20), x + 8), y })); },
     pageUp: () => {
       if (pane() === "output") outputBox?.scrollBy(-12);
-      else if (pane() === "graph") moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 12) }));
+      else if (pane() === "plan") planBox?.scrollBy(-12);
+      else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 12) }));
     },
     pageDown: () => {
       if (pane() === "output") outputBox?.scrollBy(12);
-      else if (pane() === "graph") moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 12) }));
+      else if (pane() === "plan") planBox?.scrollBy(12);
+      else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 12) }));
     },
     home: () => {
       if (pane() === "output") outputBox?.scrollTo(0);
-      else if (pane() === "graph") moveGraph(() => ({ x: 0, y: 0 }));
+      else if (pane() === "plan") planBox?.scrollTo(0);
+      else if (pane() === "topology") moveGraph(() => ({ x: 0, y: 0 }));
     },
-    end: () => { if (pane() === "output" && outputBox) outputBox.scrollTo(outputBox.scrollHeight); },
+    end: () => {
+      if (pane() === "output" && outputBox) outputBox.scrollTo(outputBox.scrollHeight);
+      if (pane() === "plan" && planBox) planBox.scrollTo(planBox.scrollHeight);
+    },
   };
   const navigation = graphNavigationLayer(controls);
   const disposeNavigation = props.api.keymap.registerLayer({
@@ -537,12 +583,14 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={theme().textMuted}>{currentRun().at(-1)?.graph ?? "no run"} · {currentRun().at(-1)?.runId ?? "idle"}</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
-        <box onMouseUp={() => activatePane("graph")} width="62%" flexShrink={0} border={true} borderColor={pane() === "graph" ? theme().primary : theme().border} title={` GRAPH [${keyHint(["langgraph.view.graph"], "1")}] · PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "UP/DOWN/LEFT/RIGHT")}] `} overflow="hidden">
-          <Show when={layout().canvas} fallback={<text fg={theme().textMuted}>No LangGraph execution has run in this project.</text>}>
-            <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height} flexShrink={0}>
-              <text position="absolute" left={0} top={0} fg={theme().text}>{layout().canvas}</text>
-            </box>
-          </Show>
+        <box onMouseUp={() => activatePane(planTree() ? "plan" : "topology")} width="62%" flexShrink={0} border={true} borderColor={pane() === "plan" || pane() === "topology" ? theme().primary : theme().border} title={pane() === "topology" ? ` TOPOLOGY [G] · PLAN [1] · PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "ARROWS")}] ` : ` PLAN [1] · TOPOLOGY [G] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} overflow="hidden">
+          <Show when={pane() === "plan" && planTree()} fallback={
+            <Show when={layout().canvas} fallback={<text fg={theme().textMuted}>No LangGraph execution has run in this project.</text>}>
+              <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height} flexShrink={0}>
+                <text position="absolute" left={0} top={0} fg={theme().text}>{layout().canvas}</text>
+              </box>
+            </Show>
+          }><scrollbox ref={(value) => { planBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><text fg={theme().text}>{planTree()}</text></scrollbox></Show>
         </box>
         <box flexGrow={1} minWidth={24} flexDirection="column" gap={1}>
           <box onMouseUp={() => activatePane("nodes")} height="38%" minHeight={6} border={true} borderColor={pane() === "nodes" ? theme().primary : theme().border} title={` EXECUTIONS ${Math.min(selected() + 1, nodes().length)}/${nodes().length} [${keyHint(["langgraph.view.nodes"], "2")}] · SELECT [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">

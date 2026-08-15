@@ -2,7 +2,7 @@
 
 `opencode-langgraph` is an explicit, generic connector between [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/overview) and [OpenCode](https://opencode.ai/). OpenCode remains the chat, coding, model, permission, and child-session runtime. LangGraph owns orchestration state, routing, checkpoints, and interrupts.
 
-Neolit is the optional built-in progressive-cooling preset. It is not required to use the connector.
+It includes a production `progressive-lod` workflow, while remaining a generic connector for arbitrary user-defined graphs.
 
 ## Install
 
@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.4.4.tgz --force
+opencode plugin ./opencode-langgraph-0.5.0.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -28,6 +28,7 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `/graph-select` opens a searchable TUI selector for the graph used by the current session.
 - `F7` toggles graph execution on or off for the current or next session.
 - `/run-graph <task>` runs one task explicitly even while `graph:off`.
+- `/graph-cancel` cancels the active or queued graph run.
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
 - `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
@@ -36,14 +37,14 @@ Every agent-backed graph node runs in an isolated OpenCode child session. Graph 
 
 ## Configure
 
-Without configuration, the connector uses `preset: "neolit"`. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies read-only requests, develops change requests through four levels of detail, implements a dependency-ordered plan, and verifies or repairs the result. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
 
 export default defineOpenCodeLangGraph({
   version: 1,
-  preset: "neolit",
+  preset: "progressive-lod",
 })
 ```
 
@@ -52,9 +53,10 @@ export default defineOpenCodeLangGraph({
 Any compiled LangGraph can be connected by supplying models, agents, graphs, and a default graph:
 
 ```ts
-import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph"
+import { Annotation, END, START, StateGraph } from "@langchain/langgraph"
 import {
   agentNode,
+  defaultSqliteCheckpointer,
   defineGraph,
   defineOpenCodeLangGraph,
   opencodeModel,
@@ -74,7 +76,7 @@ const graph = new StateGraph(State)
   }))
   .addEdge(START, "answer")
   .addEdge("answer", END)
-  .compile({ checkpointer: new MemorySaver() })
+  .compile({ checkpointer: defaultSqliteCheckpointer() })
 
 export default defineOpenCodeLangGraph({
   version: 1,
@@ -106,14 +108,16 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 
 1. Define typed LangGraph state with `Annotation.Root(...)`.
 2. Build normal deterministic nodes, branches, loops, fan-out, and joins with `StateGraph`.
-3. Use `agentNode(...)` only where a node should execute an OpenCode agent. The referenced entry in `agents` selects its model, OpenCode agent, system prompt, and tools.
+3. Use `agentNode(...)` for text output or `structuredAgentNode(...)` with a Zod schema for decisions that mutate graph state. The referenced entry in `agents` selects its model, OpenCode agent, system prompt, and tools.
 4. Compile with a checkpointer. This is required for interrupts and resume.
 5. Wrap the compiled graph with `defineGraph({ graph, initial, result })`. `initial` maps an OpenCode message into graph state; `result` maps final state back into the root chat.
 6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`; `langgraph_run` can also specify a graph explicitly.
 
-Ordinary LangGraph nodes remain ordinary code. `agentNode(...)` is the connector boundary: it creates an OpenCode child session and writes the completed assistant text into the state field selected by `output`. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
+Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Native OpenCode models receive JSON Schema directly for structured nodes; command models receive the schema in their prompt and must return JSON. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
 
-Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. Custom graphs can provide any LangGraph-compatible persistent checkpointer when restart persistence is required.
+Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores checkpoints in SQLite; custom graphs can provide any persistent LangGraph checkpointer.
+
+The F8 viewer opens on the semantic plan tree. Press `G` for compiled topology, `2` for node executions, `3` for output, and `T` for raw state. Navigation hints live in panel headers.
 
 Run `opencode-langgraph validate` after edits and `opencode-langgraph graph` to preview the compiled topology. Restart OpenCode after changing plugin code or configuration.
 

@@ -1,15 +1,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
+import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, isInterrupted } from "@langchain/langgraph";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
-import { graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, tui, type GraphControls } from "../src/opencode/tui.js";
+import { graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
+import { mergeAnalysis } from "../src/core/progressive-lod/plan.js";
+import { DEFAULT_LODS, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
+import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
+import { acquireWorktree } from "../src/opencode/worktree-lock.js";
 
 function graph(terminates = true) {
   const State = Annotation.Root({ result: Annotation<string> });
@@ -43,13 +48,13 @@ describe("typed graph validation", () => {
     expect((await validateConnector(definition)).map((item) => item.code)).toEqual(expect.arrayContaining(["REFERENCE", "GRAPH"]));
   });
 
-  it("uses the Neolit workflow only as an explicit built-in preset", async () => {
+  it("uses the production progressive-LOD workflow as the zero-config preset", async () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-config-"));
-    expect((await loadConnectorDefinition(project)).defaultGraph).toBe("default");
+    expect((await loadConnectorDefinition(project)).defaultGraph).toBe("progressive-lod");
     const file = writeConnectorConfig(project);
     expect(path.relative(project, file)).toBe(typedConfigFile);
-    expect(fs.readFileSync(file, "utf8")).toContain('preset: "neolit"');
-    expect((await loadConnectorDefinition(project)).graphs.default).toBeDefined();
+    expect(fs.readFileSync(file, "utf8")).toContain('preset: "progressive-lod"');
+    expect((await loadConnectorDefinition(project)).graphs["progressive-lod"]).toBeDefined();
   });
 });
 
@@ -96,6 +101,122 @@ describe("OpenCode child-session runtime", () => {
     const runtime = new OpenCodeAgentRuntime({ plugin: {} as never, definition, parentSessionId: "root", directory: dir, worktree: dir, signal: new AbortController().signal });
     await expect(runtime.call({ agent: "worker", node: "work", prompt: "task", state: {} })).resolves.toMatchObject({ text: "seen: system" });
   });
+
+  it("passes JSON Schema to OpenCode and returns validated structured data", async () => {
+    let prompt: any;
+    const client = { session: {
+      create: async () => ({ data: { id: "child" } }),
+      promptAsync: async (value: unknown) => { prompt = value; },
+      status: async () => ({ data: {} }),
+      messages: async () => ({ data: [{ info: { role: "assistant", structured: { decision: "go" } }, parts: [] }] }),
+      abort: async () => ({ data: true }),
+    } };
+    const definition: ConnectorDefinition = { version: 1, models: { current: { backend: "opencode", model: "inherit" } }, agents: { planner: { model: "current", systemPrompt: "decide", tools: { question: false } } }, graphs: {}, defaultGraph: "default" };
+    const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+    await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" } })).resolves.toMatchObject({ structured: { decision: "go" } });
+    expect(prompt.body.format).toMatchObject({ type: "json_schema", retryCount: 2 });
+  });
+});
+
+describe("progressive LOD reducer", () => {
+  const state = (): ProgressiveLodState => ({
+    runId: "run", originalTask: "change", directory: "/repo", worktree: "/repo", phase: "planning",
+    profile: { route: "change", scope: "subsystem", summary: "change", readOnly: false, risks: [] }, lods: DEFAULT_LODS,
+    budget: SCOPE_BUDGETS.subsystem, plan: [{ id: "p1", title: "root", description: "root", lod: 0, status: "active", dependencies: [], files: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0 }],
+    activeNodeId: "p1", evidence: [], constraints: [], discoveries: [], callsUsed: 1, nextId: 2, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "",
+  });
+
+  it("accepts candidate-common refinements and assigns stable IDs", () => {
+    const output = { summary: "grounded", evidence: [{ claim: "entry exists", source: "src/a.ts:1", kind: "repository" as const, confidence: 1 }], constraints: [], candidates: [
+      { name: "a", rationale: "", refinements: [{ action: "split" as const, title: "Shared contract", description: "update contract", implementable: false, dependencies: [], files: ["src/a.ts"] }, { action: "split" as const, title: "Only A", description: "a", implementable: true, dependencies: [], files: [] }] },
+      { name: "b", rationale: "", refinements: [{ action: "split" as const, title: "Shared contract", description: "update contract differently", implementable: false, dependencies: [], files: ["src/a.ts"] }, { action: "split" as const, title: "Only B", description: "b", implementable: true, dependencies: [], files: [] }] },
+    ], evaluation: { selected: 0, confidence: .8, needsMoreContext: false, needsHuman: false, question: "" } };
+    const merged = mergeAnalysis(state(), output);
+    expect(merged.plan.map((node) => node.id)).toEqual(["p1", "p2"]);
+    expect(merged.plan.at(-1)).toMatchObject({ title: "Shared contract", evidenceIds: ["e1"] });
+    expect(merged.nextId).toBe(3);
+  });
+
+  it("holds the active branch for bounded context collection", () => {
+    const output = { summary: "need source", evidence: [], constraints: [], candidates: [{ name: "one", rationale: "", refinements: [{ action: "refine" as const, title: "next", description: "next", implementable: false, dependencies: [], files: [] }] }], evaluation: { selected: 0, confidence: .4, needsMoreContext: true, needsHuman: false, question: "" } };
+    const merged = mergeAnalysis(state(), output);
+    expect(merged.activeNodeId).toBe("p1");
+    expect(merged.plan[0]).toMatchObject({ status: "active", contextCycles: 1 });
+  });
+});
+
+describe("progressive LOD graph", () => {
+  it("refines to implementable leaves, acquires once, implements, and verifies", async () => {
+    const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
+    let leases = 0;
+    const runtime = { call: async (input: { node: string; state: ProgressiveLodState }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "change feature", readOnly: false, risks: [] } };
+      if (input.node === "analyze") {
+        const active = input.state.plan.find((node) => node.id === input.state.activeNodeId)!;
+        return { text: "", structured: { summary: `refined L${active.lod}`, evidence: [{ claim: "grounded", source: "src/a.ts:1", kind: "repository", confidence: 1 }], constraints: [], candidates: [{ name: "direct", rationale: "grounded", refinements: [{ action: "refine", title: `LOD ${active.lod + 1}`, description: "bounded work", implementable: active.lod >= 2, dependencies: [], files: ["src/a.ts"] }] }], evaluation: { selected: 0, confidence: .9, needsMoreContext: false, needsHuman: false, question: "" } } };
+      }
+      if (input.node === "implement") return { text: "implemented and checked" };
+      if (input.node === "verify") return { text: "", structured: { passed: true, summary: "all checks pass", checks: [{ name: "test", passed: true, evidence: "ok" }], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const initial = configured.initial({ task: "change it", directory: "/repo", worktree: "/repo", runId: "run" });
+    const result = await configured.graph.invoke(initial, { configurable: { thread_id: "run", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => { leases++; } } });
+    expect(leases).toBe(1);
+    expect(configured.result?.(result)).toContain("all checks pass");
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 6, nodes: [expect.anything(), expect.anything(), expect.anything(), expect.objectContaining({ status: "verified" })] });
+  });
+
+  it("does not acquire the worktree for direct answers", async () => {
+    const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
+    let leases = 0;
+    const runtime = { call: async (input: { node: string }) => input.node === "classify"
+      ? { text: "", structured: { route: "answer", scope: "local", summary: "explain", readOnly: true, risks: [] } }
+      : { text: "direct answer" } };
+    const result = await configured.graph.invoke(configured.initial({ task: "what?", directory: "/repo", worktree: "/repo", runId: "answer" }), { configurable: { thread_id: "answer", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => { leases++; } } });
+    expect(leases).toBe(0);
+    expect(configured.result?.(result)).toBe("direct answer");
+  });
+});
+
+describe("worktree queue", () => {
+  it("serializes leases in FIFO order", async () => {
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-lock-"));
+    const prior = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    try {
+      const controller = new AbortController();
+      const first = await acquireWorktree("/repo", controller.signal);
+      let acquired = false;
+      const secondPromise = acquireWorktree("/repo", controller.signal).then((lease) => { acquired = true; return lease; });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(acquired).toBe(false);
+      first.release();
+      const second = await secondPromise;
+      expect(acquired).toBe(true);
+      second.release();
+    } finally {
+      if (prior === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME; else process.env.OPENCODE_LANGGRAPH_STATE_HOME = prior;
+    }
+  });
+});
+
+describe("durable checkpoints", () => {
+  it("resumes an interrupt through a separately opened SQLite saver", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-sqlite-"));
+    const file = path.join(directory, "checkpoints.sqlite");
+    const State = Annotation.Root({ answer: Annotation<string> });
+    const compile = (saver: SqliteSaver) => new StateGraph(State)
+      .addNode("ask", () => ({ answer: interrupt("question") as string }))
+      .addEdge(START, "ask").addEdge("ask", END).compile({ checkpointer: saver });
+    const firstSaver = SqliteSaver.fromConnString(file);
+    const first = await compile(firstSaver).invoke({ answer: "" }, { configurable: { thread_id: "durable" } });
+    expect(isInterrupted(first)).toBe(true);
+    firstSaver.db.close();
+    const secondSaver = SqliteSaver.fromConnString(file);
+    const resumed = await compile(secondSaver).invoke(new Command({ resume: "yes" }), { configurable: { thread_id: "durable" } });
+    expect(resumed.answer).toBe("yes");
+    secondSaver.db.close();
+  });
 });
 
 describe("OpenCode automatic graph routing", () => {
@@ -107,23 +228,28 @@ describe("OpenCode automatic graph routing", () => {
     let child = 0;
     const posted: unknown[] = [];
     const parents = new Map<string, string | undefined>([["root", undefined]]);
+    const titles = new Map<string, string>();
     const client = { session: {
       get: async ({ path: requestPath }: { path: { id: string } }) => ({ data: { id: requestPath.id, parentID: parents.get(requestPath.id) } }),
-      create: async ({ body }: { body: { parentID: string } }) => {
+      create: async ({ body }: { body: { parentID: string; title: string } }) => {
         const id = `child-${++child}`;
         parents.set(id, body.parentID);
+        titles.set(id, body.title);
         return { data: { id } };
       },
       promptAsync: async (input: unknown) => { posted.push(input); return { data: undefined }; },
       status: async () => ({ data: {} }),
-      messages: async () => ({ data: ["message-1", "message-command"].map((parentID) => ({ info: { role: "assistant", parentID }, parts: [{ type: "text", text: "The answer is 4." }] })) }),
+      messages: async ({ path: requestPath }: { path: { id: string } }) => ({ data: requestPath.id === "root"
+        ? ["message-1", "message-command"].map((parentID) => ({ info: { role: "assistant", parentID }, parts: [{ type: "text", text: "The answer is 4." }] }))
+        : [{ info: { role: "assistant", ...(titles.get(requestPath.id)?.includes("classify") ? { structured: { route: "answer", scope: "local", summary: "answer question", readOnly: true, risks: [] } } : {}) }, parts: [{ type: "text", text: "The answer is 4." }] }],
+      }),
       abort: async () => ({ data: true }),
     } };
     try {
       const hooks = await server({ client, directory: project, worktree: project } as never);
       const config = {} as { command?: Record<string, unknown> };
       await hooks.config?.(config as never);
-      expect(Object.keys(config.command ?? {})).toEqual(["run-graph"]);
+      expect(Object.keys(config.command ?? {})).toEqual(["run-graph", "graph-cancel"]);
       expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_run", "langgraph_resume"]);
       const output = {
         message: { id: "message-1", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
@@ -145,9 +271,9 @@ describe("OpenCode automatic graph routing", () => {
       expect(output.parts.at(-1)).toMatchObject({ type: "text", synthetic: true });
       expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
       deadline = Date.now() + 2_000;
-      while ((child < 2 || posted.length < 4) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(child).toBe(2);
-      expect(posted).toHaveLength(4);
+      while ((child < 4 || posted.length < 6) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(child).toBe(4);
+      expect(posted).toHaveLength(6);
       expect(posted.at(-1)).toMatchObject({ body: { agent: "build" } });
       const events = readPluginEvents("root");
       expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "answer", "__end__"]));
@@ -216,7 +342,8 @@ describe("OpenCode graph viewer", () => {
   it("keeps graph usage and design help available in the TUI", () => {
     expect(graphHelpText()).toContain("/graph-select");
     expect(graphHelpText()).toContain(".opencode/langgraph.ts");
-    expect(graphHelpText()).toContain("defineGraph({ graph, initial, result })");
+    expect(graphHelpText()).toContain("defineGraph({ graph, initial, result, progress? })");
+    expect(graphHelpText()).toContain("G topology");
   });
 
   it("ships the TUI framework as runtime dependencies", () => {
@@ -252,7 +379,7 @@ describe("OpenCode graph viewer", () => {
       const binding = layer.bindings.find((candidate) => candidate.key === key);
       expect(binding).toBeDefined();
       commandByName.get(binding!.cmd)?.run();
-      expect(calls.pop()).toBe(expected);
+      expect(calls.pop()).toBe(key === "g" ? "topology" : expected);
     }
   });
 
@@ -270,6 +397,16 @@ describe("OpenCode graph viewer", () => {
     expect(layout.canvas).toContain("┆");
     expect(layout.width).toBeGreaterThan(0);
     expect(layout.height).toBeGreaterThan(0);
+  });
+
+  it("renders semantic progress as a hierarchy with budget state", () => {
+    const base = { at: "now", runId: "run", rootSessionId: "root", graph: "progressive-lod", node: "analyze", status: "active", agent: "analyst", model: "inherit" };
+    const tree = renderPlanTree([{ ...base, progress: { phase: "planning", scope: "subsystem", callsUsed: 3, callBudget: 24, activeNodeId: "p2", nodes: [
+      { id: "p1", title: "Intent", lod: 0, status: "removed" },
+      { id: "p2", parentId: "p1", title: "Contract", lod: 1, status: "active", evidence: 2, confidence: .8 },
+    ] } }]);
+    expect(tree).toContain("planning · subsystem · calls 3/24");
+    expect(tree).toContain("└─ ▶ Contract");
   });
 
   it("keeps the most recently started execution visible when runs overlap", () => {

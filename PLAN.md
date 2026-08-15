@@ -1,11 +1,11 @@
 # OpenCode LangGraph connector architecture
 
-`opencode-langgraph` is an explicit LangGraph–OpenCode connector, not a standalone coding TUI. Neolit is its optional progressive-cooling preset.
+`opencode-langgraph` is an explicit LangGraph–OpenCode connector, not a standalone coding TUI. Its built-in production workflow is `progressive-lod`.
 
 ## Ownership
 
 - OpenCode owns chat, provider authentication, model selection, permissions, questions, child sessions, transcript rendering, diffs, and terminal interaction.
-- LangGraph owns orchestration state, routing, retries, fan-out, cooling/collapse, checkpoints, and interrupts.
+- LangGraph owns orchestration state, routing, retries, plan refinement, checkpoints, and interrupts.
 - The connector maps between the two and adds graph validation and visualization.
 
 ## Connection
@@ -14,11 +14,11 @@ The OpenCode root agent calls `langgraph_run` only when graph orchestration adds
 
 External CLIs use the command model backend: prompt on stdin, answer on stdout, logs on stderr, graph worktree as cwd, and abort propagation.
 
-LangGraph `interrupt()` pauses the graph at a checkpointer. The shipped Bun-compatible preset resumes within the current OpenCode process; custom graphs may provide persistent storage. `langgraph_run` returns the input request to normal OpenCode chat; `langgraph_resume` continues the same thread with `Command.resume`.
+LangGraph `interrupt()` pauses the graph in the SQLite checkpointer. The next root user message resumes the same run; `langgraph_resume` also permits explicit `Command.resume` control.
 
 ## Configuration
 
-`.opencode/langgraph.ts` exports `defineOpenCodeLangGraph(...)`. It may select `{ preset: "neolit" }` or connect arbitrary compiled LangGraph instances with an initial-state function and result projection.
+`.opencode/langgraph.ts` exports `defineOpenCodeLangGraph(...)`. It may select `{ preset: "progressive-lod" }` or connect arbitrary compiled LangGraph instances with initial, result, and optional semantic-progress projections.
 
 ## Validation
 
@@ -26,4 +26,4 @@ LangGraph compilation remains authoritative for graph structure. The connector a
 
 ## UI
 
-The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current graph state. `/graph` opens the full two-axis topology and node details. Agent output stays in OpenCode child sessions and is previewed in graph nodes.
+The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current semantic state. `/graph` opens the plan tree first, with topology, executions, output, and raw state available from header key hints.

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
+import type { GraphProgressSnapshot } from "../core/types.js";
 
 export interface PluginRunEvent {
   at: string;
@@ -18,6 +19,7 @@ export interface PluginRunEvent {
   sessionId?: string;
   mermaid?: string;
   topology?: { nodes: string[]; edges: Array<{ source: string; target: string }> };
+  progress?: GraphProgressSnapshot;
 }
 
 export interface StoredRun {
@@ -28,7 +30,7 @@ export interface StoredRun {
   task: string;
   directory: string;
   worktree: string;
-  status: "running" | "interrupted" | "completed" | "failed";
+  status: "queued" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
 }
 
 export interface SessionGraphState {

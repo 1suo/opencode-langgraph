@@ -5,7 +5,8 @@ import { loadConnectorDefinition } from "../core/config.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
-import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
 
 function messageModel(info: { role: string; model?: { providerID: string; modelID: string }; providerID?: string; modelID?: string }) {
   if (info.role === "user") return info.model;
@@ -15,6 +16,14 @@ function messageModel(info: { role: string; model?: { providerID: string; modelI
 export const server: Plugin = async (plugin) => {
   const internalMessages = new Set<string>();
   const manualMessages = new Set<string>();
+  const cancelledMessages = new Set<string>();
+  const activeControllers = new Map<string, Set<AbortController>>();
+  const registerController = (sessionId: string, controller: AbortController) => activeControllers.set(sessionId, new Set([...(activeControllers.get(sessionId) ?? []), controller]));
+  const unregisterController = (sessionId: string, controller: AbortController) => {
+    const controllers = activeControllers.get(sessionId);
+    controllers?.delete(controller);
+    if (!controllers?.size) activeControllers.delete(sessionId);
+  };
   return {
     event: ({ event }) => forwardPermissionEvent(event),
     config: async (config) => {
@@ -24,17 +33,22 @@ export const server: Plugin = async (plugin) => {
         agent: "build",
         template: "$ARGUMENTS",
       };
+      config.command["graph-cancel"] = { description: "Cancel the active or queued LangGraph run", agent: "build", template: "Cancel the active LangGraph run." };
     },
     "command.execute.before": async (input) => {
       if (input.command === "run-graph") manualMessages.add(input.sessionID);
+      if (input.command === "graph-cancel") {
+        cancelledMessages.add(input.sessionID);
+        for (const controller of activeControllers.get(input.sessionID) ?? []) controller.abort(new Error("Cancelled by user"));
+      }
     },
     "chat.message": async (input, output) => {
       if (input.messageID && internalMessages.delete(input.messageID)) return;
+      if (cancelledMessages.delete(input.sessionID)) return;
       const manual = manualMessages.delete(input.sessionID);
       const session = await plugin.client.session.get({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
       if (session.data.parentID) return;
       const graphState = readSessionGraphState(input.sessionID) ?? adoptHomeGraphState(input.sessionID, plugin.worktree);
-      if (!manual && graphState?.enabled !== true) return;
       const task = output.parts
         .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text" && !part.synthetic && !part.ignored)
         .map((part) => part.text)
@@ -43,6 +57,18 @@ export const server: Plugin = async (plugin) => {
       if (!task) return;
       const rootMessageID = input.messageID ?? output.message.id;
       const parentModel = input.model ?? output.message.model;
+      const interrupted = readLatestStoredRun(input.sessionID);
+      if (!manual && interrupted?.status === "interrupted") {
+        output.parts.push({ id: `prt_${randomUUID().replaceAll("-", "")}`, messageID: rootMessageID, sessionID: input.sessionID, type: "text", synthetic: true, text: "The LangGraph connector is resuming the paused graph with this answer. Reply briefly that it is resuming; do not perform the task yourself." });
+        const controller = new AbortController();
+        registerController(input.sessionID, controller);
+        void executeResume(plugin, interrupted, task, parentModel, controller.signal)
+          .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
+          .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error))
+          .finally(() => unregisterController(input.sessionID, controller));
+        return;
+      }
+      if (!manual && graphState?.enabled !== true) return;
       output.parts.push({
         id: `prt_${randomUUID().replaceAll("-", "")}`,
         messageID: rootMessageID,
@@ -51,13 +77,16 @@ export const server: Plugin = async (plugin) => {
         synthetic: true,
         text: "The LangGraph connector started this message's graph in the background. Reply briefly that the graph is running and that /graph shows live state. Do not perform the task yourself.",
       });
+      const controller = new AbortController();
+      registerController(input.sessionID, controller);
       void executeGraph(plugin, {
         task, rootSessionId: input.sessionID, userMessageId: rootMessageID,
         directory: plugin.directory, worktree: plugin.worktree, parentModel,
-        graph: graphState?.graph,
+        graph: graphState?.graph, signal: controller.signal,
       })
         .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
-        .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error));
+        .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error))
+        .finally(() => unregisterController(input.sessionID, controller));
     },
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return;
@@ -149,36 +178,45 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
     plugin, definition, parentSessionId: input.rootSessionId, parentModel: input.parentModel,
     directory: input.directory, worktree: input.worktree, signal, ask: input.ask,
     onEvent: (event) => {
-      emit({ ...event, at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName });
+      emit({ ...event, at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, progress: event.state ? configured.progress?.(event.state) : undefined });
       input.metadata?.({ title: `LangGraph · ${event.node}`, metadata: { runId, graph: graphName, ...event } });
     },
   });
   const saved: StoredRun = { runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, status: "running" };
   writeStoredRun(saved);
+  let lease: WorktreeLease | undefined;
+  const acquire = async () => {
+    if (lease) return;
+    writeStoredRun({ ...saved, status: "queued" });
+    lease = await acquireWorktree(input.worktree, signal, (position) => emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__queue__", status: "queued", agent: "connector", model: "fifo", text: `Waiting for worktree · position ${position}` }));
+    writeStoredRun(saved);
+  };
   const drawable = await configured.graph.getGraphAsync({ xray: true });
   const serialized = drawable.toJSON() as { nodes: Array<{ id: string }> | Record<string, unknown>; edges: Array<{ source: string; target: string }> };
   const topology = { nodes: Array.isArray(serialized.nodes) ? serialized.nodes.map((node) => node.id) : Object.keys(serialized.nodes), edges: serialized.edges.map(({ source, target }) => ({ source, target })) };
   const mermaid = drawable.drawMermaid({ withStyles: false });
   const initialState = configured.initial({ task: input.task, directory: input.directory, worktree: input.worktree, runId });
-  emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__start__", status: "active", agent: "langgraph", model: "langgraph", state: initialState, mermaid, topology });
+  emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__start__", status: "active", agent: "langgraph", model: "langgraph", state: initialState, mermaid, topology, progress: configured.progress?.(initialState) });
   try {
-    const result = await configured.graph.invoke(initialState, { configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime }, signal });
+    const result = await configured.graph.invoke(initialState, { configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const requests = result.__interrupt__.map((item) => item.value);
       const output = JSON.stringify(requests, null, 2);
-      emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__interrupt__", status: "interrupted", agent: "human", model: "input", text: output, state: result });
+      emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__interrupt__", status: "interrupted", agent: "human", model: "input", text: output, state: result, progress: configured.progress?.(result) });
       return { runId, graph: graphName, output, interrupted: true };
     }
     const output = configured.result ? configured.result(result) : typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
-    emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: "completed", agent: "langgraph", model: "langgraph", text: output, state: result });
+    emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: configured.progress?.(result) });
     writeStoredRun({ ...saved, status: "completed" });
     return { runId, graph: graphName, output, interrupted: false };
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: "failed", agent: "langgraph", model: "langgraph", text });
-    writeStoredRun({ ...saved, status: "failed" });
+    writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
     throw error;
+  } finally {
+    lease?.release();
   }
 }
 
@@ -201,26 +239,30 @@ async function executeResume(
   const runtime = new OpenCodeAgentRuntime({
     plugin, definition, parentSessionId: saved.rootSessionId, parentModel,
     directory: saved.directory, worktree: saved.worktree, signal, ask,
-    onEvent: (event) => emit({ ...event, at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph }),
+    onEvent: (event) => emit({ ...event, at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, progress: event.state ? configured.progress?.(event.state) : undefined }),
   });
+  let lease: WorktreeLease | undefined;
+  const acquire = async () => { if (!lease) lease = await acquireWorktree(saved.worktree, signal); };
   writeStoredRun({ ...saved, status: "running" });
   try {
-    const result = await configured.graph.invoke(new Command({ resume: answer }), { configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime }, signal });
+    const result = await configured.graph.invoke(new Command({ resume: answer }), { configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const output = JSON.stringify(result.__interrupt__.map((item) => item.value), null, 2);
-      emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__interrupt__", status: "interrupted", agent: "human", model: "input", text: output, state: result });
+      emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__interrupt__", status: "interrupted", agent: "human", model: "input", text: output, state: result, progress: configured.progress?.(result) });
       return { runId: saved.runId, graph: saved.graph, output, interrupted: true };
     }
     const output = configured.result ? configured.result(result) : typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
     writeStoredRun({ ...saved, status: "completed" });
-    emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: "completed", agent: "langgraph", model: "langgraph", text: output, state: result });
+    emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: configured.progress?.(result) });
     return { runId: saved.runId, graph: saved.graph, output, interrupted: false };
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
-    writeStoredRun({ ...saved, status: "failed" });
+    writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
     emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: "failed", agent: "langgraph", model: "langgraph", text });
     throw error;
+  } finally {
+    lease?.release();
   }
 }
 
