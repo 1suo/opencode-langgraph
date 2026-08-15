@@ -11,7 +11,7 @@ import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
 import { mergeAnalysis } from "../src/core/progressive-lod/plan.js";
-import { SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
+import { AnalysisSchema, ClassificationSchema, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
 import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
@@ -175,6 +175,12 @@ describe("progressive planning reducer", () => {
     profile: { route: "change", scope: "subsystem", summary: "change", planningFrame: "behavioral outcome", readOnly: false, risks: [] },
     budget: SCOPE_BUDGETS.subsystem, plan: [{ id: "p1", title: "root", description: "root", level: "behavioral outcome", depth: 0, status: "active", dependencies: [], files: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0 }],
     activeNodeId: "p1", evidence: [], constraints: [], discoveries: [], callsUsed: 1, nextId: 2, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "",
+  });
+
+  it("does not reject task-derived planning level names by arbitrary length", () => {
+    const level = "repository-specific planning boundary ".repeat(12);
+    expect(ClassificationSchema.parse({ route: "change", scope: "architectural", summary: "change", planningFrame: level, readOnly: false, risks: [] }).planningFrame).toBe(level);
+    expect(AnalysisSchema.parse({ summary: "grounded", evidence: [], constraints: [], candidates: [{ name: "one", rationale: "", refinements: [{ action: "refine", title: "next", description: "next", level, implementable: false, dependencies: [], files: [] }] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } }).candidates[0].refinements[0].level).toBe(level);
   });
 
   it("accepts candidate-common refinements and assigns stable IDs", () => {

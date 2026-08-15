@@ -70,13 +70,13 @@ export const SCOPE_BUDGETS: Record<TaskScope, Budget> = {
 
 export const ClassificationSchema = z.object({
   route: z.enum(["answer", "change"]), scope: ScopeSchema, summary: z.string().min(1),
-  planningFrame: z.string().min(1).max(200),
+  planningFrame: z.string().min(1),
   readOnly: z.boolean(), risks: z.array(z.string().max(500)).max(12).default([]),
 });
 
 const RefinementSchema = z.object({
   action: z.enum(["refine", "split", "remove", "reopen_parent"]), title: z.string().min(1),
-  description: z.string().min(1).max(4000), level: z.string().min(1).max(200),
+  description: z.string().min(1).max(4000), level: z.string().min(1),
   implementable: z.boolean(), dependencies: z.array(z.string()).max(20).default([]),
   files: z.array(z.string()).max(40).default([]),
 });
