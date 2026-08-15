@@ -40,11 +40,14 @@ function presetDefinition(preset: ConnectorPresetConfig["preset"]): ConnectorDef
 function progressiveLodPresetDefinition(): ConnectorDefinition {
   return {
     version: 1,
-    models: { current: opencodeModel({ model: "inherit" }) },
+    models: {
+      current: opencodeModel({ model: "inherit" }),
+      flash: opencodeModel({ model: "deepseek/deepseek-v4-flash" }),
+    },
     agents: {
-      classifier: { model: "current", opencodeAgent: "plan", systemPrompt: "Classify the supplied request directly. Do not inspect the repository or call tools. Produce exact structured output.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: 2 },
+      classifier: { model: "flash", opencodeAgent: "plan", systemPrompt: "Classify the supplied request directly. Do not inspect the repository or call tools. Produce exact structured output.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: 2 },
       analyst: { model: "current", opencodeAgent: "plan", systemPrompt: "Ground planning claims in supplied evidence and inspect only unresolved repository facts. Produce exact structured output when requested.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 32 },
-      answer: { model: "current", opencodeAgent: "plan", systemPrompt: "Answer accurately from the request and repository evidence when needed.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
+      answer: { model: "flash", opencodeAgent: "plan", systemPrompt: "Answer accurately from the request and repository evidence when needed.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
       verifier: { model: "current", opencodeAgent: "plan", systemPrompt: "Verify the actual worktree against the task and plan. Do not edit files. Produce exact structured output.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
       implementer: { model: "current", opencodeAgent: "build", systemPrompt: "Implement the complete bounded plan in the current worktree and verify your edits. Preserve unrelated user work.", tools: { question: false }, maxSteps: 64 },
     },

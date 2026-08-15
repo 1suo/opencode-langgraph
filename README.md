@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.5.11.tgz --force
+opencode plugin ./opencode-langgraph-0.5.12.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -37,7 +37,7 @@ Every agent-backed graph node runs in an isolated OpenCode child session. Graph 
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies read-only requests, derives a task-specific planning hierarchy for change requests, implements grounded leaves in dependency order, and verifies or repairs the result. The four-level hierarchy in `SPEC-graph.md` is only an example; it is neither hardcoded nor configuration. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies read-only requests, derives a task-specific planning hierarchy for change requests, implements grounded leaves in dependency order, and verifies or repairs the result. The lightweight classifier and direct read-only answer roles use `deepseek/deepseek-v4-flash`; planning, verification, implementation, and repair inherit the parent OpenCode model. The four-level hierarchy in `SPEC-graph.md` is only an example; it is neither hardcoded nor configuration. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"

@@ -198,6 +198,11 @@ The zero-config definition and generated config use:
 { version: 1, preset: "progressive-lod" }
 ```
 
+The preset routes classification and direct read-only answers to
+`deepseek/deepseek-v4-flash`. Repository planning, independent verification,
+implementation, and repair inherit the parent OpenCode model so high-judgment
+and mutating work keeps the user's selected quality tier.
+
 The removed cooling preset and factory have no compatibility alias. Loading the removed preset produces a migration error.
 
 Custom graphs remain first-class. They may use inherited OpenCode models, explicit `provider/model` selections, or command models such as Codex CLI. Authentication belongs to OpenCode or the command, not this connector.

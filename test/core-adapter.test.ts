@@ -63,7 +63,12 @@ describe("typed graph validation", () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-config-"));
     const definition = await loadConnectorDefinition(project);
     expect(definition.defaultGraph).toBe("progressive-lod");
-    expect(definition.agents.classifier).toMatchObject({ maxSteps: 2, tools: { read: false, grep: false, glob: false, bash: false } });
+    expect(definition.models.flash).toEqual({ backend: "opencode", model: "deepseek/deepseek-v4-flash" });
+    expect(definition.agents.classifier).toMatchObject({ model: "flash", maxSteps: 2, tools: { read: false, grep: false, glob: false, bash: false } });
+    expect(definition.agents.answer.model).toBe("flash");
+    expect(definition.agents.analyst.model).toBe("current");
+    expect(definition.agents.verifier.model).toBe("current");
+    expect(definition.agents.implementer.model).toBe("current");
     const file = writeConnectorConfig(project);
     expect(path.relative(project, file)).toBe(typedConfigFile);
     expect(fs.readFileSync(file, "utf8")).toContain('preset: "progressive-lod"');
