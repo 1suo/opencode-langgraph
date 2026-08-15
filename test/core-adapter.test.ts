@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
 import { graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
-import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
+import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
@@ -406,6 +406,22 @@ describe("durable checkpoints", () => {
 });
 
 describe("OpenCode automatic graph routing", () => {
+  it("persists cross-process cancellation and emits a terminal event", async () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-cancel-"));
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = state;
+    try {
+      writeStoredRun({ runId: "run", rootSessionId: "root", userMessageId: "message", graph: "progressive-lod", task: "task", directory: "/repo", worktree: "/repo", status: "running" });
+      const hooks = await server({ client: {}, directory: "/repo", worktree: "/repo" } as never);
+      await hooks["command.execute.before"]?.({ command: "graph-cancel", sessionID: "root", arguments: "" }, { parts: [] } as never);
+      expect(readStoredRun("run").status).toBe("cancelled");
+      expect(readPluginEvents("root", state).at(-1)).toMatchObject({ runId: "run", node: "__end__", status: "interrupted", text: "Cancelled by user" });
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
   it("runs the graph from a root chat message and records visible events", async () => {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-state-"));
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-project-"));

@@ -40,6 +40,11 @@ export const server: Plugin = async (plugin) => {
       if (input.command === "graph-cancel") {
         cancelledMessages.add(input.sessionID);
         for (const controller of activeControllers.get(input.sessionID) ?? []) controller.abort(new Error("Cancelled by user"));
+        const run = readLatestStoredRun(input.sessionID);
+        if (run?.status === "running" || run?.status === "queued") {
+          writeStoredRun({ ...run, status: "cancelled" });
+          appendPluginEvent({ at: new Date().toISOString(), runId: run.runId, rootSessionId: run.rootSessionId, userMessageId: run.userMessageId, graph: run.graph, node: "__end__", status: "interrupted", agent: "langgraph", model: "langgraph", text: "Cancelled by user" });
+        }
       }
     },
     "chat.message": async (input, output) => {
@@ -165,6 +170,20 @@ interface ExecuteGraphInput {
   metadata?: (input: { title?: string; metadata?: Record<string, unknown> }) => void;
 }
 
+function watchCancellation(runId: string, upstream?: AbortSignal) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(upstream?.reason ?? new Error("Graph run cancelled"));
+  if (upstream?.aborted) abort(); else upstream?.addEventListener("abort", abort, { once: true });
+  const timer = setInterval(() => {
+    try { if (readStoredRun(runId).status === "cancelled") controller.abort(new Error("Cancelled by user")); } catch { /* run is not persisted yet */ }
+  }, 250);
+  timer.unref();
+  return {
+    signal: controller.signal,
+    dispose: () => { clearInterval(timer); upstream?.removeEventListener("abort", abort); },
+  };
+}
+
 async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Promise<GraphExecution> {
   const definition = await loadConnectorDefinition(input.worktree);
   assertValidConnector(await validateConnector(definition));
@@ -172,7 +191,8 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
   const configured = definition.graphs[graphName];
   if (!configured) throw new Error(`Unknown LangGraph: ${graphName}`);
   const runId = randomUUID();
-  const signal = input.signal ?? new AbortController().signal;
+  const cancellation = watchCancellation(runId, input.signal);
+  const signal = cancellation.signal;
   const emit = (event: PluginRunEvent) => {
     const linked = { ...event, userMessageId: input.userMessageId };
     appendPluginEvent(linked);
@@ -221,6 +241,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
     writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
     throw error;
   } finally {
+    cancellation.dispose();
     lease?.release();
   }
 }
@@ -237,6 +258,8 @@ async function executeResume(
   assertValidConnector(await validateConnector(definition));
   const configured = definition.graphs[saved.graph];
   if (!configured) throw new Error(`Configured graph no longer exists: ${saved.graph}`);
+  const cancellation = watchCancellation(saved.runId, signal);
+  signal = cancellation.signal;
   const emit = (event: PluginRunEvent) => {
     const linked = { ...event, userMessageId: saved.userMessageId };
     appendPluginEvent(linked);
@@ -269,6 +292,7 @@ async function executeResume(
     emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });
     throw error;
   } finally {
+    cancellation.dispose();
     lease?.release();
   }
 }
