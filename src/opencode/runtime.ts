@@ -142,7 +142,15 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       sessionId = input.session.sessionId;
     } else if (input.session?.strategy === "fork") {
       if (!input.session.sessionId) throw new Error(`Agent ${input.agent} requested session fork without a session ID`);
-      const forked = await this.options.plugin.client.session.fork({ path: { id: input.session.sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      const parent = await this.options.plugin.client.session.messages({ path: { id: input.session.sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      const abortedMessage = [...parent.data].reverse().find((message) => {
+        const info = message.info as typeof message.info & { error?: unknown };
+        return info.role === "assistant" && Boolean(info.error);
+      });
+      const forked = await this.options.plugin.client.session.fork({
+        path: { id: input.session.sessionId }, query: { directory: this.options.directory },
+        ...(abortedMessage?.info.id ? { body: { messageID: abortedMessage.info.id } } : {}), throwOnError: true,
+      });
       sessionId = forked.data.id;
     } else {
       const created = await this.options.plugin.client.session.create({
@@ -157,6 +165,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       ? await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true })
       : { data: [] as Array<{ info: { id?: string; role: string; finish?: string; cost?: number; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } }; parts: Part[] }> };
     const baselineUsage = sessionUsage(before.data);
+    const baselineMessageIds = new Set(before.data.flatMap((message) => message.info.id ? [message.info.id] : []));
     const baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
     this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId });
     const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } }); };
@@ -188,7 +197,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const output = await this.waitForAnswer(
         sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`,
         agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
-        { maxTurns: agent.maxSteps, ...input.limits }, baselineUsage, baselinePartIds,
+        { maxTurns: agent.maxSteps, ...input.limits }, baselineUsage, baselineMessageIds, baselinePartIds,
       );
       this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: output.usage });
       return { ...output, sessionId };
@@ -201,7 +210,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, baselineUsage: AgentUsage, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastFingerprint = "";
@@ -225,7 +234,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         lastActivityAt = Date.now();
       }
       if (!current || current.type === "idle") {
-        const assistant = [...messages.data].reverse().find((message) => message.info.role === "assistant");
+        const assistant = [...messages.data].reverse().find((message) => message.info.role === "assistant" && (!message.info.id || !baselineMessageIds.has(message.info.id)));
         if (assistant?.info.role === "assistant" && assistant.info.error) throw new Error(`OpenCode agent failed: ${JSON.stringify(assistant.info.error)}`);
         const output = assistant ? text(assistant.parts) : "";
         const structured = assistant?.info.role === "assistant" ? (assistant.info as typeof assistant.info & { structured?: unknown }).structured : undefined;
