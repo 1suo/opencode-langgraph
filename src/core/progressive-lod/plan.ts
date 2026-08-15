@@ -21,7 +21,7 @@ export function selectActiveNode(nodes: PlanNode[]): PlanNode | undefined {
   const done = new Set(nodes.filter((node) => node.status === "verified" || node.status === "removed").map((node) => node.id));
   return nodes
     .filter((node) => (node.status === "pending" || node.status === "active") && node.dependencies.every((id) => done.has(id)))
-    .sort((left, right) => left.lod - right.lod || left.id.localeCompare(right.id))[0];
+    .sort((left, right) => left.depth - right.depth || left.id.localeCompare(right.id))[0];
 }
 
 function commonRefinements(output: AnalysisOutput) {
@@ -75,7 +75,7 @@ export function mergeAnalysis(state: ProgressiveLodState, output: AnalysisOutput
     const id = `p${nextId++}`;
     plan.push({
       id, parentId: target.id, title: refinement.title, description: refinement.description,
-      lod: refinement.implementable ? 3 : Math.min(3, target.lod + 1), status: refinement.implementable ? "ready" : "pending",
+      level: refinement.level, depth: target.depth + 1, status: refinement.implementable ? "ready" : "pending",
       dependencies: refinement.dependencies.filter((dependency) => plan.some((node) => node.id === dependency)),
       files: refinement.files, evidenceIds: output.evidence.length ? evidence.slice(-output.evidence.length).map((item) => item.id) : [],
       confidence: output.evaluation.confidence, contextCycles: 0, reopenCount: 0,

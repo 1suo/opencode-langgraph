@@ -21,7 +21,11 @@ The graph is not a general autonomous manager. OpenCode owns chat, models, tools
 9. Read-only requests do not acquire a worktree lease. Change workflows are serialized per canonical worktree.
 10. Every loop is bounded by calls, nodes, context cycles, reopen attempts, repairs, and elapsed time.
 
-## 3. Levels of detail
+## 3. Runtime-derived planning levels
+
+The graph does not define, configure, or count toward a fixed hierarchy of semantic levels. Classification derives a task-specific planning frame, and each analysis step names the next useful decision boundary from the task and repository evidence. Tree `depth` is structural metadata only. It neither names a level nor determines when implementation begins.
+
+For example, one task might happen to decompose as:
 
 | LOD | Name | Required decision |
 |---:|---|---|
@@ -30,7 +34,7 @@ The graph is not a general autonomous manager. OpenCode owns chat, models, tools
 | 2 | components | Components, interfaces, dependencies, and test surfaces |
 | 3 | changes | File/symbol-sized edits with verification |
 
-A small local task may descend quickly, but it still must produce grounded, implementable leaves. An architectural task should not jump from intent to an unbounded implementation prompt.
+That table is illustrative, not architecture or defaults. A typo may produce an implementable leaf immediately; a cross-system change may use different names, branch unevenly, or descend beyond four levels. Refinement stops when a leaf is grounded, bounded to file/symbol-sized work, and has a verification target, or when a budget is exhausted.
 
 ## 4. State contract
 
@@ -44,7 +48,6 @@ interface ProgressiveLodState {
   worktree: string
   phase: string
   profile?: TaskProfile
-  lods: LodDefinition[]
   budget: Budget
   plan: PlanNode[]
   activeNodeId?: string
@@ -72,7 +75,8 @@ interface PlanNode {
   parentId?: string
   title: string
   description: string
-  lod: 0 | 1 | 2 | 3
+  level: string
+  depth: number
   status: "pending" | "active" | "ready" | "implementing" |
           "verified" | "failed" | "removed"
   dependencies: string[]
@@ -90,8 +94,8 @@ Evidence has a stable ID, claim, source, kind, and confidence. Constraints have 
 
 Three decisions are schema-constrained:
 
-- classification: route, scope, summary, read-only flag, risks;
-- analysis: evidence, constraints, candidate refinements, and evaluation;
+- classification: route, scope, summary, task-specific planning frame, read-only flag, risks;
+- analysis: evidence, constraints, candidate refinements with task-specific level names, and evaluation;
 - verification: pass/fail, checks, failed leaves, repairability, and architectural mismatch.
 
 OpenCode-backed and command-backed agents receive the JSON Schema as a portable prompt contract and must return JSON. When a runtime provides a native structured value the connector consumes it directly; otherwise it parses assistant text. Both paths are validated with Zod. Invalid output fails the node visibly; it is never partially merged.
@@ -110,11 +114,11 @@ The evaluator reports a selected candidate, confidence, missing-context state, a
 4. filters unknown dependency IDs;
 5. attaches newly collected evidence;
 6. enforces the node budget and cycle checks;
-7. selects the next dependency-ready, lowest-LOD pending node.
+7. selects the next dependency-ready, shallowest pending node.
 
 Supported dispositions are:
 
-- `refine`: replace the active abstraction with a more detailed child;
+- `refine`: replace the active planning concern with a more detailed child chosen for this task;
 - `split`: create multiple children for independent or dependent work;
 - `remove`: invalidate work no longer needed;
 - `reopen_parent`: return to a higher-level decision after contradictory evidence.
@@ -218,9 +222,10 @@ A release is production-ready when:
 1. zero-config read-only and change requests both complete with inherited OpenCode models;
 2. schema-invalid decisions fail without mutating plan state;
 3. deterministic merge, common-refinement acceptance, stable IDs, selection, cycles, and budget exits are unit tested;
-4. durable checkpoints resume after process reconstruction;
-5. concurrent change runs serialize while read-only runs do not wait;
-6. interrupt releases the lease and the next user message resumes the same run;
-7. verification can pass, repair, reopen, or terminate explicitly within budget;
-8. F8 renders plan-first state linked to the originating OpenCode message;
-9. package build, typecheck, tests, npm pack/publish, clean npm install, and a live OpenCode load all succeed.
+4. task-specific planning levels support both immediate implementable leaves and hierarchies deeper than the illustrative four-level example;
+5. durable checkpoints resume after process reconstruction;
+6. concurrent change runs serialize while read-only runs do not wait;
+7. interrupt releases the lease and the next user message resumes the same run;
+8. verification can pass, repair, reopen, or terminate explicitly within budget;
+9. F8 renders plan-first state linked to the originating OpenCode message;
+10. package build, typecheck, tests, npm pack/publish, clean npm install, and a live OpenCode load all succeed.

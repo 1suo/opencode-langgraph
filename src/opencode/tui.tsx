@@ -205,7 +205,7 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
     const children = (byParent.get(parentId) ?? []).sort((a, b) => a.id.localeCompare(b.id));
     children.forEach((node, index) => {
       const last = index === children.length - 1;
-      const detail = [`L${node.lod}`, node.status, node.evidence ? `${node.evidence}e` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).join(" · ");
+      const detail = [node.level, `depth ${node.depth}`, node.status, node.evidence ? `${node.evidence}e` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).join(" · ");
       lines.push(`${prefix}${last ? "└─" : "├─"} ${glyph(node.status)} ${node.title}  ${detail}`);
       visit(node.id, `${prefix}${last ? "   " : "│  "}`);
     });

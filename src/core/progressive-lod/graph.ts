@@ -9,11 +9,11 @@ import { DurableFileSaver } from "../durable-checkpointer.js";
 import { structuredAgentNode } from "../structured-agent-node.js";
 import type { ConnectorGraph, GraphProgressSnapshot } from "../types.js";
 import { budgetExceeded, implementationOrder, mergeAnalysis, selectActiveNode } from "./plan.js";
-import { AnalysisSchema, ClassificationSchema, DEFAULT_LODS, SCOPE_BUDGETS, VerificationSchema, type ProgressiveLodState } from "./types.js";
+import { AnalysisSchema, ClassificationSchema, SCOPE_BUDGETS, VerificationSchema, type ProgressiveLodState } from "./types.js";
 
 const ProgressiveState = Annotation.Root({
   runId: Annotation<string>, originalTask: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>,
-  phase: Annotation<string>, profile: Annotation<ProgressiveLodState["profile"]>, lods: Annotation<ProgressiveLodState["lods"]>,
+  phase: Annotation<string>, profile: Annotation<ProgressiveLodState["profile"]>,
   budget: Annotation<ProgressiveLodState["budget"]>, plan: Annotation<ProgressiveLodState["plan"]>, activeNodeId: Annotation<string | undefined>,
   evidence: Annotation<ProgressiveLodState["evidence"]>, constraints: Annotation<ProgressiveLodState["constraints"]>, analysis: Annotation<ProgressiveLodState["analysis"]>,
   discoveries: Annotation<string[]>, callsUsed: Annotation<number>, nextId: Annotation<number>, startedAt: Annotation<number>, repairAttempts: Annotation<number>,
@@ -44,7 +44,7 @@ export interface ProgressiveLodOptions {
 function compactState(state: ProgressiveLodState) {
   return {
     task: state.originalTask, profile: state.profile, active: state.plan.find((node) => node.id === state.activeNodeId),
-    plan: state.plan.map(({ id, parentId, title, description, lod, status, dependencies, files }) => ({ id, parentId, title, description, lod, status, dependencies, files })),
+    plan: state.plan.map(({ id, parentId, title, description, level, depth, status, dependencies, files }) => ({ id, parentId, title, description, level, depth, status, dependencies, files })),
     evidence: state.evidence.slice(-12), constraints: state.constraints, discoveries: state.discoveries.slice(-8),
     budget: { callsUsed: state.callsUsed, calls: state.budget.calls, nodes: state.plan.length, nodeLimit: state.budget.nodes },
   };
@@ -56,11 +56,10 @@ function analysisPrompt(state: ProgressiveLodState): string {
 
 Original task: ${state.originalTask}
 Scope: ${state.profile?.scope}
-Active LOD ${active?.lod}: ${active?.title}\n${active?.description}
-LOD contract: ${state.lods[Math.min(3, active?.lod ?? 0)]?.question}
+Active planning level "${active?.level}" at tree depth ${active?.depth}: ${active?.title}\n${active?.description}
 Existing state: ${JSON.stringify(compactState(state))}
 
-Return ${state.budget.candidates} genuinely distinct candidate decompositions when a material decision exists; otherwise return one. A refinement must descend toward file/symbol-sized work. Mark implementable only when the title and description identify a bounded change with verification. Dependencies must reference existing plan IDs only. Ask for human input only for a consequential choice that repository evidence cannot resolve.`;
+Return ${state.budget.candidates} genuinely distinct candidate decompositions when a material decision exists; otherwise return one. Derive the next useful planning level from this task and repository evidence, and name it in each refinement; do not follow a predetermined intent/architecture/components/changes sequence. A branch may become implementable immediately or require any number of refinements within budget. Mark implementable only when the title and description identify a bounded file/symbol-sized change with verification. Dependencies must reference existing plan IDs only. Ask for human input only for a consequential choice that repository evidence cannot resolve.`;
 }
 
 function planForImplementation(state: ProgressiveLodState): string {
@@ -72,7 +71,7 @@ function progress(state: ProgressiveLodState): GraphProgressSnapshot {
     phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId,
     callsUsed: state.callsUsed, callBudget: state.budget.calls,
     summary: state.verification?.summary ?? state.discoveries.at(-1) ?? state.profile?.summary,
-    nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, lod: node.lod, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence })),
+    nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, level: node.level, depth: node.depth, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence })),
   };
 }
 
@@ -83,7 +82,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
   const builder = new StateGraph(ProgressiveState)
     .addNode("classify", structuredAgentNode<ProgressiveLodState, typeof ClassificationSchema._output>({
       node: "classify", agent: analyst, schema: ClassificationSchema,
-      prompt: (state) => `Classify the request. route=answer only for a read-only response or investigation; route=change whenever files or external state must change. Scope is local, subsystem, architectural, or unknown.\n\n${state.originalTask}`,
+      prompt: (state) => `Classify the request. route=answer only for a read-only response or investigation; route=change whenever files or external state must change. Scope is local, subsystem, architectural, or unknown. Derive a short planningFrame naming the task-specific top-level decision or outcome; it is not selected from a fixed hierarchy.\n\n${state.originalTask}`,
       output: (profile, state) => ({ profile, phase: "classified", callsUsed: state.callsUsed + 1 }),
     }))
     .addNode("answer", agentNode<ProgressiveLodState>({
@@ -93,7 +92,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     }))
     .addNode("initialize", (state: ProgressiveLodState) => ({
       phase: "planning", budget: SCOPE_BUDGETS[state.profile?.scope ?? "unknown"], nextId: 2, activeNodeId: "p1",
-      plan: [{ id: "p1", title: state.profile?.summary ?? state.originalTask, description: state.originalTask, lod: 0, status: "active" as const, dependencies: [], files: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0 }],
+      plan: [{ id: "p1", title: state.profile?.summary ?? state.originalTask, description: state.originalTask, level: state.profile?.planningFrame ?? state.originalTask, depth: 0, status: "active" as const, dependencies: [], files: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0 }],
     }))
     .addNode("acquire", async (_state: ProgressiveLodState, config?: RunnableConfig) => {
       const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined;
@@ -131,7 +130,12 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     }))
     .addNode("reopen", (state: ProgressiveLodState) => {
       const failed = new Set(state.verification?.failedNodeIds ?? []);
-      const plan = state.plan.map((node) => failed.has(node.id) || (node.status === "failed" && !failed.size) ? { ...node, status: "pending" as const, lod: Math.max(0, node.lod - 1), reopenCount: node.reopenCount + 1 } : node);
+      const failedNodes = state.plan.filter((node) => failed.has(node.id) || (node.status === "failed" && !failed.size));
+      const reopenIds = new Set(failedNodes.map((node) => node.parentId ?? node.id));
+      const invalidIds = new Set(failedNodes.map((node) => node.id));
+      const plan = state.plan.map((node) => reopenIds.has(node.id)
+        ? { ...node, status: "pending" as const, reopenCount: node.reopenCount + 1 }
+        : invalidIds.has(node.id) ? { ...node, status: "removed" as const } : node);
       const active = selectActiveNode(plan);
       if (active) active.status = "active";
       return { plan, activeNodeId: active?.id, verification: undefined, phase: "planning" };
@@ -149,7 +153,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addEdge("reopen", "analyze").addEdge("repair", "verify").addEdge("finish", END);
   return {
     graph: builder.compile({ checkpointer: options.checkpointer ?? defaultDurableCheckpointer() }),
-    initial: ({ task, directory, worktree, runId }) => ({ runId, originalTask: task, directory, worktree, phase: "classifying", lods: DEFAULT_LODS, budget: SCOPE_BUDGETS.unknown, plan: [], evidence: [], constraints: [], discoveries: [], callsUsed: 0, nextId: 1, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "" }),
+    initial: ({ task, directory, worktree, runId }) => ({ runId, originalTask: task, directory, worktree, phase: "classifying", budget: SCOPE_BUDGETS.unknown, plan: [], evidence: [], constraints: [], discoveries: [], callsUsed: 0, nextId: 1, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "" }),
     result: (state) => state.result,
     progress,
     display: { classify: { phase: "route", agent: analyst }, analyze: { phase: "expand", agent: analyst }, merge: { phase: "reduce" }, human: { phase: "decision" }, implement: { phase: "commit", agent: options.implementerAgent }, verify: { phase: "verify", agent: verifier }, repair: { phase: "repair", agent: options.implementerAgent } },

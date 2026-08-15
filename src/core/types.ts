@@ -83,7 +83,8 @@ export interface GraphProgressNode {
   id: string;
   parentId?: string;
   title: string;
-  lod: number;
+  level: string;
+  depth: number;
   status: "pending" | "active" | "ready" | "implementing" | "verified" | "failed" | "removed";
   dependencies?: string[];
   evidence?: number;

@@ -11,7 +11,7 @@ import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
 import { mergeAnalysis } from "../src/core/progressive-lod/plan.js";
-import { DEFAULT_LODS, SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
+import { SCOPE_BUDGETS, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
 import { progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
@@ -119,42 +119,43 @@ describe("OpenCode child-session runtime", () => {
   });
 });
 
-describe("progressive LOD reducer", () => {
+describe("progressive planning reducer", () => {
   const state = (): ProgressiveLodState => ({
     runId: "run", originalTask: "change", directory: "/repo", worktree: "/repo", phase: "planning",
-    profile: { route: "change", scope: "subsystem", summary: "change", readOnly: false, risks: [] }, lods: DEFAULT_LODS,
-    budget: SCOPE_BUDGETS.subsystem, plan: [{ id: "p1", title: "root", description: "root", lod: 0, status: "active", dependencies: [], files: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0 }],
+    profile: { route: "change", scope: "subsystem", summary: "change", planningFrame: "behavioral outcome", readOnly: false, risks: [] },
+    budget: SCOPE_BUDGETS.subsystem, plan: [{ id: "p1", title: "root", description: "root", level: "behavioral outcome", depth: 0, status: "active", dependencies: [], files: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0 }],
     activeNodeId: "p1", evidence: [], constraints: [], discoveries: [], callsUsed: 1, nextId: 2, startedAt: Date.now(), repairAttempts: 0, humanQuestion: "", humanAnswer: "", implementation: "", result: "",
   });
 
   it("accepts candidate-common refinements and assigns stable IDs", () => {
     const output = { summary: "grounded", evidence: [{ claim: "entry exists", source: "src/a.ts:1", kind: "repository" as const, confidence: 1 }], constraints: [], candidates: [
-      { name: "a", rationale: "", refinements: [{ action: "split" as const, title: "Shared contract", description: "update contract", implementable: false, dependencies: [], files: ["src/a.ts"] }, { action: "split" as const, title: "Only A", description: "a", implementable: true, dependencies: [], files: [] }] },
-      { name: "b", rationale: "", refinements: [{ action: "split" as const, title: "Shared contract", description: "update contract differently", implementable: false, dependencies: [], files: ["src/a.ts"] }, { action: "split" as const, title: "Only B", description: "b", implementable: true, dependencies: [], files: [] }] },
+      { name: "a", rationale: "", refinements: [{ action: "split" as const, title: "Shared contract", description: "update contract", level: "protocol boundary", implementable: false, dependencies: [], files: ["src/a.ts"] }, { action: "split" as const, title: "Only A", description: "a", level: "patch", implementable: true, dependencies: [], files: [] }] },
+      { name: "b", rationale: "", refinements: [{ action: "split" as const, title: "Shared contract", description: "update contract differently", level: "protocol boundary", implementable: false, dependencies: [], files: ["src/a.ts"] }, { action: "split" as const, title: "Only B", description: "b", level: "patch", implementable: true, dependencies: [], files: [] }] },
     ], evaluation: { selected: 0, confidence: .8, needsMoreContext: false, needsHuman: false, question: "" } };
     const merged = mergeAnalysis(state(), output);
     expect(merged.plan.map((node) => node.id)).toEqual(["p1", "p2"]);
-    expect(merged.plan.at(-1)).toMatchObject({ title: "Shared contract", evidenceIds: ["e1"] });
+    expect(merged.plan.at(-1)).toMatchObject({ title: "Shared contract", level: "protocol boundary", depth: 1, evidenceIds: ["e1"] });
     expect(merged.nextId).toBe(3);
   });
 
   it("holds the active branch for bounded context collection", () => {
-    const output = { summary: "need source", evidence: [], constraints: [], candidates: [{ name: "one", rationale: "", refinements: [{ action: "refine" as const, title: "next", description: "next", implementable: false, dependencies: [], files: [] }] }], evaluation: { selected: 0, confidence: .4, needsMoreContext: true, needsHuman: false, question: "" } };
+    const output = { summary: "need source", evidence: [], constraints: [], candidates: [{ name: "one", rationale: "", refinements: [{ action: "refine" as const, title: "next", description: "next", level: "repository ownership", implementable: false, dependencies: [], files: [] }] }], evaluation: { selected: 0, confidence: .4, needsMoreContext: true, needsHuman: false, question: "" } };
     const merged = mergeAnalysis(state(), output);
     expect(merged.activeNodeId).toBe("p1");
     expect(merged.plan[0]).toMatchObject({ status: "active", contextCycles: 1 });
   });
 });
 
-describe("progressive LOD graph", () => {
-  it("refines to implementable leaves, acquires once, implements, and verifies", async () => {
+describe("progressive planning graph", () => {
+  it("derives a task-specific hierarchy deeper than the documentation example", async () => {
     const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
     let leases = 0;
     const runtime = { call: async (input: { node: string; state: ProgressiveLodState }) => {
-      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "change feature", readOnly: false, risks: [] } };
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "change feature", planningFrame: "observable behavior", readOnly: false, risks: [] } };
       if (input.node === "analyze") {
         const active = input.state.plan.find((node) => node.id === input.state.activeNodeId)!;
-        return { text: "", structured: { summary: `refined L${active.lod}`, evidence: [{ claim: "grounded", source: "src/a.ts:1", kind: "repository", confidence: 1 }], constraints: [], candidates: [{ name: "direct", rationale: "grounded", refinements: [{ action: "refine", title: `LOD ${active.lod + 1}`, description: "bounded work", implementable: active.lod >= 2, dependencies: [], files: ["src/a.ts"] }] }], evaluation: { selected: 0, confidence: .9, needsMoreContext: false, needsHuman: false, question: "" } } };
+        const levels = ["integration seam", "state transition", "failure semantics", "runtime observation", "concrete patch"];
+        return { text: "", structured: { summary: `refined ${active.level}`, evidence: [{ claim: "grounded", source: "src/a.ts:1", kind: "repository", confidence: 1 }], constraints: [], candidates: [{ name: "direct", rationale: "grounded", refinements: [{ action: "refine", title: `Branch ${active.depth + 1}`, description: "bounded work", level: levels[active.depth], implementable: active.depth >= 4, dependencies: [], files: ["src/a.ts"] }] }], evaluation: { selected: 0, confidence: .9, needsMoreContext: false, needsHuman: false, question: "" } } };
       }
       if (input.node === "implement") return { text: "implemented and checked" };
       if (input.node === "verify") return { text: "", structured: { passed: true, summary: "all checks pass", checks: [{ name: "test", passed: true, evidence: "ok" }], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
@@ -164,14 +165,30 @@ describe("progressive LOD graph", () => {
     const result = await configured.graph.invoke(initial, { configurable: { thread_id: "run", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => { leases++; } } });
     expect(leases).toBe(1);
     expect(configured.result?.(result)).toContain("all checks pass");
-    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 6, nodes: [expect.anything(), expect.anything(), expect.anything(), expect.objectContaining({ status: "verified" })] });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 8 });
+    expect(configured.progress?.(result)?.nodes).toHaveLength(6);
+    expect(configured.progress?.(result)?.nodes.at(-1)).toMatchObject({ level: "concrete patch", depth: 5, status: "verified" });
+  });
+
+  it("allows a grounded local task to become implementable immediately", async () => {
+    const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
+    const runtime = { call: async (input: { node: string }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "fix typo", planningFrame: "single-file correction", readOnly: false, risks: [] } };
+      if (input.node === "analyze") return { text: "", structured: { summary: "located typo", evidence: [], constraints: [], candidates: [{ name: "direct", rationale: "mechanical", refinements: [{ action: "refine", title: "Correct label", description: "Edit src/a.ts and assert the rendered label", level: "verified text edit", implementable: true, dependencies: [], files: ["src/a.ts"] }] }], evaluation: { selected: 0, confidence: 1, needsMoreContext: false, needsHuman: false, question: "" } } };
+      if (input.node === "implement") return { text: "implemented" };
+      if (input.node === "verify") return { text: "", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const result = await configured.graph.invoke(configured.initial({ task: "fix typo", directory: "/repo", worktree: "/repo", runId: "short" }), { configurable: { thread_id: "short", langgraphOpenCodeRuntime: runtime } });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 4 });
+    expect(configured.progress?.(result)?.nodes.at(-1)).toMatchObject({ level: "verified text edit", depth: 1, status: "verified" });
   });
 
   it("does not acquire the worktree for direct answers", async () => {
     const configured = progressiveLodGraph({ analystAgent: "analyst", implementerAgent: "implementer", checkpointer: new MemorySaver() });
     let leases = 0;
     const runtime = { call: async (input: { node: string }) => input.node === "classify"
-      ? { text: "", structured: { route: "answer", scope: "local", summary: "explain", readOnly: true, risks: [] } }
+      ? { text: "", structured: { route: "answer", scope: "local", summary: "explain", planningFrame: "direct explanation", readOnly: true, risks: [] } }
       : { text: "direct answer" } };
     const result = await configured.graph.invoke(configured.initial({ task: "what?", directory: "/repo", worktree: "/repo", runId: "answer" }), { configurable: { thread_id: "answer", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => { leases++; } } });
     expect(leases).toBe(0);
@@ -239,7 +256,7 @@ describe("OpenCode automatic graph routing", () => {
       status: async () => ({ data: {} }),
       messages: async ({ path: requestPath }: { path: { id: string } }) => ({ data: requestPath.id === "root"
         ? ["message-1", "message-command"].map((parentID) => ({ info: { role: "assistant", parentID }, parts: [{ type: "text", text: "The answer is 4." }] }))
-        : [{ info: { role: "assistant", ...(titles.get(requestPath.id)?.includes("classify") ? { structured: { route: "answer", scope: "local", summary: "answer question", readOnly: true, risks: [] } } : {}) }, parts: [{ type: "text", text: "The answer is 4." }] }],
+        : [{ info: { role: "assistant", ...(titles.get(requestPath.id)?.includes("classify") ? { structured: { route: "answer", scope: "local", summary: "answer question", planningFrame: "direct answer", readOnly: true, risks: [] } } : {}) }, parts: [{ type: "text", text: "The answer is 4." }] }],
       }),
       abort: async () => ({ data: true }),
     } };
@@ -400,11 +417,12 @@ describe("OpenCode graph viewer", () => {
   it("renders semantic progress as a hierarchy with budget state", () => {
     const base = { at: "now", runId: "run", rootSessionId: "root", graph: "progressive-lod", node: "analyze", status: "active", agent: "analyst", model: "inherit" };
     const tree = renderPlanTree([{ ...base, progress: { phase: "planning", scope: "subsystem", callsUsed: 3, callBudget: 24, activeNodeId: "p2", nodes: [
-      { id: "p1", title: "Intent", lod: 0, status: "removed" },
-      { id: "p2", parentId: "p1", title: "Contract", lod: 1, status: "active", evidence: 2, confidence: .8 },
+      { id: "p1", title: "Requested behavior", level: "observable outcome", depth: 0, status: "removed" },
+      { id: "p2", parentId: "p1", title: "Session handoff", level: "state transition", depth: 1, status: "active", evidence: 2, confidence: .8 },
     ] } }]);
     expect(tree).toContain("planning · subsystem · calls 3/24");
-    expect(tree).toContain("└─ ▶ Contract");
+    expect(tree).toContain("└─ ▶ Session handoff");
+    expect(tree).toContain("state transition · depth 1");
   });
 
   it("keeps the most recently started execution visible when runs overlap", () => {

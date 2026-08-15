@@ -8,11 +8,11 @@ export interface TaskProfile {
   route: "answer" | "change";
   scope: TaskScope;
   summary: string;
+  planningFrame: string;
   readOnly: boolean;
   risks: string[];
 }
 
-export interface LodDefinition { level: number; name: string; question: string; implementable: boolean }
 export interface Evidence { id: string; claim: string; source: string; kind: "repository" | "tool" | "inference" | "user"; confidence: number }
 export interface Constraint { id: string; text: string; source: string }
 export interface PlanNode {
@@ -20,7 +20,8 @@ export interface PlanNode {
   parentId?: string;
   title: string;
   description: string;
-  lod: number;
+  level: string;
+  depth: number;
   status: PlanStatus;
   dependencies: string[];
   files: string[];
@@ -34,6 +35,7 @@ export interface CandidateRefinement {
   action: "refine" | "split" | "remove" | "reopen_parent";
   title: string;
   description: string;
+  level: string;
   implementable: boolean;
   dependencies: string[];
   files: string[];
@@ -59,13 +61,6 @@ export interface Budget {
   reservedCalls: number;
 }
 
-export const DEFAULT_LODS: LodDefinition[] = [
-  { level: 0, name: "intent", question: "What outcome and direction satisfy the request?", implementable: false },
-  { level: 1, name: "architecture", question: "Which ownership boundaries and system contracts change?", implementable: false },
-  { level: 2, name: "components", question: "Which components, interfaces, and dependencies implement it?", implementable: false },
-  { level: 3, name: "changes", question: "Which file/symbol-sized changes can be implemented and verified?", implementable: true },
-];
-
 export const SCOPE_BUDGETS: Record<TaskScope, Budget> = {
   local: { calls: 12, nodes: 8, candidates: 2, contextCyclesPerNode: 2, reopens: 1, repairs: 1, minutes: 15, reservedCalls: 2 },
   subsystem: { calls: 24, nodes: 16, candidates: 2, contextCyclesPerNode: 3, reopens: 2, repairs: 2, minutes: 30, reservedCalls: 3 },
@@ -75,12 +70,14 @@ export const SCOPE_BUDGETS: Record<TaskScope, Budget> = {
 
 export const ClassificationSchema = z.object({
   route: z.enum(["answer", "change"]), scope: ScopeSchema, summary: z.string().min(1),
+  planningFrame: z.string().min(1).max(200),
   readOnly: z.boolean(), risks: z.array(z.string().max(500)).max(12).default([]),
 });
 
 const RefinementSchema = z.object({
   action: z.enum(["refine", "split", "remove", "reopen_parent"]), title: z.string().min(1),
-  description: z.string().min(1).max(4000), implementable: z.boolean(), dependencies: z.array(z.string()).max(20).default([]),
+  description: z.string().min(1).max(4000), level: z.string().min(1).max(200),
+  implementable: z.boolean(), dependencies: z.array(z.string()).max(20).default([]),
   files: z.array(z.string()).max(40).default([]),
 });
 
@@ -101,7 +98,7 @@ export type VerificationOutput = z.infer<typeof VerificationSchema>;
 
 export interface ProgressiveLodState extends Record<string, unknown> {
   runId: string; originalTask: string; directory: string; worktree: string;
-  phase: string; profile?: TaskProfile; lods: LodDefinition[]; budget: Budget;
+  phase: string; profile?: TaskProfile; budget: Budget;
   plan: PlanNode[]; activeNodeId?: string; evidence: Evidence[]; constraints: Constraint[];
   analysis?: AnalysisOutput; discoveries: string[]; callsUsed: number; nextId: number;
   startedAt: number; repairAttempts: number; humanQuestion: string; humanAnswer: string;
