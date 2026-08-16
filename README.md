@@ -2,7 +2,7 @@
 
 `opencode-langgraph` is an explicit, generic connector between [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/overview) and [OpenCode](https://opencode.ai/). OpenCode remains the chat, coding, model, permission, and child-session runtime. LangGraph owns orchestration state, routing, checkpoints, and interrupts.
 
-It includes a production `progressive-lod` workflow, while remaining a generic connector for arbitrary user-defined graphs.
+It includes a production `solution-lod` workflow, while remaining a generic connector for arbitrary user-defined graphs.
 
 ## Install
 
@@ -33,28 +33,28 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
 
-Every agent-backed graph node runs in an OpenCode child session. The production graph continues scout context down a refinement chain, forks it at a split, uses a fresh tool-free decider for each decision, and isolates every implementation leaf. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
+Every agent activation runs in an OpenCode child session. The production graph stores a multi-resolution solution tree separately from its activation network. Constraints collapse candidate domains; only a selected solution family exposes its conditional next-LOD regions. Inspectors, synthesizers, implementers, verifiers, and presenters exchange small referenced state deltas instead of replaying transcripts. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies each message as an answer, a bounded direct change, or a change that needs planning. Bounded changes go straight to one implementer and independent verification; only uncertain work pays for branch-scoped scouting and tool-free detail decisions. A blocked direct change reopens into planning with its blocker instead of guessing. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and turn default. Classifier, scout, decider, and direct-answer roles use `deepseek/deepseek-v4-flash`; verifier, implementer, and repair inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "solution-lod"`. Its solution regions carry candidate domains, constraints, evidence, acceptance criteria, and conditional next-LOD definitions. Regions can be resolved at different depths; implementation starts when a required region is actionable. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and scheduling quantum. Inspect, synthesize, verify, and present use `deepseek/deepseek-v4-flash`; implement inherits the parent OpenCode model. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
 
 export default defineOpenCodeLangGraph({
   version: 1,
-  preset: "progressive-lod",
+  preset: "solution-lod",
   options: {
-    models: { scout: "deepseek/deepseek-v4-flash", verifier: "inherit" },
-    roleLimits: { implementer: { maxTurns: 16, maxCost: 0.08 } },
+    models: { inspect: "deepseek/deepseek-v4-flash", verify: "inherit" },
+    roleLimits: { implement: { maxTurns: 32, maxContextTokens: 160_000 } },
   },
 })
 ```
 
-All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` define internal scheduling quanta for turns, fresh input, cache reads, live context, or cost. The controller may fork an aborted child for a bounded number of same-size quanta; cumulative scope limits stop the run automatically and never create a human budget prompt. Human interrupts are reserved for indispensable engineering decisions.
+All overrides are optional. `models` accepts `inherit` or `provider/model` per capability. `roleLimits` define one activation's scheduling quantum. Usage is telemetry and scheduling pressure, not a user-facing budget gate or a reason to discard state. Human interrupts are reserved for indispensable engineering decisions.
 
-Scout has repository read/search tools but no shell. Facts retain repository/inference provenance, compact branch-scoped constraints and evidence flow forward, and implementation receives the original request plus its leaf contract and grounded facts. Implementers may perform repository-required workflow setup such as a session branch or worktree. Aggregate verification runs tests in a connector-owned disposable copy of the current worktree; repairs change only the real implementation session, then a fresh isolated verifier checks the result again.
+Inspect has repository read/search tools but no shell. Synthesize is tool-free. Implementation receives the collapsed ancestry, actionable region, relevant constraints/evidence, and artifacts. Verification maps failures to exact regions. Malformed output fails only its activation; actual workspace changes are reconciled and retained.
 
 ### Connect an arbitrary graph
 
@@ -135,7 +135,7 @@ For optional anti-overengineering guidance, add `@dietrichgebert/ponytail` once 
 
 Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer. Checkpoints and run metadata are plugin-private persistence: the connector resolves the current session's run internally, and agents must never read those files.
 
-The F8 viewer opens on a live semantic plan matrix with colored status, LOD, dependency, evidence, confidence, and contributing-agent badges. Press `G` for the controller flow, `2` for the chronological execution trace, `3` for output, `4` for that execution's fully composed system/input/schema prompt, and `T` for raw state. While live, the selected execution follows new nodes until you navigate backward. Long traces collapse independently before and after the selection; navigation hints live in panel headers.
+The F8 viewer opens on the live solution LOD tree. The region pane shows its candidate domain, elimination reasons, conditional children, constraints, evidence, activations, and artifacts. Press `G` for the distinct activation/message network; output, effective prompt, and raw state remain diagnostic. Navigation hints live in panel headers.
 
 Graph-owned start, resume, result, and failure messages use a hidden one-step presenter with every tool disabled. The normal root build agent never executes those lifecycle messages.
 

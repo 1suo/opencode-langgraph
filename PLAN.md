@@ -1,6 +1,6 @@
 # OpenCode LangGraph connector architecture
 
-`opencode-langgraph` is an explicit LangGraph–OpenCode connector, not a standalone coding TUI. Its built-in production workflow is `progressive-lod`.
+`opencode-langgraph` is an explicit LangGraph–OpenCode connector, not a standalone coding TUI. Its built-in production workflow is `solution-lod`.
 
 ## Ownership
 
@@ -10,7 +10,7 @@
 
 ## Connection
 
-The connector starts a graph from `graph:on` messages or `/run-graph`; the root model has no orchestration tools. An agent-backed node creates, continues, or forks an OpenCode child session as explicitly requested by the graph. Typed graph state—not a replayed transcript—is the cross-role contract. One production role registry owns role prompts, models, tools, and defaults; the graph supplies role-specific typed payloads only. Bounded changes skip planning, while uncertain work keeps scouting branch-local and makes each detail decision in a fresh tool-free session. Scoped evidence, constraints, dependency contracts, and replan issues flow forward without replaying transcripts. Implementation leaves remain isolated, repair continues only the failed leaf session, and every aggregate verifier runs in a disposable mirror.
+The connector starts a graph from `graph:on` messages or `/run-graph`; the root model has no orchestration tools. The solution hierarchy stores candidate domains at conditional levels of detail, while a separate sparse activation network invokes inspect, synthesize, implement, verify, and present capabilities. Typed state deltas—not replayed transcripts—are the cross-capability contract. WFC-style propagation collapses solution candidates and exposes only the selected family's finer variables. Implementation begins at actionable regions; verification failures reopen only the implicated region.
 
 External CLIs use the command model backend: prompt on stdin, answer on stdout, logs on stderr, graph worktree as cwd, and abort propagation.
 
@@ -18,7 +18,7 @@ LangGraph `interrupt()` pauses the graph in an atomic per-thread durable checkpo
 
 ## Configuration
 
-`.opencode/langgraph.ts` exports `defineOpenCodeLangGraph(...)`. It may select `{ preset: "progressive-lod" }` or connect arbitrary compiled LangGraph instances with initial, result, and optional semantic-progress projections.
+`.opencode/langgraph.ts` exports `defineOpenCodeLangGraph(...)`. It may select `{ preset: "solution-lod" }` or connect arbitrary compiled LangGraph instances with initial, result, and optional semantic-progress projections.
 
 ## Validation
 
@@ -26,4 +26,4 @@ LangGraph compilation remains authoritative for graph structure. The connector a
 
 ## UI
 
-The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current semantic state. `/graph` opens the colored plan matrix first, with contributing-agent attribution kept distinct from the chronological execution trace, controller flow, node output, prompt, and raw state available from header key hints.
+The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current semantic state. `/graph` opens the solution LOD tree and selected region domain. `G` shows the separate activation network; node output, prompt, and raw state remain diagnostic.

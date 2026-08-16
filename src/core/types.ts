@@ -86,19 +86,14 @@ export interface ConnectorDefinition {
 
 export interface ConnectorPresetConfig {
   version: 1;
-  preset: "progressive-lod";
-  options?: ProgressiveLodPresetOptions;
+  preset: "solution-lod";
+  options?: SolutionLodPresetOptions;
 }
 
-export type ProgressivePresetRole = "classifier" | "scout" | "decider" | "answer" | "implementer" | "verifier" | "repair";
-export interface ProgressivePresetBudget {
-  calls?: number; nodes?: number; contextCyclesPerNode?: number; reopens?: number; repairs?: number; minutes?: number;
-  maxTurns?: number; maxInputTokens?: number; maxCacheReadTokens?: number; maxCost?: number;
-}
-export interface ProgressiveLodPresetOptions {
-  models?: Partial<Record<ProgressivePresetRole, "inherit" | `${string}/${string}`>>;
-  roleLimits?: Partial<Record<Exclude<ProgressivePresetRole, "answer">, AgentCallLimits>>;
-  budgets?: Partial<Record<"local" | "subsystem" | "architectural" | "unknown", ProgressivePresetBudget>>;
+export type SolutionPresetRole = "inspect" | "synthesize" | "implement" | "verify" | "present";
+export interface SolutionLodPresetOptions {
+  models?: Partial<Record<SolutionPresetRole, "inherit" | `${string}/${string}`>>;
+  roleLimits?: Partial<Record<SolutionPresetRole, AgentCallLimits>>;
 }
 
 export type ConnectorConfig = ConnectorDefinition | ConnectorPresetConfig;
@@ -143,11 +138,22 @@ export interface GraphProgressNode {
   title: string;
   level: string;
   depth: number;
-  status: "pending" | "active" | "expanded" | "ready" | "implementing" | "implemented" | "verified" | "failed" | "removed";
+  status: string;
   dependencies?: string[];
   evidence?: number;
   confidence?: number;
   agents?: string[];
+}
+
+export interface SolutionSemanticSnapshot {
+  kind: "solution-lod-v1";
+  revision: number;
+  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[] }>;
+  candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[]; conditionalChildren: string[] }>;
+  constraints: Array<{ id: string; kind: string; subject: string; target: string; reason: string }>;
+  evidence: Array<{ id: string; text: string; source: string; kind: string }>;
+  activations: Array<{ id: string; capability: string; regionId: string; request: string; expectedDelta: string; senderActivationId?: string; status: string; error?: string }>;
+  artifacts: Array<{ id: string; regionId: string; kind: string; path?: string; summary: string; passed?: boolean; activationId: string }>;
 }
 
 export interface GraphProgressSnapshot {
@@ -159,6 +165,7 @@ export interface GraphProgressSnapshot {
   costBudget?: number;
   summary?: string;
   usage?: AgentUsage;
+  semantic?: SolutionSemanticSnapshot;
   nodes: GraphProgressNode[];
 }
 

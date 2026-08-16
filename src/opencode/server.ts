@@ -8,7 +8,7 @@ import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
 import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
-import { CLASSIFIER_OPENCODE_AGENT, CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, DECIDER_OPENCODE_AGENT, PROGRESSIVE_ROLE_CONTRACTS, SCOUT_OPENCODE_AGENT, VERIFIER_OPENCODE_AGENT } from "../core/progressive-lod/roles.js";
+import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "./verifier-workspace.js";
 
 const PRESENTER_AGENT = CONNECTOR_PRESENTER.name;
@@ -75,10 +75,10 @@ export const server: Plugin = async (plugin) => {
     config: async (config) => {
       config.agent ??= {};
       config.agent[PRESENTER_AGENT] = { description: "Tool-free LangGraph lifecycle presenter", mode: "primary", hidden: true, prompt: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, maxSteps: CONNECTOR_PRESENTER.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
-      config.agent[CLASSIFIER_OPENCODE_AGENT] = { description: "Tool-free LangGraph request classifier", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.classifier.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.classifier.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.classifier.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
-      config.agent[DECIDER_OPENCODE_AGENT] = { description: "Tool-free LangGraph plan decider", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.decider.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.decider.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.decider.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
-      config.agent[SCOUT_OPENCODE_AGENT] = { description: "Repository-only LangGraph scout", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.scout.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.scout.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.scout.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
-      config.agent[VERIFIER_OPENCODE_AGENT] = { description: "Isolated LangGraph verifier", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.verifier.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.verifier.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.verifier.maxSteps, permission: { edit: "deny", bash: "allow", webfetch: "deny", external_directory: "deny" } };
+      for (const [role, contract] of Object.entries(SOLUTION_ROLE_CONTRACTS)) {
+        if (contract.agent === "build" || contract.agent === "plan") continue;
+        config.agent[contract.agent] = { description: `LangGraph ${role} capability`, mode: "subagent", hidden: true, prompt: contract.systemPrompt, tools: contract.tools, maxSteps: contract.maxSteps, permission: { edit: "deny", bash: role === "verify" ? "allow" : "deny", webfetch: "deny", external_directory: "deny" } };
+      }
       config.command ??= {};
       config.command["run-graph"] = {
         description: "Run this task through the current session's LangGraph",
@@ -260,7 +260,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
       input.metadata?.({ title: `LangGraph · ${event.node}`, metadata: { runId, graph: graphName, ...event } });
     },
   });
-  const saved: StoredRun = { checkpointVersion: graphName === "progressive-lod" ? 2 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, status: "running" };
+  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 3 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, status: "running" };
   writeStoredRun(saved);
   let lease: WorktreeLease | undefined;
   const acquire = async () => {
@@ -286,7 +286,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
     }
     const output = configured.result ? configured.result(result) : typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
     const finalProgress = configured.progress?.(result);
-    const failed = finalProgress?.phase === "failed";
+    const failed = finalProgress?.phase === "failed" || finalProgress?.phase === "blocked";
     emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: failed ? "failed" : "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: finalProgress });
     writeStoredRun({ ...saved, status: failed ? "failed" : "completed" });
     return { runId, graph: graphName, output, interrupted: false, failed };
@@ -309,7 +309,7 @@ async function executeResume(
   signal = new AbortController().signal,
   ask?: ExecuteGraphInput["ask"],
 ): Promise<GraphExecution> {
-  if (saved.graph === "progressive-lod" && saved.checkpointVersion !== 2) throw new Error("This interrupted progressive-lod run uses the pre-0.6 checkpoint schema and cannot be resumed. Start a new message to create a clean 0.6 run.");
+  if (saved.graph === "solution-lod" && saved.checkpointVersion !== 3) throw new Error("This interrupted solution-lod run uses an incompatible checkpoint schema. Start a new message to create a clean state-v3 run.");
   const definition = await loadConnectorDefinition(saved.worktree);
   assertValidConnector(await validateConnector(definition));
   const configured = definition.graphs[saved.graph];
@@ -338,7 +338,7 @@ async function executeResume(
     }
     const output = configured.result ? configured.result(result) : typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
     const finalProgress = configured.progress?.(result);
-    const failed = finalProgress?.phase === "failed";
+    const failed = finalProgress?.phase === "failed" || finalProgress?.phase === "blocked";
     writeStoredRun({ ...saved, status: failed ? "failed" : "completed" });
     emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: failed ? "failed" : "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: finalProgress });
     return { runId: saved.runId, graph: saved.graph, output, interrupted: false, failed };

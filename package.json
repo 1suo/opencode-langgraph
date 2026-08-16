@@ -1,6 +1,6 @@
 {
   "name": "opencode-langgraph",
-  "version": "0.6.16",
+  "version": "0.7.0",
   "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
   "main": "./dist/src/opencode/server.js",
@@ -19,7 +19,7 @@
     "SPEC-graph.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-tui.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/build-tui.mjs",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
