@@ -48,12 +48,11 @@ export default defineOpenCodeLangGraph({
   options: {
     models: { scout: "deepseek/deepseek-v4-flash", verifier: "inherit" },
     roleLimits: { implementer: { maxTurns: 32, maxCost: 0.08 } },
-    budgets: { subsystem: { calls: 24, maxCost: 0.08 } },
   },
 })
 ```
 
-All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` caps a call by turns, fresh input, cache reads, live context, or cost; `budgets` caps the complete run by classified scope. The default scout allowance is 16 turns and 96,000 live-context tokens. Scope budgets also enforce refinement cycles per concern. Reaching a cap pauses for `continue`, `narrow: …`, or `stop` instead of silently granting another long loop.
+All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` define internal scheduling quanta for turns, fresh input, cache reads, live context, or cost. If a role exhausts a quantum, the controller forks the aborted child session, expands every resource allowance together, and resumes automatically. Usage is telemetry; it never creates a human budget prompt. Human interrupts are reserved for indispensable engineering decisions.
 
 Scout has repository read/search tools but no shell. Facts retain repository/inference provenance, constraints remain branch-scoped, and dependency contracts plus grounded facts flow into implementation. Aggregate verification runs tests in a connector-owned disposable copy of the current worktree; repairs change only the real implementation session, then a fresh isolated verifier checks the result again.
 
@@ -111,7 +110,7 @@ export default defineOpenCodeLangGraph({
 })
 ```
 
-Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Optional `maxSteps` bounds completed model turns. The built-in controller also enforces token, live-context, cache-read, cost, and whole-run budgets. Custom agents remain step-unlimited unless configured.
+Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Optional `maxSteps` bounds completed model turns. The built-in controller treats token, context, cache-read, and cost allowances as automatically expanded scheduling quanta rather than user-facing workflow gates. Custom agents remain step-unlimited unless configured.
 
 The F8 plan header and execution view report model turns, uncached input, and cache-read tokens in addition to graph calls. Graph calls count orchestration nodes, not the model turns inside an OpenCode child session.
 

@@ -19,7 +19,7 @@ The graph is a controller, not another general agent. It gives each role one tas
 7. Stable IDs, dependency resolution, node selection, cycle checks, and status transitions are controller code—not model judgment.
 8. A bounded change may enter one cohesive implementation leaf directly. Otherwise implementation starts only after every live planning concern is resolved and runs leaves in dependency order.
 9. Verification is one independent aggregate pass after all leaves. Repair continues only the failed leaf session; an omitted prerequisite or architectural mismatch reopens planning.
-10. Human and budget decisions use LangGraph `interrupt()`. No hidden timeout or turn extension can continue spending.
+10. Only indispensable engineering decisions use LangGraph `interrupt()`. Resource allowances are internal scheduling quanta and never require user babysitting.
 11. Read-only requests do not acquire a worktree lease. Change runs serialize per canonical worktree.
 12. Checkpoint schema 2 is a clean 0.6 boundary. Pre-0.6 interrupted progressive runs fail with an explicit restart message; they are not guessed or migrated.
 
@@ -29,9 +29,9 @@ The graph is a controller, not another general agent. It gives each role one tas
 |---|---|---|---|---|
 | classifier | DeepSeek V4 Flash | none | fresh | route and task profile |
 | scout | DeepSeek V4 Flash | read/search, no shell | fresh root; continue refinement; fork split | cited facts only |
-| decider | DeepSeek V4 Flash | none | fresh per decision; continue only after a budget pause | one disposition |
+| decider | DeepSeek V4 Flash | none | fresh per decision; fork automatically after an exhausted scheduling quantum | one disposition |
 | implementer | inherited | build tools, no subagents | fresh per leaf | files and focused checks |
-| verifier | inherited | read/search/test shell in disposable mirror | fresh aggregate pass; fork only after a budget pause | leaf-specific verdicts |
+| verifier | inherited | read/search/test shell in disposable mirror | fresh aggregate pass; fork automatically after an exhausted scheduling quantum | leaf-specific verdicts |
 | repair | inherited | build tools, no subagents | continue failed leaf | bounded repair artifacts |
 
 All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime supplies a portable JSON Schema text contract and retries malformed, truncated, or schema-invalid output in the same scoped session before state mutation. This deliberately avoids provider-specific structured-output tool modes. Each call records the system, input, and output-contract layers for F8 inspection.
@@ -91,12 +91,12 @@ classify
   ├─ answer → END
   ├─ bounded change → acquire lease → implement → verify → END
   └─ planned change → acquire lease → initialize root
-       → guard budget
+       → deterministic guard
        → scout active branch
        → tool-free decision
        → deterministic merge
           ├─ next concern → scout
-          ├─ human/budget interrupt → resume or stop
+          ├─ indispensable human decision → resume
           └─ all concerns resolved
                → implement one leaf at a time
                → one aggregate verifier
@@ -116,9 +116,9 @@ One implementation leaf contains tightly coupled production code, focused tests,
 | subsystem | 24 | 12 | 3 | 2 | 2 | 48 | 250k | 3m | $0.08 |
 | architectural/unknown | 40 | 16 | 3 | 2 | 2 | 80 | 500k | 6m | $0.15 |
 
-Every role also has per-call caps for turns, fresh input, cache reads, and live context. The default implementer cap is 32 turns; scout 16 with a 96,000-token live-context cap; verifier and repair 12; classifier and decider 2. Context-cycle limits are enforced per concern with grants scoped to that concern. An idle completed answer wins over a cap reached on its final turn. A cap reached while still busy aborts that child call and interrupts the graph with exact usage plus `continue`, `narrow: …`, and `stop` choices.
+Every role has a scheduling quantum for turns, fresh input, cache reads, and live context. The default implementer quantum is 32 turns; scout 16 with 96,000 live-context tokens; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a quantum reached on its final turn. A quantum reached while still busy aborts that child call; the controller then expands all allowances for that role concern together and automatically forks the child session. Usage remains visible as telemetry and never pauses the user workflow.
 
-The verifier's shell and tests run in a connector-owned copy of the complete visible worktree with live Git metadata excluded. The copy survives only a verifier budget pause and is removed after a verdict, failure, or cancellation. Post-repair verification starts a fresh session and fresh copy.
+The verifier's shell and tests run in a connector-owned copy of the complete visible worktree with live Git metadata excluded. The copy survives an internal verifier reschedule and is removed after a verdict, failure, or cancellation. Post-repair verification starts a fresh session and fresh copy.
 
 The 0.5 failure baseline for the same corrective task was about 86 model turns, 200k fresh input, 10.18m cache-read tokens, and $0.209 without a verified completion. The 0.6 controller must stop or request approval before reaching that envelope. Optimization is accepted only when task quality and core flow remain intact; token reduction alone is not success.
 

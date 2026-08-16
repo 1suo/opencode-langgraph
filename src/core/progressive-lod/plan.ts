@@ -162,9 +162,3 @@ export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenL
   if (active) active.status = "active";
   return { plan, activeNodeId: active?.id, reopenedNodeIds: [...reopenIds], invalidatedNodeIds: [...new Set([...reopenIds, ...invalid])] };
 }
-
-export function budgetExceeded(state: ProgressiveLodState): boolean {
-  const multiplier = (state.budgetGrants.global ?? 0) + 1;
-  return state.callsUsed >= state.budget.calls * multiplier || state.usage.turns >= state.budget.maxTurns * multiplier || state.usage.input >= state.budget.maxInputTokens * multiplier
-    || state.usage.cacheRead >= state.budget.maxCacheReadTokens * multiplier || state.usage.cost >= state.budget.maxCost * multiplier || Date.now() - state.startedAt >= state.budget.minutes * 60_000 * multiplier;
-}

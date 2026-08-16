@@ -8,7 +8,7 @@ import { z, type ZodType } from "zod";
 import { agentNode } from "../agent-node.js";
 import { DurableFileSaver } from "../durable-checkpointer.js";
 import type { AgentCallResult, AgentRuntime, AgentSessionDirective, AgentUsage, ConnectorGraph, GraphProgressSnapshot } from "../types.js";
-import { applyDecision, applyVerification, budgetExceeded, mergeResearch, nextImplementationLeaf, reopenFailedPlan } from "./plan.js";
+import { applyDecision, applyVerification, mergeResearch, nextImplementationLeaf, reopenFailedPlan } from "./plan.js";
 import {
   ClassificationSchema, DEFAULT_ROLE_LIMITS, DetailDecisionSchema, ImplementationResultSchema, ResearchSchema, SCOPE_BUDGETS, VerificationSchema,
   type DetailDecision, type ImplementationResult, type PendingBudget, type PlanNode, type ProgressiveLodState, type ProgressiveRoleLimits, type ResearchPacket, type ScopeBudget, type VerificationOutput,
@@ -185,31 +185,32 @@ function verificationResult(raw: z.infer<typeof VerificationSchema>, leafCount: 
   return { passed: false, summary: raw.findings.map((finding) => `${finding.leafId}: ${finding.problem}`).join("; "), checks, failedNodeIds: [...new Set(raw.findings.map((finding) => finding.leafId))], repairable: raw.verdict === "repair", architecturalMismatch: raw.verdict === "replan" };
 }
 
-function globalStop(state: ProgressiveLodState): PendingBudget["stop"] {
-  const multiplier = (state.budgetGrants.global ?? 0) + 1;
-  const checks: Array<[PendingBudget["stop"]["metric"], number, number]> = [
-    ["calls", state.callsUsed, state.budget.calls * multiplier],
-    ["turns", state.usage.turns, state.budget.maxTurns * multiplier], ["input", state.usage.input, state.budget.maxInputTokens * multiplier],
-    ["cacheRead", state.usage.cacheRead, state.budget.maxCacheReadTokens * multiplier], ["cost", state.usage.cost, state.budget.maxCost * multiplier],
-    ["minutes", (Date.now() - state.startedAt) / 60_000, state.budget.minutes * multiplier],
-  ];
-  const hit = checks.find(([, used, limit]) => used >= limit) ?? checks[0];
-  return { kind: "budget", metric: hit[0], used: hit[1], limit: hit[2] };
+function callGrantKey(role: PendingBudget["role"], nodeId?: string): string {
+  return `call:${role}${nodeId ? `:${nodeId}` : ""}`;
 }
 
-function contextCycleStop(state: ProgressiveLodState): PendingBudget | undefined {
-  if (state.resumeRole !== "scout") return;
-  const active = state.plan.find((node) => node.id === state.activeNodeId);
-  if (!active) return;
-  const grantKey = `context:${active.id}`;
-  const limit = state.budget.contextCyclesPerNode * ((state.budgetGrants[grantKey] ?? 0) + 1);
-  if (active.contextCycles < limit) return;
-  return { scope: "node", role: "scout", nodeId: active.id, sessionId: active.scoutSessionId, stop: { kind: "budget", metric: "contextCycles", used: active.contextCycles, limit } };
+function grantedCallLimits(state: ProgressiveLodState, role: PendingBudget["role"], nodeId?: string) {
+  const limits = state.roleLimits[role];
+  const multiplier = (state.budgetGrants[callGrantKey(role, nodeId)] ?? 0) + 1;
+  const scaled = (value: number | undefined) => value === undefined ? undefined : value * multiplier;
+  return {
+    maxTurns: scaled(limits.maxTurns), maxInputTokens: scaled(limits.maxInputTokens),
+    maxCacheReadTokens: scaled(limits.maxCacheReadTokens), maxContextTokens: scaled(limits.maxContextTokens),
+    maxCost: scaled(limits.maxCost),
+  };
+}
+
+function resumeAfterCallBudget(state: ProgressiveLodState, role: PendingBudget["role"], nodeId?: string) {
+  const grantKey = callGrantKey(role, nodeId);
+  return {
+    budgetGrants: { ...state.budgetGrants, [grantKey]: (state.budgetGrants[grantKey] ?? 0) + 1 },
+    pendingBudget: undefined, resumeFromAbortedSession: true, resumeRole: role, phase: `resuming-${role}`,
+  };
 }
 
 function progress(state: ProgressiveLodState): GraphProgressSnapshot {
   return {
-    phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId ?? state.activeLeafId, callsUsed: state.callsUsed, callBudget: state.budget.calls,
+    phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId ?? state.activeLeafId, callsUsed: state.callsUsed,
     summary: state.verification?.summary ?? state.profile?.goal, usage: state.usage,
     nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, level: node.level, depth: node.depth, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence, agents: node.agents })),
   };
@@ -237,14 +238,11 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       ...(state.profile?.route === "direct_change" ? { phase: "implementing", activeNodeId: undefined, activeLeafId: "p1", resumeRole: "implementer" as const } : { phase: "scouting", activeNodeId: "p1", activeLeafId: undefined, resumeRole: "scout" as const }), nextId: 2,
       plan: [{ id: "p1", title: state.profile?.goal ?? state.originalTask, description: state.originalTask, level: state.profile?.goal ?? state.originalTask, depth: 0, status: state.profile?.route === "direct_change" ? "implementing" as const : "active" as const, dependencies: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0, agents: [classifier], scoutSessionMode: "fresh" as const, scoutTurns: 0, ...(state.profile?.route === "direct_change" ? { leaf: { objective: state.profile.goal, targets: ["Files required by the request"], acceptanceCriteria: [state.originalTask], verification: ["Run focused checks appropriate to the requested change"] } } : {}) }],
     }))
-    .addNode("guard", (state: ProgressiveLodState) => {
-      const pending = budgetExceeded(state) ? { scope: "global" as const, role: state.resumeRole ?? "scout", nodeId: state.activeNodeId ?? state.activeLeafId, stop: globalStop(state) } : contextCycleStop(state);
-      return pending ? { pendingBudget: pending, phase: "budget-paused" } : {};
-    })
+    .addNode("guard", () => ({}))
     .addNode("scout", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const active = state.plan.find((node) => node.id === state.activeNodeId); if (!active) throw new Error("Scout requires an active branch");
       const result = await runtime(config).call({
-        agent: options.scoutAgent, node: `scout:${active.id}`, state, limits: state.roleLimits.scout,
+        agent: options.scoutAgent, node: `scout:${active.id}`, state, limits: grantedCallLimits(state, "scout", active.id),
         session: state.resumeFromAbortedSession
           ? resumableSession(active.scoutSessionId, true)
           : sessionDirective(active.scoutSessionId, active.scoutSessionMode, active.scoutTurns), schema: z.toJSONSchema(ResearchSchema) as Record<string, unknown>, validateStructured: (value) => ResearchSchema.parse(value),
@@ -252,19 +250,19 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       const plan = state.plan.map((node) => node.id === active.id ? { ...node, scoutSessionId: result.sessionId, scoutSessionMode: "continue" as const, scoutTurns: (node.scoutTurns ?? 0) + (result.usage?.turns ?? 0) } : node);
-      if (result.budgetStop) return { plan, usage, callsUsed, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "scout" as const, nodeId: active.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "scout" as const, phase: "budget-paused" };
+      if (result.budgetStop) return { plan, usage, callsUsed, ...resumeAfterCallBudget(state, "scout", active.id) };
       const merged = mergeResearch({ ...state, plan }, groundedResearch(structured(result, ResearchSchema, "scout"), result));
       return { ...merged, plan, usage, callsUsed, resumeFromAbortedSession: false, resumeRole: "decider" as const, phase: "deciding" };
     })
     .addNode("decide", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const active = state.plan.find((node) => node.id === state.activeNodeId); if (!active) throw new Error("Decider requires an active branch");
       const result = await runtime(config).call({
-        agent: options.deciderAgent, node: `decide:${active.id}`, state, limits: state.roleLimits.decider,
+        agent: options.deciderAgent, node: `decide:${active.id}`, state, limits: grantedCallLimits(state, "decider", active.id),
         session: resumableSession(state.deciderSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(DetailDecisionSchema) as Record<string, unknown>, validateStructured: (value) => DetailDecisionSchema.parse(value),
         prompt: JSON.stringify(branchProjection(state)),
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
-      if (result.budgetStop) return { usage, callsUsed, deciderSessionId: result.sessionId, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "decider" as const, nodeId: active.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "decider" as const, phase: "budget-paused" };
+      if (result.budgetStop) return { usage, callsUsed, deciderSessionId: result.sessionId, ...resumeAfterCallBudget(state, "decider", active.id) };
       return { decision: structured(result, DetailDecisionSchema, "decide"), deciderSessionId: undefined, resumeFromAbortedSession: false, usage, callsUsed, phase: "merging" };
     })
     .addNode("merge", (state: ProgressiveLodState) => {
@@ -284,7 +282,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const answer = String(response).trim();
       if (answer.toLowerCase() === "stop") return { pendingBudget: undefined, resumeRole: undefined, phase: "failed", result: `Stopped at the ${pending.role} ${pending.stop.metric} budget (${pending.stop.used}/${pending.stop.limit}).` };
       const constraints = answer.toLowerCase().startsWith("narrow:") ? [...state.constraints, { id: `c${state.constraints.length + 1}`, text: answer.slice(7).trim(), source: "user budget decision", nodeId: pending.nodeId }] : state.constraints;
-      const grantKey = pending.scope === "global" ? "global" : pending.scope === "node" && pending.nodeId ? `context:${pending.nodeId}` : undefined;
+      const grantKey = pending.scope === "global" ? "global" : pending.scope === "node" && pending.nodeId ? `context:${pending.nodeId}` : pending.scope === "call" ? callGrantKey(pending.role, pending.nodeId) : undefined;
       const budgetGrants = grantKey ? { ...state.budgetGrants, [grantKey]: (state.budgetGrants[grantKey] ?? 0) + 1 } : state.budgetGrants;
       return { pendingBudget: undefined, budgetGrants, constraints, resumeFromAbortedSession: pending.scope === "call" || state.resumeFromAbortedSession, resumeRole: pending.role, phase: `resuming-${pending.role}` };
     })
@@ -297,9 +295,9 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("implement", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Implementation requires one grounded leaf");
       const existing = state.implementationSessions[leaf.id];
-      const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: state.roleLimits.implementer, session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify(leafPayload(state, leaf)) });
+      const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: grantedCallLimits(state, "implementer", leaf.id), session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify(leafPayload(state, leaf)) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1; const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? existing };
-      if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "implementer" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "implementer" as const, phase: "budget-paused" };
+      if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, ...resumeAfterCallBudget(state, "implementer", leaf.id) };
       const output = implementationResult(structured(result, ImplementationResultSchema, "implement"));
       return { usage, callsUsed, implementationSessions: sessions, implementationResults: { ...state.implementationResults, [leaf.id]: output }, resumeFromAbortedSession: false, activeLeafId: undefined, plan: state.plan.map((node) => node.id === leaf.id ? { ...node, status: output.status === "completed" ? "implemented" as const : "failed" as const } : node), phase: output.status === "completed" ? "selecting-leaf" : "implementation-blocked" };
     })
@@ -324,11 +322,11 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
           const node = state.plan.find((item) => item.id === leaf.leafId);
           for (const dependency of node?.dependencies ?? []) { relevant.add(dependency); for (const item of dependencyLeaves(state, dependency)) relevant.add(item.id); }
         }
-        const result = await runtime(config).call({ agent: verifier, node: "verify", state, directory: workspace, worktree: workspace, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, validateStructured: (value) => VerificationSchema.parse(value), prompt: isolatedPayload({ task: state.originalTask, constraints: state.constraints.filter((item) => !item.nodeId || relevant.has(item.nodeId)).map(({ text }) => text), leaves }, state) });
+        const result = await runtime(config).call({ agent: verifier, node: "verify", state, directory: workspace, worktree: workspace, limits: grantedCallLimits(state, "verifier"), session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, validateStructured: (value) => VerificationSchema.parse(value), prompt: isolatedPayload({ task: state.originalTask, constraints: state.constraints.filter((item) => !item.nodeId || relevant.has(item.nodeId)).map(({ text }) => text), leaves }, state) });
         const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
         if (result.budgetStop) {
           retainWorkspace = true;
-          return { usage, callsUsed, verifierWorkspace: workspace, verifierSessionId: result.sessionId, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "verifier" as const, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "verifier" as const, phase: "budget-paused" };
+          return { usage, callsUsed, verifierWorkspace: workspace, verifierSessionId: result.sessionId, ...resumeAfterCallBudget(state, "verifier") };
         }
         const verification = verificationResult(structured(result, VerificationSchema, "verify"), leaves.length);
         return { usage, callsUsed, verifierWorkspace: undefined, verifierSessionId: undefined, resumeFromAbortedSession: false, verification, plan: applyVerification(state.plan, verification), phase: verification.passed ? "completed" : "verification-failed" };
@@ -345,10 +343,10 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Repair requires one failed leaf");
       const sessionId = state.implementationSessions[leaf.id]; if (!sessionId) throw new Error(`Repair has no implementation session for ${leaf.id}`);
       const findings = state.verification?.checks.filter((check) => check.name === leaf.id).map((check) => check.evidence) ?? [];
-      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify({ leafId: leaf.id, findings }) });
+      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: grantedCallLimits(state, "repair", leaf.id), session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify({ leafId: leaf.id, findings }) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? sessionId };
-      if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "repair" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "repair" as const, phase: "budget-paused" };
+      if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, ...resumeAfterCallBudget(state, "repair", leaf.id) };
       const output = implementationResult(structured(result, ImplementationResultSchema, "repair"));
       return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, repairAttempts: state.repairAttempts + 1, implementationResults: { ...state.implementationResults, [leaf.id]: output }, activeLeafId: undefined, plan: state.plan.map((node) => node.id === leaf.id ? { ...node, status: output.status === "completed" ? "implemented" as const : "failed" as const } : node), phase: output.status === "completed" ? "selecting-repair" : "implementation-blocked" };
     })
@@ -373,16 +371,16 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addEdge("initialize", "guard")
     .addConditionalEdges("guard", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.resumeRole ?? "scout", { budget: "budget_interrupt", scout: "scout", decider: "decide", implementer: "implement", verifier: "verify", repair: "repair" })
     .addConditionalEdges("scout", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : "guard", { budget: "budget_interrupt", guard: "guard" })
-    .addConditionalEdges("decide", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : "merge", { budget: "budget_interrupt", merge: "merge" })
+    .addConditionalEdges("decide", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.phase === "resuming-decider" ? "retry" : "merge", { budget: "budget_interrupt", retry: "guard", merge: "merge" })
     .addConditionalEdges("merge", (state: ProgressiveLodState) => state.humanQuestion ? "human" : state.activeNodeId ? "guard" : "select", { human: "human", guard: "guard", select: "select_leaf" })
     .addEdge("human", "acquire")
     .addConditionalEdges("budget_interrupt", (state: ProgressiveLodState) => state.phase === "failed" ? "finish" : "acquire", { finish: "finish", acquire: "acquire" })
     .addConditionalEdges("select_leaf", (state: ProgressiveLodState) => state.phase === "failed" ? "finish" : "guard", { finish: "finish", guard: "guard" })
-    .addConditionalEdges("implement", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.phase === "implementation-blocked" ? "reopen" : "select", { budget: "budget_interrupt", reopen: "reopen_blocker", select: "select_leaf" })
+    .addConditionalEdges("implement", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.phase === "resuming-implementer" ? "retry" : state.phase === "implementation-blocked" ? "reopen" : "select", { budget: "budget_interrupt", retry: "guard", reopen: "reopen_blocker", select: "select_leaf" })
     .addConditionalEdges("reopen_blocker", (state: ProgressiveLodState) => state.activeNodeId ? "guard" : "finish", { guard: "guard", finish: "finish" })
-    .addConditionalEdges("verify", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.verification?.passed ? "finish" : state.verification?.architecturalMismatch ? "reopen" : state.verification?.repairable && state.repairAttempts < state.budget.repairs ? "repair" : "finish", { budget: "budget_interrupt", finish: "finish", reopen: "reopen", repair: "select_repair" })
+    .addConditionalEdges("verify", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.phase === "resuming-verifier" ? "retry" : state.verification?.passed ? "finish" : state.verification?.architecturalMismatch ? "reopen" : state.verification?.repairable && state.repairAttempts < state.budget.repairs ? "repair" : "finish", { budget: "budget_interrupt", retry: "guard", finish: "finish", reopen: "reopen", repair: "select_repair" })
     .addConditionalEdges("select_repair", (state: ProgressiveLodState) => state.resumeRole === "repair" ? "guard" : "guard", { guard: "guard" })
-    .addConditionalEdges("repair", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.phase === "implementation-blocked" ? "reopen" : "next", { budget: "budget_interrupt", reopen: "reopen_blocker", next: "select_repair" })
+    .addConditionalEdges("repair", (state: ProgressiveLodState) => state.pendingBudget ? "budget" : state.phase === "resuming-repair" ? "retry" : state.phase === "implementation-blocked" ? "reopen" : "next", { budget: "budget_interrupt", retry: "guard", reopen: "reopen_blocker", next: "select_repair" })
     .addConditionalEdges("reopen", (state: ProgressiveLodState) => state.activeNodeId ? "guard" : "finish", { guard: "guard", finish: "finish" })
     .addEdge("finish", END);
 
