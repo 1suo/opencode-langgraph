@@ -156,6 +156,7 @@ export interface GraphProgressSnapshot {
   activeNodeId?: string;
   callsUsed?: number;
   callBudget?: number;
+  costBudget?: number;
   summary?: string;
   usage?: AgentUsage;
   nodes: GraphProgressNode[];
