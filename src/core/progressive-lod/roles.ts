@@ -9,8 +9,29 @@ export interface ProgressiveRoleContract {
   maxSteps: number;
 }
 
-const NO_TOOLS = { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false };
-const READ_TOOLS = { read: true, grep: true, glob: true, bash: true, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false };
+const NO_TOOLS = {
+  read: false,
+  grep: false,
+  glob: false,
+  bash: false,
+  edit: false,
+  write: false,
+  apply_patch: false,
+  question: false,
+  task: false,
+  skill: false,
+  lsp: false,
+  codesearch: false,
+  batch: false,
+  todowrite: false,
+  todoread: false,
+  plan_enter: false,
+  plan_exit: false,
+  webfetch: false,
+  websearch: false,
+};
+const READ_TOOLS = { ...NO_TOOLS, read: true, grep: true, glob: true };
+const VERIFY_TOOLS = { ...READ_TOOLS, bash: true };
 
 export const CONNECTOR_PRESENTER = {
   name: "langgraph-presenter",
@@ -21,18 +42,23 @@ export const CONNECTOR_PRESENTER = {
 
 export const CONNECTOR_ROOT_SYSTEM_PROMPT = "The OpenCode LangGraph connector runs a new graph for each user message while graph:on. A synthetic message contains its result or human-input request. Present that result directly and do not redo graph work. Never inspect opencode-langgraph state files; the connector owns execution and resume.";
 
+export const SCOUT_OPENCODE_AGENT = "langgraph-scout";
+export const VERIFIER_OPENCODE_AGENT = "langgraph-verifier";
+export const CLASSIFIER_OPENCODE_AGENT = "langgraph-classifier";
+export const DECIDER_OPENCODE_AGENT = "langgraph-decider";
+
 export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, ProgressiveRoleContract> = {
   classifier: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.classifier.maxTurns!,
-    systemPrompt: "Route the request without solving it. Use answer for read-only responses, direct_change when one build agent can discover and complete an already bounded change, and planned_change only when repository research or decomposition is needed before implementation. For planned_change, list the concrete questions scouting must answer.",
+    defaultModel: "deepseek/deepseek-v4-flash", agent: CLASSIFIER_OPENCODE_AGENT, tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.classifier.maxTurns!,
+    systemPrompt: "Route the request without solving it. Use answer for read-only responses, direct_change when one build agent can discover and complete an already bounded change, and planned_change only when repository research or decomposition is needed before implementation. Include questions only for planned_change; omit them for answer and direct_change.",
   },
   scout: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: READ_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.scout.maxTurns!,
-    systemPrompt: "Answer only the supplied concern questions from repository evidence. Do not design, decompose, edit, or run tests. Return concise sourced facts, constraints, and anything still unknown.",
+    defaultModel: "deepseek/deepseek-v4-flash", agent: SCOUT_OPENCODE_AGENT, tools: READ_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.scout.maxTurns!,
+    systemPrompt: "Answer only the supplied concern questions from repository evidence. Do not design, decompose, edit, or run tests. Return concise sourced facts, constraints, and anything still unknown. Cite repository facts as path:line; unsupported conclusions remain inference.",
   },
   decider: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.decider.maxTurns!,
-    systemPrompt: "Decide whether the active concern is implementation-ready from the supplied facts. Choose one outcome only: ready with a bounded contract, refine with one unanswered concern, split into independent concerns, remove, reopen_parent, or interrupt for indispensable user input. Do not inspect the repository.",
+    defaultModel: "deepseek/deepseek-v4-flash", agent: DECIDER_OPENCODE_AGENT, tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.decider.maxTurns!,
+    systemPrompt: "Decide whether the active concern is implementation-ready from the supplied facts. Choose one outcome only: ready with a self-contained bounded contract that carries the implementation-relevant discoveries, refine with one unanswered concern, split into independent concerns, remove, reopen_parent, or interrupt for indispensable user input. Treat inference as uncertain and do not inspect the repository.",
   },
   answer: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: { ...READ_TOOLS, bash: false }, maxSteps: 24,
@@ -43,8 +69,8 @@ export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, Progressi
     systemPrompt: "Complete the supplied implementation contract, preserve unrelated work, and run focused checks. Return changed files and check results. If the contract is not implementable as given, return blocked with the missing prerequisite instead of redesigning it.",
   },
   verifier: {
-    defaultModel: "inherit", agent: "plan", tools: READ_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.verifier.maxTurns!,
-    systemPrompt: "Independently inspect the worktree and verify every supplied contract. Do not edit. Return pass, repair for bounded defects, replan for a wrong or incomplete contract, or fail for a non-repairable result. Findings must name exact leaf IDs.",
+    defaultModel: "inherit", agent: VERIFIER_OPENCODE_AGENT, tools: VERIFY_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.verifier.maxTurns!,
+    systemPrompt: "Independently inspect the supplied disposable worktree and verify every contract, including running appropriate checks. Use only relative paths inside the current workspace; never inspect absolute or external paths. Do not edit intentionally. Return pass, repair for bounded defects, replan for a wrong or incomplete contract, or fail for a non-repairable result. Findings must name exact leaf IDs.",
   },
   repair: {
     defaultModel: "inherit", agent: "build", tools: { question: false, task: false }, maxSteps: DEFAULT_ROLE_LIMITS.repair.maxTurns!,

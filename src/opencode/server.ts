@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { Command, isInterrupted } from "@langchain/langgraph";
 import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
 import { loadConnectorDefinition } from "../core/config.js";
@@ -7,9 +8,15 @@ import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
 import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
-import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT } from "../core/progressive-lod/roles.js";
+import { CLASSIFIER_OPENCODE_AGENT, CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, DECIDER_OPENCODE_AGENT, PROGRESSIVE_ROLE_CONTRACTS, SCOUT_OPENCODE_AGENT, VERIFIER_OPENCODE_AGENT } from "../core/progressive-lod/roles.js";
+import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "./verifier-workspace.js";
 
 const PRESENTER_AGENT = CONNECTOR_PRESENTER.name;
+
+function executionWorktree(directory: string, worktree: string): string {
+  const resolved = path.resolve(worktree);
+  return resolved === path.parse(resolved).root ? path.resolve(directory) : resolved;
+}
 
 function messageModel(info: { role: string; model?: { providerID: string; modelID: string }; providerID?: string; modelID?: string }) {
   if (info.role === "user") return info.model;
@@ -32,6 +39,10 @@ export const server: Plugin = async (plugin) => {
     config: async (config) => {
       config.agent ??= {};
       config.agent[PRESENTER_AGENT] = { description: "Tool-free LangGraph lifecycle presenter", mode: "primary", hidden: true, prompt: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, maxSteps: CONNECTOR_PRESENTER.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
+      config.agent[CLASSIFIER_OPENCODE_AGENT] = { description: "Tool-free LangGraph request classifier", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.classifier.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.classifier.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.classifier.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
+      config.agent[DECIDER_OPENCODE_AGENT] = { description: "Tool-free LangGraph plan decider", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.decider.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.decider.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.decider.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
+      config.agent[SCOUT_OPENCODE_AGENT] = { description: "Repository-only LangGraph scout", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.scout.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.scout.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.scout.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
+      config.agent[VERIFIER_OPENCODE_AGENT] = { description: "Isolated LangGraph verifier", mode: "subagent", hidden: true, prompt: PROGRESSIVE_ROLE_CONTRACTS.verifier.systemPrompt, tools: PROGRESSIVE_ROLE_CONTRACTS.verifier.tools, maxSteps: PROGRESSIVE_ROLE_CONTRACTS.verifier.maxSteps, permission: { edit: "deny", bash: "allow", webfetch: "deny", external_directory: "deny" } };
       config.command ??= {};
       config.command["run-graph"] = {
         description: "Run this task through the current session's LangGraph",
@@ -47,8 +58,9 @@ export const server: Plugin = async (plugin) => {
         cancelledMessages.add(input.sessionID);
         for (const controller of activeControllers.get(input.sessionID) ?? []) controller.abort(new Error("Cancelled by user"));
         const run = readLatestStoredRun(input.sessionID);
-        if (run?.status === "running" || run?.status === "queued") {
+        if (run?.status === "running" || run?.status === "queued" || run?.status === "interrupted") {
           writeStoredRun({ ...run, status: "cancelled" });
+          await releaseVerifierWorkspace(run.runId);
           appendPluginEvent({ at: new Date().toISOString(), runId: run.runId, rootSessionId: run.rootSessionId, userMessageId: run.userMessageId, graph: run.graph, node: "__end__", status: "interrupted", agent: "langgraph", model: "langgraph", text: "Cancelled by user" });
         }
       }
@@ -94,7 +106,7 @@ export const server: Plugin = async (plugin) => {
       registerController(input.sessionID, controller);
       void executeGraph(plugin, {
         task, rootSessionId: input.sessionID, userMessageId: rootMessageID,
-        directory: plugin.directory, worktree: plugin.worktree, parentModel,
+        directory: plugin.directory, worktree: executionWorktree(plugin.directory, plugin.worktree), parentModel,
         graph: graphState?.graph, signal: controller.signal,
       })
         .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
@@ -225,7 +237,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
   const initialState = configured.initial({ task: input.task, directory: input.directory, worktree: input.worktree, runId });
   emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__start__", status: "active", agent: "langgraph", model: "langgraph", state: initialState, mermaid, topology, progress: configured.progress?.(initialState) });
   try {
-    const result = await configured.graph.invoke(initialState, { recursionLimit: 512, configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
+    const result = await configured.graph.invoke(initialState, { recursionLimit: 512, configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const requests = result.__interrupt__.map((item) => item.value);
@@ -278,7 +290,7 @@ async function executeResume(
   const acquire = async () => { if (!lease) lease = await acquireWorktree(saved.worktree, signal); };
   writeStoredRun({ ...saved, status: "running" });
   try {
-    const result = await configured.graph.invoke(new Command({ resume: answer }), { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire }, signal });
+    const result = await configured.graph.invoke(new Command({ resume: answer }), { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const output = JSON.stringify(result.__interrupt__.map((item) => item.value), null, 2);

@@ -21,7 +21,8 @@ export interface Evidence {
   kind: "repository" | "tool" | "inference" | "user";
   confidence: number;
 }
-export interface Constraint { id: string; text: string; source: string }
+export interface Constraint { id: string; text: string; source: string; nodeId?: string }
+export interface ReplanIssue { source: "implementation" | "verification" | "decision"; leafId?: string; text: string; evidence?: string }
 export interface LeafContract {
   objective: string;
   targets: string[];
@@ -45,6 +46,7 @@ export interface PlanNode {
   scoutSessionId?: string;
   scoutSessionMode?: "continue" | "fork" | "fresh";
   scoutTurns?: number;
+  replanIssues?: ReplanIssue[];
 }
 
 export interface ResearchPacket {
@@ -128,7 +130,6 @@ export const ClassificationSchema = z.object({
   goal: z.string().min(1).max(500), questions: z.array(z.string().min(1).max(500)).min(1).max(6).optional(),
 }).superRefine((value, context) => {
   if (value.route === "planned_change" && !value.questions?.length) context.addIssue({ code: "custom", path: ["questions"], message: "planned_change requires scouting questions" });
-  if (value.route !== "planned_change" && value.questions) context.addIssue({ code: "custom", path: ["questions"], message: `${value.route} must omit scouting questions` });
 });
 
 export const ResearchSchema = z.object({
@@ -166,7 +167,7 @@ export const VerificationSchema = z.discriminatedUnion("verdict", [
 ]);
 
 export interface PendingBudget {
-  scope: "call" | "global";
+  scope: "call" | "global" | "node";
   role: "scout" | "decider" | "implementer" | "verifier" | "repair";
   nodeId?: string;
   stop: AgentBudgetStop;
@@ -185,5 +186,6 @@ export interface ProgressiveLodState extends Record<string, unknown> {
   repairAttempts: number; pendingBudget?: PendingBudget; budgetGrants: Record<string, number>;
   resumeRole?: PendingBudget["role"];
   resumeFromAbortedSession?: boolean;
+  verifierWorkspace?: string;
   humanQuestion: string; humanAnswer: string; result: string;
 }

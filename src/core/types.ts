@@ -56,7 +56,7 @@ export interface AgentSessionDirective {
 
 export interface AgentBudgetStop {
   kind: "budget";
-  metric: "turns" | "input" | "cacheRead" | "context" | "cost" | "calls" | "minutes";
+  metric: "turns" | "input" | "cacheRead" | "context" | "contextCycles" | "cost" | "calls" | "minutes";
   used: number;
   limit: number;
 }
@@ -113,6 +113,8 @@ export interface AgentCall {
   retryCount?: number;
   session?: AgentSessionDirective;
   limits?: AgentCallLimits;
+  directory?: string;
+  worktree?: string;
 }
 
 export interface AgentCallResult {

@@ -28,17 +28,17 @@ The graph is a controller, not another general agent. It gives each role one tas
 | Role | Default model | Tools | Session rule | Output |
 |---|---|---|---|---|
 | classifier | DeepSeek V4 Flash | none | fresh | route and task profile |
-| scout | DeepSeek V4 Flash | read-only repository tools | fresh root; continue refinement; fork split | cited facts only |
+| scout | DeepSeek V4 Flash | read/search, no shell | fresh root; continue refinement; fork split | cited facts only |
 | decider | DeepSeek V4 Flash | none | fresh per decision; continue only after a budget pause | one disposition |
 | implementer | inherited | build tools, no subagents | fresh per leaf | files and focused checks |
-| verifier | inherited | read-only repository tools | one fresh aggregate pass | leaf-specific verdicts |
+| verifier | inherited | read/search/test shell in disposable mirror | fresh aggregate pass; fork only after a budget pause | leaf-specific verdicts |
 | repair | inherited | build tools, no subagents | continue failed leaf | bounded repair artifacts |
 
 All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime appends the stable structured-output instruction. Each call records those three effective prompt layers for F8 inspection.
 
-The scout receives explicit unanswered questions, ancestry titles, global constraints, relevant compact facts, sibling status, and dependency results. It never receives unrelated descriptions or controller bookkeeping. The decider receives that same distilled projection once; research is not duplicated beside it.
+The scout receives explicit unanswered questions, ancestry titles, lineage-scoped constraints, relevant compact facts with provenance, replan issues, sibling status, and dependency contracts/results. It never receives unrelated descriptions or controller bookkeeping. The decider receives that same distilled projection once; research is not duplicated beside it.
 
-OpenCode transcripts remain in their child sessions. Durable graph state keeps normalized facts, constraints, contracts, summaries, IDs, usage totals, and child-session references. Evidence is fingerprint-deduplicated. Tool transcripts and candidate trees are not copied between roles.
+OpenCode transcripts remain in their child sessions. Durable graph state keeps normalized facts, scoped constraints, contracts, replan issues, summaries, IDs, usage totals, and child-session references. Evidence is fingerprint-deduplicated and repository grounding is derived from completed read/search traces; unsupported claims remain labeled inference. Tool transcripts and candidate trees are not copied between roles.
 
 ## Plan state
 
@@ -82,7 +82,7 @@ The tool-free decider returns a discriminated outcome containing only fields rel
 - `reopen_parent`: discard stale descendants and revisit their parent;
 - `interrupt`: ask one consequential question repository inspection cannot settle.
 
-The reducer assigns IDs, resolves sibling dependency keys, attaches evidence, enforces capacity atomically, rejects cycles, and activates the shallowest dependency-ready pending node. Implementers receive only the request, leaf contract, constraints, and dependency artifacts. Verification receives contracts and artifacts; repair receives only findings for its continued leaf session. Controller code derives lifecycle summaries.
+The reducer assigns IDs, resolves sibling dependency keys, attaches evidence, enforces capacity atomically, rejects cycles, and activates the shallowest dependency-ready pending node. Implementers receive only the request, self-contained leaf contract, relevant grounded facts and constraints, replan issues, and dependency contracts/artifacts. Reopening preserves the triggering issue while invalidating stale descendant contracts, sessions, and results. Verification receives current live contracts and artifacts; repair receives only findings for its continued leaf session. Controller code derives lifecycle summaries.
 
 ## Execution flow
 
@@ -116,7 +116,9 @@ One implementation leaf contains tightly coupled production code, focused tests,
 | subsystem | 24 | 12 | 3 | 2 | 2 | 48 | 250k | 3m | $0.08 |
 | architectural/unknown | 40 | 16 | 3 | 2 | 2 | 80 | 500k | 6m | $0.15 |
 
-Every role also has per-call caps for turns, fresh input, cache reads, and live context. The default implementer cap is 32 turns; scout 16 with a 96,000-token live-context cap; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a cap reached on its final turn. A cap reached while still busy aborts that child call and interrupts the graph with exact usage plus `continue`, `narrow: …`, and `stop` choices.
+Every role also has per-call caps for turns, fresh input, cache reads, and live context. The default implementer cap is 32 turns; scout 16 with a 96,000-token live-context cap; verifier and repair 12; classifier and decider 2. Context-cycle limits are enforced per concern with grants scoped to that concern. An idle completed answer wins over a cap reached on its final turn. A cap reached while still busy aborts that child call and interrupts the graph with exact usage plus `continue`, `narrow: …`, and `stop` choices.
+
+The verifier's shell and tests run in a connector-owned copy of the complete visible worktree with live Git metadata excluded. The copy survives only a verifier budget pause and is removed after a verdict, failure, or cancellation. Post-repair verification starts a fresh session and fresh copy.
 
 The 0.5 failure baseline for the same corrective task was about 86 model turns, 200k fresh input, 10.18m cache-read tokens, and $0.209 without a verified completion. The 0.6 controller must stop or request approval before reaching that envelope. Optimization is accepted only when task quality and core flow remain intact; token reduction alone is not success.
 

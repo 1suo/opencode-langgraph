@@ -135,10 +135,12 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     const model = this.options.definition.models[agent.model];
     if (!model) throw new Error(`Agent ${input.agent} references unknown model ${agent.model}`);
     const composedPrompt = promptTrace(agent.systemPrompt, input.prompt, input.schema);
+    const directory = input.directory ?? this.options.directory;
+    const worktree = input.worktree ?? this.options.worktree;
     if (model.backend === "command") {
       this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: agent.model, state: input.state, prompt: composedPrompt });
       const schemaInstruction = composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : "";
-      const output = await commandCall(model.command, model.args ?? [], model.env, this.options.worktree, `${composedPrompt.system}\n\n${composedPrompt.input}${schemaInstruction}`, this.options.signal);
+      const output = await commandCall(model.command, model.args ?? [], model.env, worktree, `${composedPrompt.system}\n\n${composedPrompt.input}${schemaInstruction}`, this.options.signal);
       if (!output) throw new Error(`Command agent ${input.agent} returned no output`);
       this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: agent.model, text: output, state: input.state });
       return { text: output, structured: input.schema ? parseCommandStructured(output) : undefined };
@@ -151,41 +153,41 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       sessionId = input.session.sessionId;
     } else if (input.session?.strategy === "fork") {
       if (!input.session.sessionId) throw new Error(`Agent ${input.agent} requested session fork without a session ID`);
-      const parent = await this.options.plugin.client.session.messages({ path: { id: input.session.sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      const parent = await this.options.plugin.client.session.messages({ path: { id: input.session.sessionId }, query: { directory }, throwOnError: true });
       const abortedMessage = [...parent.data].reverse().find((message) => {
         const info = message.info as typeof message.info & { error?: unknown };
         return info.role === "assistant" && Boolean(info.error);
       });
       const forked = await this.options.plugin.client.session.fork({
-        path: { id: input.session.sessionId }, query: { directory: this.options.directory },
+        path: { id: input.session.sessionId }, query: { directory },
         ...(abortedMessage?.info.id ? { body: { messageID: abortedMessage.info.id } } : {}), throwOnError: true,
       });
       sessionId = forked.data.id;
     } else {
       const created = await this.options.plugin.client.session.create({
         body: { parentID: this.options.parentSessionId, title: `LangGraph · ${input.node} · ${input.agent}` },
-        query: { directory: this.options.directory },
+        query: { directory },
         throwOnError: true,
       });
       sessionId = created.data.id;
     }
     const reusingSession = input.session?.strategy === "continue" || input.session?.strategy === "fork";
     const before = reusingSession
-      ? await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true })
+      ? await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true })
       : { data: [] as Array<{ info: { id?: string; role: string; finish?: string; cost?: number; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } }; parts: Part[] }> };
     const baselineUsage = sessionUsage(before.data);
     const baselineMessageIds = new Set(before.data.flatMap((message) => message.info.id ? [message.info.id] : []));
     const baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
     this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId, prompt: composedPrompt });
-    const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } }); };
+    const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory } }); };
     const unregisterPermission = registerPermissionHandler(sessionId, async (permission) => {
       const patterns = Array.isArray(permission.pattern) ? permission.pattern : permission.pattern ? [permission.pattern] : ["*"];
       try {
         if (!this.options.ask) throw new Error("No root permission bridge is available");
         await this.options.ask({ permission: permission.type, patterns, always: patterns, metadata: { title: permission.title, childSessionId: sessionId, ...permission.metadata } });
-        await this.options.plugin.client.postSessionIdPermissionsPermissionId({ path: { id: sessionId, permissionID: permission.id }, query: { directory: this.options.directory }, body: { response: "once" }, throwOnError: true });
+        await this.options.plugin.client.postSessionIdPermissionsPermissionId({ path: { id: sessionId, permissionID: permission.id }, query: { directory }, body: { response: "once" }, throwOnError: true });
       } catch {
-        await this.options.plugin.client.postSessionIdPermissionsPermissionId({ path: { id: sessionId, permissionID: permission.id }, query: { directory: this.options.directory }, body: { response: "reject" }, throwOnError: true });
+        await this.options.plugin.client.postSessionIdPermissionsPermissionId({ path: { id: sessionId, permissionID: permission.id }, query: { directory }, body: { response: "reject" }, throwOnError: true });
       }
     });
     this.options.signal.addEventListener("abort", abort, { once: true });
@@ -193,7 +195,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const schemaInstruction = composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : "";
       await this.options.plugin.client.session.promptAsync({
         path: { id: sessionId },
-        query: { directory: this.options.directory },
+        query: { directory },
         body: {
           agent: agent.opencodeAgent,
           model: selected,
@@ -204,7 +206,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         throwOnError: true,
       });
       const output = await this.waitForAnswer(
-        sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`,
+        sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, directory,
         agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
         { maxTurns: agent.maxSteps, ...input.limits }, baselineUsage, baselineMessageIds, baselinePartIds,
       );
@@ -219,7 +221,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, directory: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastFingerprint = "";
@@ -228,9 +230,9 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     const pollIntervalMs = Math.min(250, Math.max(10, Math.floor(inactivityTimeoutMs / 4)));
     while (true) {
       if (this.options.signal.aborted) throw this.options.signal.reason ?? new Error("LangGraph run aborted");
-      const status = await this.options.plugin.client.session.status({ query: { directory: this.options.directory }, throwOnError: true });
+      const status = await this.options.plugin.client.session.status({ query: { directory }, throwOnError: true });
       const current = status.data[sessionId];
-      const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory: this.options.directory }, throwOnError: true });
+      const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true });
       const usage = subtractUsage(sessionUsage(messages.data), baselineUsage);
       const usageFingerprint = JSON.stringify(usage);
       if (usageFingerprint !== lastUsage) {
@@ -260,16 +262,16 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const now = Date.now();
       const budgetStop = exceededBudget(usage, latestContextTokens(messages.data), limits);
       if (budgetStop) {
-        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
+        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory } });
         const tools = newToolTraces(messages.data, baselinePartIds);
         return { text: "", usage, budgetStop, ...(tools.length ? { tools } : {}) };
       }
       if (now - startedAt >= maxRuntimeMs) {
-        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
+        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory } });
         throw new Error(`OpenCode session ${sessionId} exceeded its ${maxRuntimeMs}ms maximum runtime`);
       }
       if (now - lastActivityAt >= inactivityTimeoutMs) {
-        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } });
+        await this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory } });
         throw new Error(`OpenCode session ${sessionId} was inactive for ${inactivityTimeoutMs}ms`);
       }
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));

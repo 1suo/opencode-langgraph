@@ -15,8 +15,8 @@ opencode
 For local development:
 
 ```sh
-npm pack
-opencode plugin ./opencode-langgraph-0.6.5.tgz --force
+npm run build
+opencode plugin . --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -37,7 +37,7 @@ Every agent-backed graph node runs in an OpenCode child session. The production 
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies each message as an answer, a bounded direct change, or a change that needs planning. Bounded changes go straight to one implementer and independent verification; only uncertain work pays for branch-scoped scouting and tool-free detail decisions. A blocked direct change reopens into planning instead of guessing. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and turn default. Classifier, scout, decider, and direct-answer roles use `deepseek/deepseek-v4-flash`; verifier, implementer, and repair inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies each message as an answer, a bounded direct change, or a change that needs planning. Bounded changes go straight to one implementer and independent verification; only uncertain work pays for branch-scoped scouting and tool-free detail decisions. A blocked direct change reopens into planning with its blocker instead of guessing. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and turn default. Classifier, scout, decider, and direct-answer roles use `deepseek/deepseek-v4-flash`; verifier, implementer, and repair inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
@@ -53,7 +53,9 @@ export default defineOpenCodeLangGraph({
 })
 ```
 
-All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` caps a call by turns, fresh input, cache reads, live context, or cost; `budgets` caps the complete run by classified scope. The default scout allowance is 16 turns and 96,000 live-context tokens. Reaching a cap pauses for `continue`, `narrow: …`, or `stop` instead of silently granting another long loop.
+All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` caps a call by turns, fresh input, cache reads, live context, or cost; `budgets` caps the complete run by classified scope. The default scout allowance is 16 turns and 96,000 live-context tokens. Scope budgets also enforce refinement cycles per concern. Reaching a cap pauses for `continue`, `narrow: …`, or `stop` instead of silently granting another long loop.
+
+Scout has repository read/search tools but no shell. Facts retain repository/inference provenance, constraints remain branch-scoped, and dependency contracts plus grounded facts flow into implementation. Aggregate verification runs tests in a connector-owned disposable copy of the current worktree; repairs change only the real implementation session, then a fresh isolated verifier checks the result again.
 
 ### Connect an arbitrary graph
 

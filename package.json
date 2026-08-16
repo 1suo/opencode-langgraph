@@ -1,8 +1,9 @@
 {
   "name": "opencode-langgraph",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "Explicit LangGraph connector for OpenCode",
   "type": "module",
+  "main": "./dist/src/opencode/server.js",
   "bin": {
     "opencode-langgraph": "dist/src/cli.js"
   },

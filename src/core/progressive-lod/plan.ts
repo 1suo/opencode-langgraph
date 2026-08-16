@@ -37,7 +37,7 @@ export function mergeResearch(state: ProgressiveLodState, raw: { evidence: Array
     evidence.push({ ...item, id: `e${evidence.length + 1}`, fingerprint });
   }
   const constraints = [...state.constraints];
-  for (const item of raw.constraints) if (!constraints.some((existing) => existing.text === item.text && existing.source === item.source)) constraints.push({ ...item, id: `c${constraints.length + 1}` });
+  for (const item of raw.constraints) if (!constraints.some((existing) => existing.text === item.text && existing.source === item.source && existing.nodeId === state.activeNodeId)) constraints.push({ ...item, id: `c${constraints.length + 1}`, nodeId: state.activeNodeId });
   const added = evidence.slice(state.evidence.length);
   return { evidence, constraints, research: { unknowns: raw.unknowns, evidence: added, constraints: constraints.slice(state.constraints.length) } };
 }
@@ -84,6 +84,7 @@ export function applyDecision(state: ProgressiveLodState, decision: DetailDecisi
     const parent = plan.find((node) => node.id === target.parentId);
     if (!parent || parent.reopenCount >= state.budget.reopens) throw new Error("Plan parent cannot be reopened");
     target.status = "removed"; parent.status = "pending"; parent.reopenCount++;
+    parent.replanIssues = [...(parent.replanIssues ?? []), { source: "decision", leafId: target.id, text: decision.reason ?? `Concern ${target.title} requires its parent to be reconsidered.` }];
   } else {
     target.status = "active";
     humanQuestion = decision.question;
@@ -140,7 +141,7 @@ export function applyVerification(nodes: PlanNode[], verification: VerificationO
     : node);
 }
 
-export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenLimit: number): { plan: PlanNode[]; activeNodeId?: string; reopenedNodeIds: string[] } {
+export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenLimit: number): { plan: PlanNode[]; activeNodeId?: string; reopenedNodeIds: string[]; invalidatedNodeIds: string[] } {
   const failedIds = verifiedFailureIds(nodes, requested);
   const failedNodes = nodes.filter((node) => failedIds.has(node.id));
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -154,10 +155,10 @@ export function reopenFailedPlan(nodes: PlanNode[], requested: string[], reopenL
     }
   }
   const plan = nodes.map((node) => reopenIds.has(node.id) ? { ...node, status: "pending" as const, reopenCount: node.reopenCount + 1, leaf: undefined }
-    : invalid.has(node.id) ? { ...node, status: "removed" as const } : node);
+    : invalid.has(node.id) ? { ...node, status: "removed" as const, leaf: undefined } : node);
   const active = selectActiveNode(plan);
   if (active) active.status = "active";
-  return { plan, activeNodeId: active?.id, reopenedNodeIds: [...reopenIds] };
+  return { plan, activeNodeId: active?.id, reopenedNodeIds: [...reopenIds], invalidatedNodeIds: [...new Set([...reopenIds, ...invalid])] };
 }
 
 export function budgetExceeded(state: ProgressiveLodState): boolean {

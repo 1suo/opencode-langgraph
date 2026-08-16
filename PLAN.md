@@ -10,7 +10,7 @@
 
 ## Connection
 
-The connector starts a graph from `graph:on` messages or `/run-graph`; the root model has no orchestration tools. An agent-backed node creates, continues, or forks an OpenCode child session as explicitly requested by the graph. Typed graph state—not a replayed transcript—is the cross-role contract. One production role registry owns role prompts, models, tools, and defaults; the graph supplies role-specific typed payloads only. Bounded changes skip planning, while uncertain work keeps scouting branch-local and makes each detail decision in a fresh tool-free session. Implementation leaves remain isolated, and repair continues only the failed leaf session.
+The connector starts a graph from `graph:on` messages or `/run-graph`; the root model has no orchestration tools. An agent-backed node creates, continues, or forks an OpenCode child session as explicitly requested by the graph. Typed graph state—not a replayed transcript—is the cross-role contract. One production role registry owns role prompts, models, tools, and defaults; the graph supplies role-specific typed payloads only. Bounded changes skip planning, while uncertain work keeps scouting branch-local and makes each detail decision in a fresh tool-free session. Scoped evidence, constraints, dependency contracts, and replan issues flow forward without replaying transcripts. Implementation leaves remain isolated, repair continues only the failed leaf session, and every aggregate verifier runs in a disposable mirror.
 
 External CLIs use the command model backend: prompt on stdin, answer on stdout, logs on stderr, graph worktree as cwd, and abort propagation.
 
