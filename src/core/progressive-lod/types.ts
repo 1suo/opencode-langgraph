@@ -131,6 +131,7 @@ export const ClassificationSchema = z.object({
   goal: z.string().min(1).max(500), questions: z.array(z.string().min(1).max(500)).min(1).max(6).optional(),
 }).superRefine((value, context) => {
   if (value.route === "planned_change" && !value.questions?.length) context.addIssue({ code: "custom", path: ["questions"], message: "planned_change requires scouting questions" });
+  if (value.route === "direct_change" && value.scope !== "local") context.addIssue({ code: "custom", path: ["scope"], message: "direct_change is limited to one local mutation concern" });
 });
 
 export const ResearchSchema = z.object({

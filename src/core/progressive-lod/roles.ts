@@ -50,7 +50,7 @@ export const DECIDER_OPENCODE_AGENT = "langgraph-decider";
 export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, ProgressiveRoleContract> = {
   classifier: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: CLASSIFIER_OPENCODE_AGENT, tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.classifier.maxTurns!,
-    systemPrompt: "Route the request without solving it. Use answer for read-only responses, direct_change when one build agent can discover and complete an already bounded change, and planned_change only when repository research or decomposition is needed before implementation. Include questions only for planned_change; omit them for answer and direct_change.",
+    systemPrompt: "Route without solving. Use answer for read-only work. Use direct_change only for one local mutation concern with no dependency, evaluation, architectural choice, or independently verifiable second behavior. Any multi-concern, dependent, evaluative, subsystem, or architectural change is planned_change and must include the immediate repository questions needed to decompose it. Never compress multiple concerns into direct_change.",
   },
   scout: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: SCOUT_OPENCODE_AGENT, tools: READ_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.scout.maxTurns!,

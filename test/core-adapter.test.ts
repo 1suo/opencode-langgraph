@@ -99,6 +99,10 @@ describe("typed graph validation", () => {
     expect((await loadConnectorDefinition(project)).graphs["progressive-lod"]).toBeDefined();
   });
 
+  it("rejects subsystem work routed around planning", () => {
+    expect(() => ClassificationSchema.parse({ route: "direct_change", scope: "subsystem", goal: "implement two dependent concerns" })).toThrow(/direct_change is limited/);
+  });
+
   it("applies preset model, role, and scope-budget overrides", async () => {
     const project = temp("opencode-langgraph-options-");
     const file = writeConnectorConfig(project);
