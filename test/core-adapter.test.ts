@@ -13,7 +13,7 @@ import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
 import { applyDecision, applyVerification, implementationOrder, liveNodeCount, mergeResearch, nextImplementationLeaf, reopenFailedPlan } from "../src/core/progressive-lod/plan.js";
 import { ClassificationSchema, DEFAULT_ROLE_LIMITS, DetailDecisionSchema, SCOPE_BUDGETS, type DetailDecision, type ProgressiveLodState } from "../src/core/progressive-lod/types.js";
-import { branchProjection, progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
+import { branchProjection, normalizeDetailDecision, progressiveLodGraph } from "../src/core/progressive-lod/graph.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "../src/opencode/verifier-workspace.js";
@@ -92,7 +92,7 @@ describe("typed graph validation", () => {
     expect(definition.agents.decider).toMatchObject({ model: "decider-model", maxSteps: 2, tools: { read: false, bash: false } });
     expect(definition.agents.decider.opencodeAgent).toBe("langgraph-decider");
     expect(definition.agents.verifier).toMatchObject({ model: "verifier-model", maxSteps: 12, tools: { bash: true, edit: false } });
-    expect(definition.agents.implementer).toMatchObject({ model: "implementer-model", maxSteps: 8, tools: { task: false } });
+    expect(definition.agents.implementer).toMatchObject({ model: "implementer-model", maxSteps: 16, tools: { task: false } });
     const file = writeConnectorConfig(project);
     expect(path.relative(project, file)).toBe(typedConfigFile);
     expect(fs.readFileSync(file, "utf8")).toContain('preset: "progressive-lod"');
@@ -191,7 +191,8 @@ describe("OpenCode child-session runtime", () => {
     const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
     await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" } })).resolves.toMatchObject({ structured: { decision: "go" }, sessionId: "child" });
     expect(prompts).toHaveLength(2);
-    expect(prompts[1].body.parts[0].text).toContain("previous response was incomplete or failed its output contract");
+    expect(prompts[1].body.parts[0].text).toContain("Your previous JSON failed validation");
+    expect(prompts[1].body.parts[0].text).toContain("ORIGINAL INPUT\ngo?");
   });
 
   it("retries valid JSON that fails the typed output contract", async () => {
@@ -210,6 +211,9 @@ describe("OpenCode child-session runtime", () => {
     };
     await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" }, validateStructured })).resolves.toMatchObject({ structured: { decision: "go" } });
     expect(prompts).toHaveLength(2);
+    expect(prompts[1].body.parts[0].text).toContain("ORIGINAL INPUT\ngo?");
+    expect(prompts[1].body.parts[0].text).toContain("VALIDATION ERROR\ndecision must be go");
+    expect(prompts[1].body.parts[0].text).toContain('PREVIOUS INVALID OUTPUT\n{"decision":"stop"}');
   });
 
   it("keeps a child session alive while tool activity advances", async () => {
@@ -325,6 +329,15 @@ describe("progressive planning reducer", () => {
     expect(() => ClassificationSchema.parse({ route: "planned_change", scope: "local", goal: "unclear change" })).toThrow();
     expect(DetailDecisionSchema.parse({ disposition: "refine", child: { key: "next", title: "Find owner", question: "Which module owns this behavior?", dependencies: [] } })).toMatchObject({ disposition: "refine" });
     expect(DetailDecisionSchema.parse({ disposition: "ready", ...leaf, children: [] })).toEqual({ disposition: "ready", ...leaf });
+    expect(() => DetailDecisionSchema.parse({ disposition: "refine", child: { key: "many", title: "Too broad", question: "Which path owns it? Which tests cover it?", dependencies: [] } })).toThrow(/one atomic concern/);
+  });
+
+  it("deterministically reduces an oversized compound refinement to one atomic question", () => {
+    const question = `${"Investigate this implementation detail ".repeat(12)}? Which second concern applies?`;
+    const normalized = normalizeDetailDecision({ disposition: "refine", child: { key: "next", title: "Next", question, dependencies: [] } }) as { child: { question: string } };
+    expect(normalized.child.question.length).toBeLessThanOrEqual(320);
+    expect(normalized.child.question.match(/\?/g)).toHaveLength(1);
+    expect(DetailDecisionSchema.parse({ disposition: "refine", child: { key: "next", title: "Next", question: normalized.child.question, dependencies: [] } })).toBeDefined();
   });
 
   it("makes split children pending, resolves dependencies, and forks branch context", () => {
@@ -336,6 +349,10 @@ describe("progressive planning reducer", () => {
     expect(merged.plan[0].status).toBe("expanded");
     expect(merged.plan.find((node) => node.title === "Base")).toMatchObject({ id: "p2", status: "active", scoutSessionMode: "fork", agents: ["langgraph-decider"] });
     expect(merged.plan.find((node) => node.title === "Consumer")).toMatchObject({ id: "p3", status: "pending", dependencies: ["p2"], scoutSessionMode: "fork" });
+  });
+
+  it("rejects a refinement child that depends on its parent or ancestor", () => {
+    expect(() => applyDecision(state(), { disposition: "refine", child: { key: "child", title: "Child", question: "Which contract applies?", dependencies: ["p1"] } }, "langgraph-decider")).toThrow(/ancestor concern/);
   });
 
   it("deduplicates evidence and omits unrelated branch descriptions", () => {
@@ -358,6 +375,16 @@ describe("progressive planning reducer", () => {
     expect(projection).toContain("active only");
     expect(projection).not.toContain("sibling only");
     expect(projection).not.toContain("contextCycles");
+  });
+
+  it("caps inherited facts and constraints in a branch handoff", () => {
+    const current = state();
+    current.evidence = Array.from({ length: 30 }, (_, index) => ({ id: `e${index + 1}`, claim: `fact ${index + 1}`, source: `src/${index + 1}.ts:1`, excerpt: "", fingerprint: `f${index + 1}`, kind: "repository" as const, confidence: 1 }));
+    current.plan[0].evidenceIds = current.evidence.map((item) => item.id);
+    current.constraints = Array.from({ length: 30 }, (_, index) => ({ id: `c${index + 1}`, text: `constraint ${index + 1}`, source: `src/${index + 1}.ts`, nodeId: "p1" }));
+    const projection = branchProjection(current) as { facts: unknown[]; constraints: unknown[] };
+    expect(projection.facts).toHaveLength(12);
+    expect(projection.constraints).toHaveLength(12);
   });
 
   it("orders leaves and reopens only the failed branch parent", () => {
@@ -396,7 +423,10 @@ describe("progressive planning graph", () => {
     const runtime = { call: async (input: { node: string; prompt: string; session?: { strategy: string; sessionId?: string } }) => {
       calls.push(input);
       if (input.node === "classify") return { text: "", sessionId: "classifier", structured: { route: "planned_change", scope: "local", goal: "align two seams", questions: ["Which seams must align?"] } };
-      if (input.node.startsWith("scout:")) return { text: "", sessionId: `s-${input.node}`, tools: [{ tool: "read", status: "completed", title: "src/a.ts", input: { filePath: "src/a.ts" } }], structured: { facts: [{ text: "source exists", source: "src/a.ts:1" }], constraints: [], unknowns: [] } };
+      if (input.node.startsWith("scout:")) return { text: "", sessionId: `s-${input.node}`, tools: [
+        { tool: "read", status: "completed", title: "src/a.ts", input: { filePath: "src/a.ts" } },
+        { tool: "read", status: "completed", title: "src/b.ts", input: { filePath: "src/b.ts" } },
+      ], structured: { facts: [{ text: "source exists", source: "src/a.ts:1" }, { text: "two-file contract", source: "src/a.ts:1; src/b.ts:2" }], constraints: [], unknowns: [] } };
       if (input.node === "decide:p1") return { text: "", sessionId: "decider", structured: decisionValue("split", undefined, [
         { key: "base", title: "Base contract", question: "BASE FULL DESCRIPTION", dependencies: [] },
         { key: "consumer", title: "Consumer seam", question: "CONSUMER FULL DESCRIPTION", dependencies: ["base"] },
@@ -413,15 +443,18 @@ describe("progressive planning graph", () => {
     expect(calls.every((call) => { try { JSON.parse(call.prompt); return true; } catch { return false; } })).toBe(true);
     expect(JSON.parse(calls.find((call) => call.node === "scout:p1")!.prompt).concern.questions).toEqual(["Which seams must align?"]);
     const firstDecisionPrompt = calls.find((call) => call.node === "decide:p1")!.prompt;
-    expect(JSON.parse(firstDecisionPrompt).facts).toEqual([expect.objectContaining({ text: "source exists", source: "src/a.ts:1" })]);
-    expect(JSON.parse(firstDecisionPrompt).facts[0]).toMatchObject({ kind: "repository", confidence: 1 });
+    expect(JSON.parse(firstDecisionPrompt).facts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "source exists", source: "src/a.ts:1" })]));
+    expect(JSON.parse(firstDecisionPrompt).facts.every((fact: { kind: string; confidence: number }) => fact.kind === "repository" && fact.confidence === 1)).toBe(true);
     expect(firstDecisionPrompt.match(/source exists/g)).toHaveLength(1);
     expect(firstDecisionPrompt).not.toContain('"research"');
     expect(calls.find((call) => call.node === "scout:p2")?.session).toEqual({ strategy: "fork", sessionId: "s-scout:p1" });
     expect(calls.find((call) => call.node === "scout:p3")?.prompt).not.toContain("BASE FULL DESCRIPTION");
     expect(JSON.parse(calls.find((call) => call.node === "scout:p3")!.prompt).dependencies[0]).toMatchObject({ id: "p2", leaves: [{ id: "p2", contract: { objective: "Implement decide:p2" } }] });
     expect(JSON.parse(calls.find((call) => call.node === "implement:p3")!.prompt).dependencies[0]).toMatchObject({ id: "p2", leaves: [{ id: "p2", contract: { objective: "Implement decide:p2" }, artifacts: { changedFiles: ["src/a.ts"] } }] });
-    expect(JSON.parse(calls.find((call) => call.node === "implement:p2")!.prompt).grounding[0]).toMatchObject({ text: "source exists", kind: "repository" });
+    expect(JSON.parse(calls.find((call) => call.node === "implement:p2")!.prompt).grounding).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: "source exists", kind: "repository" }),
+      expect.objectContaining({ text: "two-file contract", kind: "repository" }),
+    ]));
     expect(configured.result?.(result)).toContain("Verified 2 implementation leaves");
   });
 
@@ -443,6 +476,28 @@ describe("progressive planning graph", () => {
     expect(calls[1].prompt).not.toContain("contextCycles");
     expect(calls[2].prompt).not.toContain("/repo");
     expect(calls[2].prompt).toContain("./src/a.ts");
+  });
+
+  it("carries the original request through a real mutation and verification flow", async () => {
+    const project = temp("opencode-langgraph-mutation-");
+    const target = path.join(project, "value.txt");
+    fs.writeFileSync(target, "before\n");
+    const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    const runtime = { call: async (input: { node: string; prompt: string }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "direct_change", scope: "local", goal: "change value.txt" } };
+      if (input.node === "implement:p1") {
+        expect(JSON.parse(input.prompt).task).toBe("replace before with after in value.txt");
+        fs.writeFileSync(target, "after\n");
+        return { text: "", sessionId: "impl", tools: [{ tool: "edit", status: "completed", title: "value.txt" }], structured: { status: "completed", changedFiles: ["value.txt"], checks: [] } };
+      }
+      if (input.node === "verify") return fs.readFileSync(target, "utf8") === "after\n"
+        ? { text: "", structured: { verdict: "pass", checks: [{ name: "value", passed: true, evidence: "value.txt contains after" }] } }
+        : { text: "", structured: { verdict: "fail", findings: [{ leafId: "p1", problem: "value unchanged", evidence: "value.txt" }] } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const completed = await configured.graph.invoke(configured.initial({ task: "replace before with after in value.txt", directory: project, worktree: project, runId: "mutation" }), { configurable: { thread_id: "mutation", langgraphOpenCodeRuntime: runtime, ...verifierWorkspace } });
+    expect(configured.progress?.(completed)?.phase).toBe("completed");
+    expect(fs.readFileSync(target, "utf8")).toBe("after\n");
   });
 
   it("replans a blocked direct change and sends repair only its findings", async () => {
@@ -554,8 +609,21 @@ describe("progressive planning graph", () => {
     expect(scoutSessions).toEqual([{ strategy: "fresh" }, { strategy: "fork", sessionId: "scout-aborted" }]);
     expect(scoutLimits).toEqual([
       expect.objectContaining({ maxTurns: 16, maxCacheReadTokens: 800_000, maxContextTokens: 96_000 }),
-      expect.objectContaining({ maxTurns: 32, maxCacheReadTokens: 1_600_000, maxContextTokens: 192_000 }),
+      expect.objectContaining({ maxTurns: 16, maxCacheReadTokens: 800_000, maxContextTokens: 96_000 }),
     ]);
+  });
+
+  it("stops automatically at the cumulative run budget", async () => {
+    const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    const calls: string[] = [];
+    const runtime = { call: async (input: { node: string }) => {
+      calls.push(input.node);
+      return { text: "", usage: { turns: 24, input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, structured: { route: "planned_change", scope: "local", goal: "bounded", questions: ["What must change?"] } };
+    } };
+    const completed = await configured.graph.invoke(configured.initial({ task: "bounded", directory: "/repo", worktree: "/repo", runId: "global-stop" }), { configurable: { thread_id: "global-stop", langgraphOpenCodeRuntime: runtime, ...verifierWorkspace } });
+    expect(calls).toEqual(["classify"]);
+    expect(configured.progress?.(completed)?.phase).toBe("failed");
+    expect(configured.result?.(completed)).toContain("Stopped automatically");
   });
 
   it("replans an implementation quantum that produced no mutation", async () => {
@@ -578,7 +646,7 @@ describe("progressive planning graph", () => {
     const completed = await configured.graph.invoke(configured.initial({ task: "large original task", directory: "/repo", worktree: "/repo", runId: "no-progress" }), { recursionLimit: 64, configurable: { thread_id: "no-progress", langgraphOpenCodeRuntime: runtime, ...verifierWorkspace } });
     expect(configured.progress?.(completed)?.phase).toBe("completed");
     expect(implementations).toBe(2);
-    expect(prompts.every((prompt) => !prompt.includes("large original task"))).toBe(true);
+    expect(prompts.every((prompt) => prompt.includes("large original task"))).toBe(true);
   });
 
   it("retains an isolated verifier workspace only across a budget resume", async () => {

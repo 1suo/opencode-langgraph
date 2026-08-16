@@ -29,14 +29,14 @@ The graph is a controller, not another general agent. It gives each role one tas
 |---|---|---|---|---|
 | classifier | DeepSeek V4 Flash | none | fresh | route and task profile |
 | scout | DeepSeek V4 Flash | read/search, no shell | fresh root; continue refinement; fork split | cited facts only |
-| decider | DeepSeek V4 Flash | none | fresh per decision; fork automatically after an exhausted scheduling quantum | one disposition |
+| decider | DeepSeek V4 Flash | none | fresh per decision; structured retry in the same session | one disposition |
 | implementer | inherited | build tools, no subagents | fresh per leaf | files and focused checks |
 | verifier | inherited | read/search/test shell in disposable mirror | fresh aggregate pass; fork automatically after an exhausted scheduling quantum | leaf-specific verdicts |
 | repair | inherited | build tools, no subagents | continue failed leaf | bounded repair artifacts |
 
-All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime supplies a portable JSON Schema text contract and retries malformed, truncated, or schema-invalid output in the same scoped session before state mutation. This deliberately avoids provider-specific structured-output tool modes. Each call records the system, input, and output-contract layers for F8 inspection.
+All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime supplies a portable JSON Schema text contract and retries malformed, truncated, or schema-invalid output in the same scoped session before state mutation. A retry includes the original payload, invalid output, and exact validation error. This deliberately avoids provider-specific structured-output tool modes. Each call records the system, input, and output-contract layers for F8 inspection.
 
-The scout receives explicit unanswered questions, ancestry titles, lineage-scoped constraints, relevant compact facts with provenance, replan issues, sibling status, and dependency contracts/results. It never receives unrelated descriptions or controller bookkeeping. The decider receives that same distilled projection once; research is not duplicated beside it.
+The scout receives explicit unanswered questions, ancestry titles, at most twelve relevant lineage-scoped constraints and facts with provenance, recent replan issues, sibling status, and dependency contracts/results. It never receives unrelated descriptions or controller bookkeeping. The decider receives that same distilled projection once; research is not duplicated beside it.
 
 OpenCode transcripts remain in their child sessions. Durable graph state keeps normalized facts, scoped constraints, contracts, replan issues, summaries, IDs, usage totals, and child-session references. Evidence is fingerprint-deduplicated and repository grounding is derived from completed read/search traces; unsupported claims remain labeled inference. Tool transcripts and candidate trees are not copied between roles.
 
@@ -106,7 +106,7 @@ classify
                   └─ exhausted/non-repairable → failed END
 ```
 
-One implementation leaf contains tightly coupled production code, focused tests, owner documentation, and required bookkeeping. Creating separate orchestration leaves for those parts is invalid unless they are genuinely independent deliverables.
+One implementation leaf contains tightly coupled production code, focused tests, owner documentation, and required bookkeeping. Creating separate orchestration leaves for those parts is invalid unless they are genuinely independent deliverables. The implementer receives the original request and may satisfy repository-mandated workflow setup; that setup is not a separate LOD concern.
 
 ## Budgets
 
@@ -116,7 +116,7 @@ One implementation leaf contains tightly coupled production code, focused tests,
 | subsystem | 24 | 12 | 3 | 2 | 2 | 48 | 250k | 3m | $0.08 |
 | architectural/unknown | 40 | 16 | 3 | 2 | 2 | 80 | 500k | 6m | $0.15 |
 
-Every role has a scheduling quantum for turns, fresh input, cache reads, and live context. The default implementer quantum is 8 turns; scout 16 with 96,000 live-context tokens; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a quantum reached on its final turn. A busy implementer is continued only after producing a mutation; otherwise its leaf is returned for replanning. Other exhausted role quanta expand automatically. Usage remains visible as telemetry and never pauses the user workflow.
+Every role has a scheduling quantum for turns, fresh input, cache reads, and live context. The default implementer quantum is 16 turns with 96,000 live-context tokens; scout 16 with 96,000; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a quantum reached on its final turn. A busy implementer is continued only after producing a mutation; otherwise its leaf is returned for replanning. Scout, implementer, verifier, and repair have bounded automatic continuations at the same quantum size. Cumulative scope limits and context-cycle limits stop autonomously rather than asking the user or expanding indefinitely.
 
 The verifier's shell and tests run in a connector-owned copy of the complete visible worktree with live Git metadata excluded. The copy survives an internal verifier reschedule and is removed after a verdict, failure, or cancellation. Post-repair verification starts a fresh session and fresh copy.
 
@@ -134,7 +134,7 @@ export default defineOpenCodeLangGraph({
       implementer: "inherit",
     },
     roleLimits: {
-      implementer: { maxTurns: 8, maxContextTokens: 64_000 },
+      implementer: { maxTurns: 16, maxContextTokens: 96_000 },
     },
     budgets: {
       subsystem: { calls: 24, maxCost: 0.08 },

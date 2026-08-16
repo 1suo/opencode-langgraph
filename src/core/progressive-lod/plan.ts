@@ -68,6 +68,13 @@ export function applyDecision(state: ProgressiveLodState, decision: DetailDecisi
   } else if (decision.disposition === "refine" || decision.disposition === "split") {
     const children = decision.disposition === "refine" ? [decision.child] : decision.children;
     if (liveNodeCount(plan) - 1 + children.length > state.budget.nodes) throw new Error("Detail decision exceeds the live plan-node budget");
+    const ancestorIds = new Set<string>([target.id]);
+    let parentId = target.parentId;
+    while (parentId) {
+      ancestorIds.add(parentId);
+      parentId = plan.find((node) => node.id === parentId)?.parentId;
+    }
+    if (children.some((child) => child.dependencies.some((dependency) => ancestorIds.has(dependency)))) throw new Error("Detail decision child cannot depend on itself or an ancestor concern");
     const localIds = new Map(children.map((child, index) => [child.key, `p${nextId + index}`]));
     target.status = "expanded";
     for (const child of children) {

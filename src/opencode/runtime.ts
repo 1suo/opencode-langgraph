@@ -244,7 +244,9 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
           baselineUsage = sessionUsage(current.data);
           baselineMessageIds = new Set(current.data.flatMap((message) => message.info.id ? [message.info.id] : []));
           baselinePartIds = new Set(current.data.flatMap((message) => message.parts.map((part) => part.id)));
-          prompt = `Your previous response was incomplete or failed its output contract. Return a shorter complete JSON value that matches the contract exactly. Do not use Markdown.\n\n${composedPrompt.schemaInstruction}`;
+          const validationError = error instanceof Error ? error.message : String(error);
+          const invalidOutput = output.text.slice(0, 4_000);
+          prompt = `Your previous JSON failed validation. Correct only the output; keep the same task and return one complete JSON value.\n\nVALIDATION ERROR\n${validationError}\n\nORIGINAL INPUT\n${composedPrompt.input}\n\nPREVIOUS INVALID OUTPUT\n${invalidOutput}\n\nOUTPUT CONTRACT\n${composedPrompt.schemaInstruction}`;
         }
       }
       throw new Error(`${input.node} returned no structured output`);

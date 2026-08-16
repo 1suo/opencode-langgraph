@@ -47,14 +47,14 @@ export default defineOpenCodeLangGraph({
   preset: "progressive-lod",
   options: {
     models: { scout: "deepseek/deepseek-v4-flash", verifier: "inherit" },
-    roleLimits: { implementer: { maxTurns: 8, maxCost: 0.08 } },
+    roleLimits: { implementer: { maxTurns: 16, maxCost: 0.08 } },
   },
 })
 ```
 
-All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` define internal scheduling quanta for turns, fresh input, cache reads, live context, or cost. If a role exhausts a quantum, the controller forks the aborted child session, expands every resource allowance together, and resumes automatically. Usage is telemetry; it never creates a human budget prompt. Human interrupts are reserved for indispensable engineering decisions.
+All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` define internal scheduling quanta for turns, fresh input, cache reads, live context, or cost. The controller may fork an aborted child for a bounded number of same-size quanta; cumulative scope limits stop the run automatically and never create a human budget prompt. Human interrupts are reserved for indispensable engineering decisions.
 
-Scout has repository read/search tools but no shell. Facts retain repository/inference provenance, constraints remain branch-scoped, and dependency contracts plus grounded facts flow into implementation. Aggregate verification runs tests in a connector-owned disposable copy of the current worktree; repairs change only the real implementation session, then a fresh isolated verifier checks the result again.
+Scout has repository read/search tools but no shell. Facts retain repository/inference provenance, compact branch-scoped constraints and evidence flow forward, and implementation receives the original request plus its leaf contract and grounded facts. Implementers may perform repository-required workflow setup such as a session branch or worktree. Aggregate verification runs tests in a connector-owned disposable copy of the current worktree; repairs change only the real implementation session, then a fresh isolated verifier checks the result again.
 
 ### Connect an arbitrary graph
 

@@ -114,7 +114,7 @@ export const DEFAULT_ROLE_LIMITS: ProgressiveRoleLimits = {
   classifier: { maxTurns: 2, maxInputTokens: 16_000, maxCacheReadTokens: 64_000, maxContextTokens: 48_000 },
   scout: { maxTurns: 16, maxInputTokens: 128_000, maxCacheReadTokens: 800_000, maxContextTokens: 96_000 },
   decider: { maxTurns: 2, maxInputTokens: 20_000, maxCacheReadTokens: 100_000, maxContextTokens: 48_000 },
-  implementer: { maxTurns: 8, maxInputTokens: 90_000, maxCacheReadTokens: 800_000, maxContextTokens: 64_000 },
+  implementer: { maxTurns: 16, maxInputTokens: 120_000, maxCacheReadTokens: 1_200_000, maxContextTokens: 96_000 },
   verifier: { maxTurns: 12, maxInputTokens: 90_000, maxCacheReadTokens: 800_000, maxContextTokens: 64_000 },
   repair: { maxTurns: 12, maxInputTokens: 90_000, maxCacheReadTokens: 800_000, maxContextTokens: 96_000 },
 };
@@ -145,7 +145,11 @@ const LeafFields = {
   acceptanceCriteria: z.array(z.string().min(1).max(700)).min(1).max(5),
   verification: z.array(z.string().min(1).max(500)).min(1).max(5),
 };
-const DecisionChildSchema = z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(300), question: z.string().min(1).max(700), dependencies: z.array(z.string().max(80)).max(12).default([]) });
+const DecisionQuestionSchema = z.string().min(1).max(320).refine(
+  (value) => (value.match(/\?/g)?.length ?? 0) <= 1,
+  "A refinement must ask exactly one atomic concern, not a compound questionnaire",
+);
+const DecisionChildSchema = z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(180), question: DecisionQuestionSchema, dependencies: z.array(z.string().max(80)).max(12).default([]) });
 export const DetailDecisionSchema = z.discriminatedUnion("disposition", [
   z.object({ disposition: z.literal("ready"), ...LeafFields }),
   z.object({ disposition: z.literal("refine"), child: DecisionChildSchema }),
