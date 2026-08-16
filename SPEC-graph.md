@@ -17,7 +17,7 @@ The graph is a controller, not another general agent. It gives each role one tas
 5. `split` creates unresolved concerns only. It cannot manufacture implementation-ready leaves.
 6. `ready` applies to exactly one active concern and requires targets, acceptance criteria, and verification commands.
 7. Stable IDs, dependency resolution, node selection, cycle checks, and status transitions are controller code—not model judgment.
-8. Implementation starts only after every live planning concern is resolved, then runs one cohesive leaf per child session in dependency order.
+8. A bounded change may enter one cohesive implementation leaf directly. Otherwise implementation starts only after every live planning concern is resolved and runs leaves in dependency order.
 9. Verification is one independent aggregate pass after all leaves. Repair continues only the failed leaf session; an omitted prerequisite or architectural mismatch reopens planning.
 10. Human and budget decisions use LangGraph `interrupt()`. No hidden timeout or turn extension can continue spending.
 11. Read-only requests do not acquire a worktree lease. Change runs serialize per canonical worktree.
@@ -36,7 +36,7 @@ The graph is a controller, not another general agent. It gives each role one tas
 
 All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime appends the stable structured-output instruction. Each call records those three effective prompt layers for F8 inspection.
 
-The scout receives the active node, its ancestry, global constraints, relevant evidence, concise decisions, and compact dependency results. Unrelated nodes are title/status indexes only. A dependency never imports an unrelated sibling's full description or transcript.
+The scout receives explicit unanswered questions, ancestry titles, global constraints, relevant compact facts, sibling status, and dependency results. It never receives unrelated descriptions or controller bookkeeping. The decider receives that same distilled projection once; research is not duplicated beside it.
 
 OpenCode transcripts remain in their child sessions. Durable graph state keeps normalized facts, constraints, contracts, summaries, IDs, usage totals, and child-session references. Evidence is fingerprint-deduplicated. Tool transcripts and candidate trees are not copied between roles.
 
@@ -73,7 +73,7 @@ The full state is versioned and JSON-serializable. It also stores task profile, 
 
 ## Planning reducer
 
-The tool-free decider chooses exactly one disposition:
+The tool-free decider returns a discriminated outcome containing only fields relevant to that disposition:
 
 - `ready`: one bounded leaf and no children;
 - `refine`: exactly one pending child, continuing scout context;
@@ -82,14 +82,15 @@ The tool-free decider chooses exactly one disposition:
 - `reopen_parent`: discard stale descendants and revisit their parent;
 - `interrupt`: ask one consequential question repository inspection cannot settle.
 
-Alternatives are at most three short option summaries. They are not fully expanded competing plans. The reducer assigns IDs, resolves sibling dependency keys, attaches evidence, enforces capacity atomically, rejects cycles, and activates the shallowest dependency-ready pending node.
+The reducer assigns IDs, resolves sibling dependency keys, attaches evidence, enforces capacity atomically, rejects cycles, and activates the shallowest dependency-ready pending node. Implementers receive only the request, leaf contract, constraints, and dependency artifacts. Verification receives contracts and artifacts; repair receives only findings for its continued leaf session. Controller code derives lifecycle summaries.
 
 ## Execution flow
 
 ```text
 classify
   ├─ answer → END
-  └─ change → acquire lease → initialize root
+  ├─ bounded change → acquire lease → implement → verify → END
+  └─ planned change → acquire lease → initialize root
        → guard budget
        → scout active branch
        → tool-free decision
@@ -101,7 +102,7 @@ classify
                → one aggregate verifier
                   ├─ pass → END
                   ├─ bounded leaf repair → verify
-                  ├─ architectural mismatch/blocker → reopen planning
+                  ├─ wrong contract/blocker → reopen planning
                   └─ exhausted/non-repairable → failed END
 ```
 

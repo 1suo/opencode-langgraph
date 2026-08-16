@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.6.4.tgz --force
+opencode plugin ./opencode-langgraph-0.6.5.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -37,7 +37,7 @@ Every agent-backed graph node runs in an OpenCode child session. The production 
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies the message, scouts only the active concern, makes a tool-free detail decision, implements one cohesive leaf per session, and verifies all leaves once. A blocked leaf reopens planning instead of entering a blind repair loop. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and turn default; graph nodes pass JSON payloads without repeating behavioral prose. Classifier, scout, decider, and direct-answer roles use `deepseek/deepseek-v4-flash`; verifier, implementer, and repair inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies each message as an answer, a bounded direct change, or a change that needs planning. Bounded changes go straight to one implementer and independent verification; only uncertain work pays for branch-scoped scouting and tool-free detail decisions. A blocked direct change reopens into planning instead of guessing. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and turn default. Classifier, scout, decider, and direct-answer roles use `deepseek/deepseek-v4-flash`; verifier, implementer, and repair inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"

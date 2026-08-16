@@ -6,12 +6,10 @@ export type TaskScope = z.infer<typeof ScopeSchema>;
 export type PlanStatus = "pending" | "active" | "expanded" | "ready" | "implementing" | "implemented" | "verified" | "failed" | "removed";
 
 export interface TaskProfile {
-  route: "answer" | "change";
+  route: "answer" | "direct_change" | "planned_change";
   scope: TaskScope;
-  summary: string;
-  planningFrame: string;
-  readOnly: boolean;
-  risks: string[];
+  goal: string;
+  questions?: string[];
 }
 
 export interface Evidence {
@@ -50,30 +48,24 @@ export interface PlanNode {
 }
 
 export interface ResearchPacket {
-  summary: string;
   evidence: Evidence[];
   constraints: Constraint[];
-  unresolved: string[];
+  unknowns: string[];
 }
 
-export interface DecisionOption { id: string; label: string; rationale: string; tradeoff: string }
 export interface DecisionChild {
   key: string;
   title: string;
-  description: string;
-  level: string;
+  question: string;
   dependencies: string[];
 }
-export interface DetailDecision {
-  disposition: "ready" | "refine" | "split" | "remove" | "reopen_parent" | "interrupt";
-  summary: string;
-  options: DecisionOption[];
-  selectedOption: string;
-  confidence: number;
-  question: string;
-  children: DecisionChild[];
-  leaf?: LeafContract;
-}
+export type DetailDecision =
+  | { disposition: "ready"; leaf: LeafContract }
+  | { disposition: "refine"; child: DecisionChild }
+  | { disposition: "split"; children: DecisionChild[] }
+  | { disposition: "remove"; reason?: string }
+  | { disposition: "reopen_parent"; reason?: string }
+  | { disposition: "interrupt"; question: string };
 
 export interface CheckResult { name: string; passed: boolean; evidence: string }
 export interface ImplementationResult {
@@ -132,18 +124,17 @@ export const SCOPE_BUDGETS: Record<TaskScope, ScopeBudget> = {
 };
 
 export const ClassificationSchema = z.object({
-  route: z.enum(["answer", "change"]), scope: ScopeSchema, summary: z.string().min(1).max(500),
-  planningFrame: z.string().min(1), readOnly: z.boolean(), risks: z.array(z.string().max(500)).max(8).default([]),
+  route: z.enum(["answer", "direct_change", "planned_change"]), scope: ScopeSchema,
+  goal: z.string().min(1).max(500), questions: z.array(z.string().min(1).max(500)).min(1).max(6).optional(),
+}).superRefine((value, context) => {
+  if (value.route === "planned_change" && !value.questions?.length) context.addIssue({ code: "custom", path: ["questions"], message: "planned_change requires scouting questions" });
+  if (value.route !== "planned_change" && value.questions) context.addIssue({ code: "custom", path: ["questions"], message: `${value.route} must omit scouting questions` });
 });
 
-const EvidenceSchema = z.object({
-  claim: z.string().min(1).max(700), source: z.string().min(1).max(500), excerpt: z.string().max(500).default(""),
-  kind: z.enum(["repository", "tool", "inference"]), confidence: z.number().min(0).max(1),
-});
 export const ResearchSchema = z.object({
-  summary: z.string().min(1).max(1200), evidence: z.array(EvidenceSchema).max(12).default([]),
+  facts: z.array(z.object({ text: z.string().min(1).max(700), source: z.string().min(1).max(500) })).max(12).default([]),
   constraints: z.array(z.object({ text: z.string().min(1).max(700), source: z.string().min(1).max(500) })).max(12).default([]),
-  unresolved: z.array(z.string().max(500)).max(8).default([]),
+  unknowns: z.array(z.string().max(500)).max(8).default([]),
 });
 
 const LeafSchema = z.object({
@@ -151,27 +142,28 @@ const LeafSchema = z.object({
   acceptanceCriteria: z.array(z.string().min(1).max(700)).min(1).max(12),
   verification: z.array(z.string().min(1).max(500)).min(1).max(12),
 });
-export const DetailDecisionSchema = z.object({
-  disposition: z.enum(["ready", "refine", "split", "remove", "reopen_parent", "interrupt"]),
-  summary: z.string().min(1).max(1200),
-  options: z.array(z.object({ id: z.string().min(1).max(40), label: z.string().min(1).max(160), rationale: z.string().max(400), tradeoff: z.string().max(400) })).max(3).default([]),
-  selectedOption: z.string().max(40).default(""), confidence: z.number().min(0).max(1), question: z.string().max(700).default(""),
-  children: z.array(z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(300), description: z.string().min(1).max(1200), level: z.string().min(1), dependencies: z.array(z.string().max(80)).max(12).default([]) })).max(8).default([]),
-  leaf: LeafSchema.optional(),
-});
+const DecisionChildSchema = z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(300), question: z.string().min(1).max(700), dependencies: z.array(z.string().max(80)).max(12).default([]) });
+export const DetailDecisionSchema = z.discriminatedUnion("disposition", [
+  z.object({ disposition: z.literal("ready"), leaf: LeafSchema }),
+  z.object({ disposition: z.literal("refine"), child: DecisionChildSchema }),
+  z.object({ disposition: z.literal("split"), children: z.array(DecisionChildSchema).min(2).max(8) }),
+  z.object({ disposition: z.literal("remove"), reason: z.string().max(500).optional() }),
+  z.object({ disposition: z.literal("reopen_parent"), reason: z.string().max(500).optional() }),
+  z.object({ disposition: z.literal("interrupt"), question: z.string().min(1).max(700) }),
+]);
 
 export const ImplementationResultSchema = z.object({
-  status: z.enum(["completed", "blocked"]), summary: z.string().min(1).max(2000),
+  status: z.enum(["completed", "blocked"]),
   changedFiles: z.array(z.string().max(500)).max(50).default([]),
   checks: z.array(z.object({ name: z.string().max(500), passed: z.boolean(), evidence: z.string().max(1000) })).max(30).default([]),
-  blocker: z.string().max(1500).default(""),
+  blocker: z.string().max(1500).optional(),
 });
 
-export const VerificationSchema = z.object({
-  passed: z.boolean(), summary: z.string().min(1).max(2000),
-  checks: z.array(z.object({ name: z.string().max(500), passed: z.boolean(), evidence: z.string().max(1000) })).max(30).default([]),
-  failedNodeIds: z.array(z.string().max(80)).max(30).default([]), repairable: z.boolean(), architecturalMismatch: z.boolean(),
-});
+const FindingSchema = z.object({ leafId: z.string().min(1).max(80), problem: z.string().min(1).max(700), evidence: z.string().max(1000) });
+export const VerificationSchema = z.discriminatedUnion("verdict", [
+  z.object({ verdict: z.literal("pass"), checks: z.array(z.object({ name: z.string().max(500), passed: z.literal(true), evidence: z.string().max(1000) })).max(30).default([]) }),
+  z.object({ verdict: z.enum(["repair", "replan", "fail"]), findings: z.array(FindingSchema).min(1).max(30) }),
+]);
 
 export interface PendingBudget {
   scope: "call" | "global";

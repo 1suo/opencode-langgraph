@@ -24,15 +24,15 @@ export const CONNECTOR_ROOT_SYSTEM_PROMPT = "The OpenCode LangGraph connector ru
 export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, ProgressiveRoleContract> = {
   classifier: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.classifier.maxTurns!,
-    systemPrompt: "Task type: routing classification only. Classify the supplied request directly. Do not solve, inspect, call tools, or produce an execution plan. route=answer only for a read-only response; route=change when files or external state must change. planningFrame identifies the task-specific abstraction level. Produce exact structured output.",
+    systemPrompt: "Route the request without solving it. Use answer for read-only responses, direct_change when one build agent can discover and complete an already bounded change, and planned_change only when repository research or decomposition is needed before implementation. For planned_change, list the concrete questions scouting must answer.",
   },
   scout: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: READ_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.scout.maxTurns!,
-    systemPrompt: "Task type: branch-scoped repository scouting. Inspect only facts still missing for the supplied active concern. Do not design the solution, decompose other branches, edit files, or run tests. Return at most 12 concise cited facts and excerpts as exact structured output.",
+    systemPrompt: "Answer only the supplied concern questions from repository evidence. Do not design, decompose, edit, or run tests. Return concise sourced facts, constraints, and anything still unknown.",
   },
   decider: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.decider.maxTurns!,
-    systemPrompt: "Task type: one tool-free LOD decision. Use only the supplied typed evidence and choose exactly one disposition. split creates pending concerns only; ready applies only to the active concern and requires bounded targets, acceptance criteria, and verification. Alternatives are short decision summaries, never duplicate plans. Produce exact structured output.",
+    systemPrompt: "Decide whether the active concern is implementation-ready from the supplied facts. Choose one outcome only: ready with a bounded contract, refine with one unanswered concern, split into independent concerns, remove, reopen_parent, or interrupt for indispensable user input. Do not inspect the repository.",
   },
   answer: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: { ...READ_TOOLS, bash: false }, maxSteps: 24,
@@ -40,14 +40,14 @@ export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, Progressi
   },
   implementer: {
     defaultModel: "inherit", agent: "build", tools: { question: false, task: false }, maxSteps: DEFAULT_ROLE_LIMITS.implementer.maxTurns!,
-    systemPrompt: "Task type: one cohesive implementation leaf. Implement only the supplied leaf, preserve unrelated work, run its focused checks, and return exact structured changed-file/check artifacts. If prerequisites are omitted, return status=blocked and name the missing scope; do not redesign it.",
+    systemPrompt: "Complete the supplied implementation contract, preserve unrelated work, and run focused checks. Return changed files and check results. If the contract is not implementable as given, return blocked with the missing prerequisite instead of redesigning it.",
   },
   verifier: {
     defaultModel: "inherit", agent: "plan", tools: READ_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.verifier.maxTurns!,
-    systemPrompt: "Task type: one aggregate independent verification. Inspect the actual worktree and diff. Check every supplied implemented leaf against its contract and artifacts. Do not edit files. failedNodeIds must be exact plan IDs. Produce exact structured output.",
+    systemPrompt: "Independently inspect the worktree and verify every supplied contract. Do not edit. Return pass, repair for bounded defects, replan for a wrong or incomplete contract, or fail for a non-repairable result. Findings must name exact leaf IDs.",
   },
   repair: {
     defaultModel: "inherit", agent: "build", tools: { question: false, task: false }, maxSteps: DEFAULT_ROLE_LIMITS.repair.maxTurns!,
-    systemPrompt: "Task type: bounded repair of one previously implemented leaf. Address only its supplied verifier findings, preserve unrelated work, rerun focused checks, and return exact structured artifacts.",
+    systemPrompt: "Repair only the supplied findings in this continued implementation session, preserve unrelated work, and rerun focused checks. Return changed files and check results.",
   },
 };

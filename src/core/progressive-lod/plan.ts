@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { DetailDecision, Evidence, PlanNode, ProgressiveLodState, ResearchPacket, VerificationOutput } from "./types.js";
+import type { DetailDecision, Evidence, PlanNode, ProgressiveLodState, VerificationOutput } from "./types.js";
 
 function planNumber(value: string): number { const parsed = Number(value.replace(/^p/, "")); return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER; }
 function byPlanId(left: PlanNode, right: PlanNode): number { return planNumber(left.id) - planNumber(right.id) || left.id.localeCompare(right.id); }
@@ -29,7 +29,7 @@ export function selectActiveNode(nodes: PlanNode[]): PlanNode | undefined {
     .sort((a, b) => a.depth - b.depth || byPlanId(a, b))[0];
 }
 
-export function mergeResearch(state: ProgressiveLodState, raw: Omit<ResearchPacket, "evidence" | "constraints"> & { evidence: Array<Omit<Evidence, "id" | "fingerprint">>; constraints: Array<{ text: string; source: string }> }): Pick<ProgressiveLodState, "evidence" | "constraints" | "research"> {
+export function mergeResearch(state: ProgressiveLodState, raw: { evidence: Array<Omit<Evidence, "id" | "fingerprint">>; constraints: Array<{ text: string; source: string }>; unknowns: string[] }): Pick<ProgressiveLodState, "evidence" | "constraints" | "research"> {
   const evidence = [...state.evidence];
   for (const item of raw.evidence) {
     const fingerprint = createHash("sha256").update(`${item.source}\0${item.claim}\0${item.excerpt}`).digest("hex").slice(0, 16);
@@ -39,7 +39,7 @@ export function mergeResearch(state: ProgressiveLodState, raw: Omit<ResearchPack
   const constraints = [...state.constraints];
   for (const item of raw.constraints) if (!constraints.some((existing) => existing.text === item.text && existing.source === item.source)) constraints.push({ ...item, id: `c${constraints.length + 1}` });
   const added = evidence.slice(state.evidence.length);
-  return { evidence, constraints, research: { summary: raw.summary, unresolved: raw.unresolved, evidence: added, constraints: constraints.slice(state.constraints.length) } };
+  return { evidence, constraints, research: { unknowns: raw.unknowns, evidence: added, constraints: constraints.slice(state.constraints.length) } };
 }
 
 export interface DecisionMerge {
@@ -54,31 +54,27 @@ export function applyDecision(state: ProgressiveLodState, decision: DetailDecisi
   const plan = state.plan.map((node) => ({ ...node, dependencies: [...node.dependencies], evidenceIds: [...node.evidenceIds] }));
   const target = plan.find((node) => node.id === state.activeNodeId);
   if (!target) throw new Error("Detail decision requires an active plan node");
-  if (decision.options.length && !decision.options.some((option) => option.id === decision.selectedOption)) throw new Error("Selected decision option does not exist");
   const evidenceIds = state.research?.evidence.map((item) => item.id) ?? [];
   target.evidenceIds = [...new Set([...target.evidenceIds, ...evidenceIds])];
-  target.confidence = decision.confidence;
   target.contextCycles++;
-  const decisions = { ...state.decisions, [target.id]: decision.summary };
+  const decisions = { ...state.decisions, [target.id]: decision.disposition };
   let nextId = state.nextId;
   let humanQuestion = "";
 
   if (decision.disposition === "ready") {
-    if (!decision.leaf || decision.children.length) throw new Error("Ready disposition requires one leaf contract and no children");
     target.leaf = decision.leaf;
     target.status = "ready";
   } else if (decision.disposition === "refine" || decision.disposition === "split") {
-    const required = decision.disposition === "refine" ? 1 : 2;
-    if (decision.children.length < required || (decision.disposition === "refine" && decision.children.length !== 1)) throw new Error(`${decision.disposition} disposition has invalid child count`);
-    if (liveNodeCount(plan) - 1 + decision.children.length > state.budget.nodes) throw new Error("Detail decision exceeds the live plan-node budget");
-    const localIds = new Map(decision.children.map((child, index) => [child.key, `p${nextId + index}`]));
+    const children = decision.disposition === "refine" ? [decision.child] : decision.children;
+    if (liveNodeCount(plan) - 1 + children.length > state.budget.nodes) throw new Error("Detail decision exceeds the live plan-node budget");
+    const localIds = new Map(children.map((child, index) => [child.key, `p${nextId + index}`]));
     target.status = "expanded";
-    for (const child of decision.children) {
+    for (const child of children) {
       const id = `p${nextId++}`;
       plan.push({
-        id, parentId: target.id, title: child.title, description: child.description, level: child.level, depth: target.depth + 1,
+        id, parentId: target.id, title: child.title, description: child.question, level: child.title, depth: target.depth + 1,
         status: "pending", dependencies: child.dependencies.map((dependency) => localIds.get(dependency) ?? dependency).filter((dependency) => plan.some((node) => node.id === dependency) || [...localIds.values()].includes(dependency)),
-        evidenceIds: [...target.evidenceIds], confidence: decision.confidence, contextCycles: 0, reopenCount: 0,
+        evidenceIds: [...target.evidenceIds], confidence: target.confidence, contextCycles: 0, reopenCount: 0,
         scoutSessionId: target.scoutSessionId, scoutSessionMode: decision.disposition === "refine" ? "continue" : target.scoutSessionId ? "fork" : "fresh", scoutTurns: target.scoutTurns,
       });
     }
@@ -90,7 +86,7 @@ export function applyDecision(state: ProgressiveLodState, decision: DetailDecisi
     target.status = "removed"; parent.status = "pending"; parent.reopenCount++;
   } else {
     target.status = "active";
-    humanQuestion = decision.question || `Clarify ${target.title}`;
+    humanQuestion = decision.question;
   }
   assertAcyclic(plan);
   const active = humanQuestion ? target : selectActiveNode(plan);

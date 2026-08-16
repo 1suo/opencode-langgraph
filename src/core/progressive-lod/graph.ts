@@ -73,16 +73,6 @@ function structured<Output>(result: AgentCallResult, schema: ZodType<Output>, no
   return parsed.data;
 }
 
-function relevantNodeIds(state: ProgressiveLodState, nodeId = state.activeNodeId): Set<string> {
-  const byId = new Map(state.plan.map((node) => [node.id, node]));
-  const ids = new Set<string>();
-  let cursor = nodeId ? byId.get(nodeId) : undefined;
-  while (cursor) { ids.add(cursor.id); cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined; }
-  const visit = (id: string) => { if (ids.has(id)) return; ids.add(id); for (const dependency of byId.get(id)?.dependencies ?? []) visit(dependency); };
-  for (const dependency of (nodeId ? byId.get(nodeId)?.dependencies : []) ?? []) visit(dependency);
-  return ids;
-}
-
 function lineageNodeIds(state: ProgressiveLodState, nodeId = state.activeNodeId): Set<string> {
   const byId = new Map(state.plan.map((node) => [node.id, node]));
   const ids = new Set<string>();
@@ -96,24 +86,25 @@ export function branchProjection(state: ProgressiveLodState): Record<string, unk
   const active = state.plan.find((node) => node.id === state.activeNodeId);
   const dependencyIds = new Set(active?.dependencies ?? []);
   const evidenceIds = new Set(state.plan.filter((node) => ids.has(node.id) || dependencyIds.has(node.id)).flatMap((node) => node.evidenceIds));
+  for (const item of state.research?.evidence ?? []) evidenceIds.add(item.id);
   return {
-    task: state.originalTask, profile: state.profile ? { scope: state.profile.scope, risks: state.profile.risks } : undefined, humanAnswer: state.humanAnswer || undefined,
-    branch: state.plan.filter((node) => ids.has(node.id)).map(({ scoutSessionId: _session, scoutSessionMode: _mode, scoutTurns: _turns, ...node }) => ({ ...node, description: node.description === state.originalTask ? undefined : node.description, level: node.depth === 0 ? undefined : node.level })),
-    evidence: state.evidence.filter((item) => evidenceIds.has(item.id)), constraints: state.constraints,
-    decisions: Object.fromEntries(Object.entries(state.decisions).filter(([id]) => ids.has(id))),
-    dependencies: state.plan.filter((node) => dependencyIds.has(node.id)).map(({ id, title, status, evidenceIds: nodeEvidenceIds }) => ({ id, title, status, evidenceIds: nodeEvidenceIds, result: state.implementationResults[id]?.summary })),
-    unrelated: state.plan.filter((node) => !ids.has(node.id) && !dependencyIds.has(node.id)).map(({ id, parentId, title, status }) => ({ id, parentId, title, status })),
+    task: state.originalTask,
+    concern: active ? { id: active.id, title: active.title, questions: active.depth === 0 && state.profile?.questions?.length ? state.profile.questions : [active.description] } : undefined,
+    ancestry: state.plan.filter((node) => ids.has(node.id) && node.id !== active?.id).map(({ id, title }) => ({ id, title })),
+    facts: state.evidence.filter((item) => evidenceIds.has(item.id)).map(({ id, claim, source }) => ({ id, text: claim, source })),
+    unknowns: state.research?.unknowns ?? [],
+    constraints: state.constraints.map(({ text, source }) => ({ text, source })),
+    dependencies: state.plan.filter((node) => dependencyIds.has(node.id)).map(({ id, title, status }) => ({ id, title, status, result: state.implementationResults[id]?.summary })),
+    siblings: state.plan.filter((node) => node.parentId === active?.parentId && node.id !== active?.id).map(({ id, title, status }) => ({ id, title, status })),
+    humanAnswer: state.humanAnswer || undefined,
   };
 }
 
 function leafPayload(state: ProgressiveLodState, node: PlanNode): Record<string, unknown> {
-  const ids = relevantNodeIds(state, node.id);
-  const evidenceIds = new Set(state.plan.filter((candidate) => ids.has(candidate.id)).flatMap((candidate) => candidate.evidenceIds));
   return {
-    task: state.originalTask, leaf: node, constraints: state.constraints,
-    evidence: state.evidence.filter((item) => evidenceIds.has(item.id)),
-    ancestorDecisions: Object.fromEntries(Object.entries(state.decisions).filter(([id]) => ids.has(id))),
-    dependencies: node.dependencies.map((id) => ({ id, result: state.implementationResults[id] })).filter((item) => item.result),
+    task: state.originalTask, leafId: node.id, contract: node.leaf,
+    constraints: state.constraints.map(({ text }) => text),
+    dependencies: node.dependencies.map((id) => ({ id, result: state.implementationResults[id] ? { changedFiles: state.implementationResults[id].changedFiles, checks: state.implementationResults[id].checks } : undefined })).filter((item) => item.result),
   };
 }
 
@@ -127,9 +118,21 @@ function resumableSession(sessionId: string | undefined, resumeFromAbortedSessio
   return { strategy: resumeFromAbortedSession ? "fork" : "continue", sessionId };
 }
 
-function groundedResearch(raw: z.infer<typeof ResearchSchema>, result: AgentCallResult): z.infer<typeof ResearchSchema> {
+function groundedResearch(raw: z.infer<typeof ResearchSchema>, result: AgentCallResult) {
   const trace = JSON.stringify((result.tools ?? []).map(({ title, input }) => ({ title, input })));
-  return { ...raw, evidence: raw.evidence.map((item) => item.kind !== "inference" && !trace.includes(item.source.split(":")[0]) ? { ...item, kind: "inference" as const, confidence: Math.min(item.confidence, .7) } : item) };
+  return { unknowns: raw.unknowns, constraints: raw.constraints, evidence: raw.facts.map((item) => ({ claim: item.text, source: item.source, excerpt: "", kind: trace.includes(item.source.split(":")[0]) ? "repository" as const : "inference" as const, confidence: trace.includes(item.source.split(":")[0]) ? 1 : .7 })) };
+}
+
+function implementationResult(raw: z.infer<typeof ImplementationResultSchema>): ImplementationResult {
+  const passed = raw.checks.filter((check) => check.passed).length;
+  const summary = raw.status === "blocked" ? `Blocked: ${raw.blocker ?? "missing prerequisite"}` : `Changed ${raw.changedFiles.length} file${raw.changedFiles.length === 1 ? "" : "s"}; ${passed}/${raw.checks.length} reported checks passed.`;
+  return { ...raw, blocker: raw.blocker ?? "", summary };
+}
+
+function verificationResult(raw: z.infer<typeof VerificationSchema>, leafCount: number): VerificationOutput {
+  if (raw.verdict === "pass") return { passed: true, summary: `Verified ${leafCount} implementation ${leafCount === 1 ? "leaf" : "leaves"}.`, checks: raw.checks, failedNodeIds: [], repairable: false, architecturalMismatch: false };
+  const checks = raw.findings.map((finding) => ({ name: finding.leafId, passed: false, evidence: `${finding.problem}${finding.evidence ? ` — ${finding.evidence}` : ""}` }));
+  return { passed: false, summary: raw.findings.map((finding) => `${finding.leafId}: ${finding.problem}`).join("; "), checks, failedNodeIds: [...new Set(raw.findings.map((finding) => finding.leafId))], repairable: raw.verdict === "repair", architecturalMismatch: raw.verdict === "replan" };
 }
 
 function globalStop(state: ProgressiveLodState): PendingBudget["stop"] {
@@ -147,7 +150,7 @@ function globalStop(state: ProgressiveLodState): PendingBudget["stop"] {
 function progress(state: ProgressiveLodState): GraphProgressSnapshot {
   return {
     phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId ?? state.activeLeafId, callsUsed: state.callsUsed, callBudget: state.budget.calls,
-    summary: state.verification?.summary ?? state.research?.summary ?? state.profile?.summary, usage: state.usage,
+    summary: state.verification?.summary ?? state.profile?.goal, usage: state.usage,
     nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, level: node.level, depth: node.depth, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence })),
   };
 }
@@ -170,8 +173,8 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("answer", agentNode<ProgressiveLodState>({ node: "answer", agent: answer, prompt: (state) => JSON.stringify({ task: state.originalTask }), output: (text, state, result) => ({ result: text, phase: "completed", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result.usage) }) }))
     .addNode("acquire", async (_state: ProgressiveLodState, config?: RunnableConfig) => { const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined; if (acquire) await acquire(); return {}; })
     .addNode("initialize", (state: ProgressiveLodState) => ({
-      phase: "scouting", activeNodeId: "p1", nextId: 2, resumeRole: "scout" as const,
-      plan: [{ id: "p1", title: state.profile?.summary ?? state.originalTask, description: state.originalTask, level: state.profile?.planningFrame ?? "task outcome", depth: 0, status: "active" as const, dependencies: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0, scoutSessionMode: "fresh" as const, scoutTurns: 0 }],
+      ...(state.profile?.route === "direct_change" ? { phase: "implementing", activeNodeId: undefined, activeLeafId: "p1", resumeRole: "implementer" as const } : { phase: "scouting", activeNodeId: "p1", activeLeafId: undefined, resumeRole: "scout" as const }), nextId: 2,
+      plan: [{ id: "p1", title: state.profile?.goal ?? state.originalTask, description: state.originalTask, level: state.profile?.goal ?? state.originalTask, depth: 0, status: state.profile?.route === "direct_change" ? "implementing" as const : "active" as const, dependencies: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0, scoutSessionMode: "fresh" as const, scoutTurns: 0, ...(state.profile?.route === "direct_change" ? { leaf: { objective: state.profile.goal, targets: ["Files required by the request"], acceptanceCriteria: [state.originalTask], verification: ["Run focused checks appropriate to the requested change"] } } : {}) }],
     }))
     .addNode("guard", (state: ProgressiveLodState) => budgetExceeded(state) ? { pendingBudget: { scope: "global" as const, role: state.resumeRole ?? "scout", nodeId: state.activeNodeId ?? state.activeLeafId, stop: globalStop(state) }, phase: "budget-paused" } : {})
     .addNode("scout", async (state: ProgressiveLodState, config?: RunnableConfig) => {
@@ -194,7 +197,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const result = await runtime(config).call({
         agent: options.deciderAgent, node: `decide:${active.id}`, state, limits: state.roleLimits.decider,
         session: resumableSession(state.deciderSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(DetailDecisionSchema) as Record<string, unknown>,
-        prompt: JSON.stringify({ projection: branchProjection(state), research: state.research }),
+        prompt: JSON.stringify(branchProjection(state)),
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       if (result.budgetStop) return { usage, callsUsed, deciderSessionId: result.sessionId, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "decider" as const, nodeId: active.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "decider" as const, phase: "budget-paused" };
@@ -231,7 +234,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: state.roleLimits.implementer, session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify(leafPayload(state, leaf)) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1; const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? existing };
       if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "implementer" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "implementer" as const, phase: "budget-paused" };
-      const output = structured(result, ImplementationResultSchema, "implement");
+      const output = implementationResult(structured(result, ImplementationResultSchema, "implement"));
       return { usage, callsUsed, implementationSessions: sessions, implementationResults: { ...state.implementationResults, [leaf.id]: output }, resumeFromAbortedSession: false, activeLeafId: undefined, plan: state.plan.map((node) => node.id === leaf.id ? { ...node, status: output.status === "completed" ? "implemented" as const : "failed" as const } : node), phase: output.status === "completed" ? "selecting-leaf" : "implementation-blocked" };
     })
     .addNode("reopen_blocker", (state: ProgressiveLodState) => {
@@ -239,10 +242,11 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       return { plan: reopened.plan, activeNodeId: reopened.activeNodeId, activeLeafId: undefined, resumeRole: reopened.activeNodeId ? "scout" as const : undefined, phase: reopened.activeNodeId ? "scouting" : "failed", research: undefined, decision: undefined };
     })
     .addNode("verify", async (state: ProgressiveLodState, config?: RunnableConfig) => {
-      const result = await runtime(config).call({ agent: verifier, node: "verify", state, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, prompt: JSON.stringify({ task: state.originalTask, constraints: state.constraints, leaves: state.plan.filter((node) => node.leaf).map((node) => ({ node, result: state.implementationResults[node.id] })) }) });
+      const leaves = state.plan.filter((node) => node.leaf).map((node) => ({ leafId: node.id, contract: node.leaf, artifacts: state.implementationResults[node.id] ? { changedFiles: state.implementationResults[node.id].changedFiles, checks: state.implementationResults[node.id].checks } : undefined }));
+      const result = await runtime(config).call({ agent: verifier, node: "verify", state, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, prompt: JSON.stringify({ task: state.originalTask, constraints: state.constraints.map(({ text }) => text), leaves }) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       if (result.budgetStop) return { usage, callsUsed, verifierSessionId: result.sessionId, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "verifier" as const, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "verifier" as const, phase: "budget-paused" };
-      const verification = structured(result, VerificationSchema, "verify");
+      const verification = verificationResult(structured(result, VerificationSchema, "verify"), leaves.length);
       return { usage, callsUsed, verifierSessionId: result.sessionId, resumeFromAbortedSession: false, verification, plan: applyVerification(state.plan, verification), phase: verification.passed ? "completed" : "verification-failed" };
     })
     .addNode("select_repair", (state: ProgressiveLodState) => {
@@ -253,11 +257,12 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("repair", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Repair requires one failed leaf");
       const sessionId = state.implementationSessions[leaf.id]; if (!sessionId) throw new Error(`Repair has no implementation session for ${leaf.id}`);
-      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify({ leaf: leafPayload(state, leaf), prior: state.implementationResults[leaf.id], verification: state.verification }) });
+      const findings = state.verification?.checks.filter((check) => check.name === leaf.id).map((check) => check.evidence) ?? [];
+      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify({ leafId: leaf.id, findings }) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? sessionId };
       if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "repair" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "repair" as const, phase: "budget-paused" };
-      const output = structured(result, ImplementationResultSchema, "repair");
+      const output = implementationResult(structured(result, ImplementationResultSchema, "repair"));
       return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, repairAttempts: state.repairAttempts + 1, implementationResults: { ...state.implementationResults, [leaf.id]: output }, activeLeafId: undefined, plan: state.plan.map((node) => node.id === leaf.id ? { ...node, status: output.status === "completed" ? "implemented" as const : "failed" as const } : node), phase: output.status === "completed" ? "selecting-repair" : "implementation-blocked" };
     })
     .addNode("reopen", (state: ProgressiveLodState) => {
@@ -270,7 +275,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       return { phase: state.verification?.passed ? "completed" : "failed", result: state.verification?.passed ? `${summaries}\n\nVerification: ${state.verification.summary}` : `The graph did not reach verified success.\n\n${state.verification?.summary ?? (summaries || "No implementation completed.")}` };
     })
     .addEdge(START, "classify")
-    .addConditionalEdges("classify", (state: ProgressiveLodState) => state.profile?.route ?? "answer", { answer: "answer", change: "acquire" })
+    .addConditionalEdges("classify", (state: ProgressiveLodState) => state.profile?.route ?? "answer", { answer: "answer", direct_change: "acquire", planned_change: "acquire" })
     .addEdge("answer", END)
     .addConditionalEdges("acquire", (state: ProgressiveLodState) => state.plan.length ? "guard" : "initialize", { guard: "guard", initialize: "initialize" })
     .addEdge("initialize", "guard")

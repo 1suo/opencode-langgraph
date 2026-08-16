@@ -253,26 +253,24 @@ describe("OpenCode child-session runtime", () => {
 describe("progressive planning reducer", () => {
   const state = (): ProgressiveLodState => ({
     stateVersion: 2, runId: "run", originalTask: "change", directory: "/repo", worktree: "/repo", phase: "planning",
-    profile: { route: "change", scope: "subsystem", summary: "change", planningFrame: "behavioral outcome", readOnly: false, risks: [] },
+    profile: { route: "planned_change", scope: "subsystem", goal: "change", questions: ["Which behavior must change?"] },
     budget: SCOPE_BUDGETS.subsystem, roleLimits: DEFAULT_ROLE_LIMITS,
     plan: [{ id: "p1", title: "root", description: "root", level: "behavioral outcome", depth: 0, status: "active", dependencies: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0, scoutSessionId: "scout-root", scoutSessionMode: "continue", scoutTurns: 2 }],
     activeNodeId: "p1", evidence: [], constraints: [], decisions: {}, usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 1, nextId: 2, startedAt: Date.now(), implementationSessions: {}, implementationResults: {}, repairAttempts: 0, budgetGrants: {}, humanQuestion: "", humanAnswer: "", result: "",
   });
   const leaf = { objective: "change behavior", targets: ["src/a.ts"], acceptanceCriteria: ["behavior is correct"], verification: ["npm test"] };
-  const decision = (value: Partial<DetailDecision>): DetailDecision => ({ disposition: "ready", summary: "bounded", options: [], selectedOption: "", confidence: 1, question: "", children: [], leaf, ...value });
-
-  it("does not reject a task-derived planning frame because its prose exceeds an arbitrary length", () => {
-    const level = "repository-specific planning boundary with a concrete ownership seam ".repeat(20);
-    expect(ClassificationSchema.parse({ route: "change", scope: "architectural", summary: "change", planningFrame: level, readOnly: false, risks: [] }).planningFrame).toBe(level);
-    expect(DetailDecisionSchema.parse(decision({ disposition: "refine", leaf: undefined, children: [{ key: "next", title: "next", description: "next", level, dependencies: [] }] })).children[0].level).toBe(level);
-    expect(() => applyDecision(state(), decision({ disposition: "ready", children: [{ key: "bad", title: "bad", description: "bad", level: "bad", dependencies: [] }] }))).toThrow("no children");
+  it("uses compact route and disposition-specific contracts", () => {
+    expect(ClassificationSchema.parse({ route: "direct_change", scope: "local", goal: "fix typo" }).route).toBe("direct_change");
+    expect(() => ClassificationSchema.parse({ route: "planned_change", scope: "local", goal: "unclear change" })).toThrow();
+    expect(DetailDecisionSchema.parse({ disposition: "refine", child: { key: "next", title: "Find owner", question: "Which module owns this behavior?", dependencies: [] } })).toMatchObject({ disposition: "refine" });
+    expect(DetailDecisionSchema.parse({ disposition: "ready", leaf, children: [] })).toEqual({ disposition: "ready", leaf });
   });
 
   it("makes split children pending, resolves dependencies, and forks branch context", () => {
-    const merged = applyDecision(state(), decision({ disposition: "split", leaf: undefined, children: [
-      { key: "base", title: "Base", description: "base", level: "contract", dependencies: [] },
-      { key: "consumer", title: "Consumer", description: "consumer", level: "integration", dependencies: ["base"] },
-    ] }));
+    const merged = applyDecision(state(), { disposition: "split", children: [
+      { key: "base", title: "Base", question: "What is the base contract?", dependencies: [] },
+      { key: "consumer", title: "Consumer", question: "How does the consumer integrate?", dependencies: ["base"] },
+    ] });
     expect(liveNodeCount(merged.plan)).toBe(2);
     expect(merged.plan[0].status).toBe("expanded");
     expect(merged.plan.find((node) => node.title === "Base")).toMatchObject({ id: "p2", status: "active", scoutSessionMode: "fork" });
@@ -281,18 +279,17 @@ describe("progressive planning reducer", () => {
 
   it("deduplicates evidence and omits unrelated branch descriptions", () => {
     const current = state();
-    current.profile = { ...current.profile!, planningFrame: "DUPLICATED PLANNING FRAME" };
-    current.plan[0] = { ...current.plan[0], level: "DUPLICATED PLANNING FRAME", description: current.originalTask };
-    const first = mergeResearch(current, { summary: "found", evidence: [{ claim: "entry", source: "src/a.ts:1", excerpt: "entry", kind: "repository", confidence: 1 }], constraints: [], unresolved: [] });
-    const second = mergeResearch({ ...current, ...first }, { summary: "again", evidence: [{ claim: "entry", source: "src/a.ts:1", excerpt: "entry", kind: "repository", confidence: 1 }], constraints: [], unresolved: [] });
+    current.plan[0] = { ...current.plan[0], description: current.originalTask };
+    const first = mergeResearch(current, { evidence: [{ claim: "entry", source: "src/a.ts:1", excerpt: "entry", kind: "repository", confidence: 1 }], constraints: [], unknowns: [] });
+    const second = mergeResearch({ ...current, ...first }, { evidence: [{ claim: "entry", source: "src/a.ts:1", excerpt: "entry", kind: "repository", confidence: 1 }], constraints: [], unknowns: [] });
     expect(second.evidence).toHaveLength(1);
-    current.plan.push({ ...current.plan[0], id: "p2", parentId: "p1", status: "active", description: "active description" }, { ...current.plan[0], id: "p3", parentId: "p1", status: "ready", description: "UNRELATED FULL DESCRIPTION" });
+    current.plan.push({ ...current.plan[0], id: "p2", parentId: "p1", depth: 1, status: "active", description: "active description" }, { ...current.plan[0], id: "p3", parentId: "p1", depth: 1, status: "ready", description: "UNRELATED FULL DESCRIPTION" });
     current.activeNodeId = "p2";
     const projection = JSON.stringify(branchProjection(current));
     expect(projection).toContain("active description");
     expect(projection).toContain('"title":"root"');
-    expect(projection).not.toContain("DUPLICATED PLANNING FRAME");
     expect(projection).not.toContain("UNRELATED FULL DESCRIPTION");
+    expect(projection).not.toContain("contextCycles");
   });
 
   it("orders leaves and reopens only the failed branch parent", () => {
@@ -329,15 +326,15 @@ describe("progressive planning graph", () => {
     const calls: Array<{ node: string; prompt: string; session?: { strategy: string; sessionId?: string } }> = [];
     const runtime = { call: async (input: { node: string; prompt: string; session?: { strategy: string; sessionId?: string } }) => {
       calls.push(input);
-      if (input.node === "classify") return { text: "", sessionId: "classifier", structured: { route: "change", scope: "local", summary: "align two seams", planningFrame: "behavior", readOnly: false, risks: [] } };
-      if (input.node.startsWith("scout:")) return { text: "", sessionId: `s-${input.node}`, tools: [{ tool: "read", status: "completed", title: "src/a.ts", input: { filePath: "src/a.ts" } }], structured: { summary: `facts for ${input.node}`, evidence: [{ claim: "source exists", source: "src/a.ts:1", excerpt: "export", kind: "repository", confidence: 1 }], constraints: [], unresolved: [] } };
+      if (input.node === "classify") return { text: "", sessionId: "classifier", structured: { route: "planned_change", scope: "local", goal: "align two seams", questions: ["Which seams must align?"] } };
+      if (input.node.startsWith("scout:")) return { text: "", sessionId: `s-${input.node}`, tools: [{ tool: "read", status: "completed", title: "src/a.ts", input: { filePath: "src/a.ts" } }], structured: { facts: [{ text: "source exists", source: "src/a.ts:1" }], constraints: [], unknowns: [] } };
       if (input.node === "decide:p1") return { text: "", sessionId: "decider", structured: decisionValue("split", undefined, [
-        { key: "base", title: "Base contract", description: "BASE FULL DESCRIPTION", level: "contract", dependencies: [] },
-        { key: "consumer", title: "Consumer seam", description: "CONSUMER FULL DESCRIPTION", level: "integration", dependencies: ["base"] },
+        { key: "base", title: "Base contract", question: "BASE FULL DESCRIPTION", dependencies: [] },
+        { key: "consumer", title: "Consumer seam", question: "CONSUMER FULL DESCRIPTION", dependencies: ["base"] },
       ]) };
       if (input.node.startsWith("decide:")) return { text: "", sessionId: "decider", structured: decisionValue("ready", { objective: `Implement ${input.node}`, targets: [`src/${input.node.slice(-2)}.ts`], acceptanceCriteria: ["works"], verification: ["npm test"] }) };
-      if (input.node.startsWith("implement:")) return { text: "", sessionId: `i-${input.node}`, structured: { status: "completed", summary: `done ${input.node}`, changedFiles: ["src/a.ts"], checks: [{ name: "test", passed: true, evidence: "ok" }], blocker: "" } };
-      if (input.node === "verify") return { text: "", sessionId: "verifier", structured: { passed: true, summary: "all leaves verified", checks: [{ name: "aggregate", passed: true, evidence: "ok" }], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      if (input.node.startsWith("implement:")) return { text: "", sessionId: `i-${input.node}`, structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [{ name: "test", passed: true, evidence: "ok" }] } };
+      if (input.node === "verify") return { text: "", sessionId: "verifier", structured: { verdict: "pass", checks: [{ name: "aggregate", passed: true, evidence: "ok" }] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     const result = await configured.graph.invoke(configured.initial({ task: "align", directory: "/repo", worktree: "/repo", runId: "bounded" }), { recursionLimit: 128, configurable: { thread_id: "bounded", langgraphOpenCodeRuntime: runtime } });
@@ -345,31 +342,63 @@ describe("progressive planning graph", () => {
     expect(calls.filter((call) => call.node.startsWith("implement:")).map((call) => call.node)).toEqual(["implement:p2", "implement:p3"]);
     expect(calls.filter((call) => call.node === "verify")).toHaveLength(1);
     expect(calls.every((call) => { try { JSON.parse(call.prompt); return true; } catch { return false; } })).toBe(true);
+    expect(JSON.parse(calls.find((call) => call.node === "scout:p1")!.prompt).concern.questions).toEqual(["Which seams must align?"]);
+    const firstDecisionPrompt = calls.find((call) => call.node === "decide:p1")!.prompt;
+    expect(JSON.parse(firstDecisionPrompt).facts).toEqual([expect.objectContaining({ text: "source exists", source: "src/a.ts:1" })]);
+    expect(firstDecisionPrompt.match(/source exists/g)).toHaveLength(1);
+    expect(firstDecisionPrompt).not.toContain('"research"');
     expect(calls.find((call) => call.node === "scout:p2")?.session).toEqual({ strategy: "fork", sessionId: "s-scout:p1" });
     expect(calls.find((call) => call.node === "scout:p3")?.prompt).not.toContain("BASE FULL DESCRIPTION");
-    expect(configured.result?.(result)).toContain("all leaves verified");
+    expect(configured.result?.(result)).toContain("Verified 2 implementation leaves");
   });
 
-  it("allows a grounded local concern to become a leaf immediately", async () => {
+  it("sends a bounded change directly to implementation and verification", async () => {
     const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
-    const runtime = { call: async (input: { node: string }) => {
-      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "fix typo", planningFrame: "single file", readOnly: false, risks: [] } };
-      if (input.node === "scout:p1") return { text: "", sessionId: "scout", structured: { summary: "located", evidence: [], constraints: [], unresolved: [] } };
-      if (input.node === "decide:p1") return { text: "", sessionId: "decider", structured: decisionValue("ready", { objective: "fix typo", targets: ["src/a.ts"], acceptanceCriteria: ["label fixed"], verification: ["npm test"] }) };
-      if (input.node === "implement:p1") return { text: "", sessionId: "impl", structured: { status: "completed", summary: "fixed", changedFiles: ["src/a.ts"], checks: [], blocker: "" } };
-      if (input.node === "verify") return { text: "", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+    const calls: Array<{ node: string; prompt: string }> = [];
+    const runtime = { call: async (input: { node: string; prompt: string }) => {
+      calls.push(input);
+      if (input.node === "classify") return { text: "", structured: { route: "direct_change", scope: "local", goal: "fix typo" } };
+      if (input.node === "implement:p1") return { text: "", sessionId: "impl", structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [] } };
+      if (input.node === "verify") return { text: "", structured: { verdict: "pass", checks: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     const result = await configured.graph.invoke(configured.initial({ task: "fix", directory: "/repo", worktree: "/repo", runId: "short" }), { configurable: { thread_id: "short", langgraphOpenCodeRuntime: runtime } });
-    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 5 });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 3 });
     expect(configured.progress?.(result)?.nodes).toEqual([expect.objectContaining({ id: "p1", status: "verified" })]);
+    expect(calls.map((call) => call.node)).toEqual(["classify", "implement:p1", "verify"]);
+    expect(JSON.parse(calls[1].prompt)).toEqual(expect.objectContaining({ leafId: "p1", constraints: [], dependencies: [] }));
+    expect(calls[1].prompt).not.toContain("contextCycles");
+  });
+
+  it("replans a blocked direct change and sends repair only its findings", async () => {
+    const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", repairAgent: "repair", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    const calls: Array<{ node: string; prompt: string; session?: { strategy: string; sessionId?: string } }> = [];
+    let implementations = 0;
+    let verifications = 0;
+    const runtime = { call: async (input: { node: string; prompt: string; session?: { strategy: string; sessionId?: string } }) => {
+      calls.push(input);
+      if (input.node === "classify") return { text: "", structured: { route: "direct_change", scope: "local", goal: "fix ownership" } };
+      if (input.node === "implement:p1" && implementations++ === 0) return { text: "", sessionId: "impl", structured: { status: "blocked", changedFiles: [], checks: [], blocker: "ownership is unclear" } };
+      if (input.node === "scout:p1") return { text: "", sessionId: "scout", structured: { facts: [{ text: "src/a.ts owns it", source: "src/a.ts:1" }], constraints: [], unknowns: [] } };
+      if (input.node === "decide:p1") return { text: "", structured: decisionValue("ready", { objective: "fix ownership", targets: ["src/a.ts"], acceptanceCriteria: ["owner fixed"], verification: ["npm test"] }) };
+      if (input.node === "implement:p1") return { text: "", sessionId: "impl", structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [{ name: "test", passed: true, evidence: "ok" }] } };
+      if (input.node === "verify" && verifications++ === 0) return { text: "", sessionId: "verify", structured: { verdict: "repair", findings: [{ leafId: "p1", problem: "edge case fails", evidence: "focused test" }] } };
+      if (input.node === "repair:p1") return { text: "", sessionId: "impl", structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [{ name: "test", passed: true, evidence: "fixed" }] } };
+      if (input.node === "verify") return { text: "", sessionId: "verify", structured: { verdict: "pass", checks: [{ name: "test", passed: true, evidence: "ok" }] } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const result = await configured.graph.invoke(configured.initial({ task: "fix ownership", directory: "/repo", worktree: "/repo", runId: "fallback" }), { recursionLimit: 128, configurable: { thread_id: "fallback", langgraphOpenCodeRuntime: runtime } });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed" });
+    expect(calls.map((call) => call.node)).toEqual(["classify", "implement:p1", "scout:p1", "decide:p1", "implement:p1", "verify", "repair:p1", "verify"]);
+    expect(JSON.parse(calls.find((call) => call.node === "repair:p1")!.prompt)).toEqual({ leafId: "p1", findings: ["edge case fails — focused test"] });
+    expect(calls.filter((call) => call.node === "implement:p1")[1].session).toEqual({ strategy: "continue", sessionId: "impl" });
   });
 
   it("interrupts on a child budget instead of silently restarting the role", async () => {
     const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", checkpointer: new MemorySaver() });
     let scoutCalls = 0;
     const runtime = { call: async (input: { node: string }) => {
-      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "bounded", planningFrame: "behavior", readOnly: false, risks: [] } };
+      if (input.node === "classify") return { text: "", structured: { route: "planned_change", scope: "local", goal: "bounded", questions: ["What must change?"] } };
       if (input.node === "scout:p1") { scoutCalls++; return { text: "", sessionId: "scout", usage: { turns: 8, input: 30_000, output: 100, reasoning: 0, cacheRead: 100_000, cacheWrite: 0, cost: .01 }, budgetStop: { kind: "budget", metric: "turns", used: 8, limit: 8 } }; }
       throw new Error(`unexpected node ${input.node}`);
     } };
@@ -388,16 +417,16 @@ describe("progressive planning graph", () => {
     const scoutSessions: Array<{ strategy: string; sessionId?: string } | undefined> = [];
     let scoutCalls = 0;
     const runtime = { call: async (input: { node: string; session?: { strategy: string; sessionId?: string } }) => {
-      if (input.node === "classify") return { text: "", structured: { route: "change", scope: "local", summary: "bounded", planningFrame: "behavior", readOnly: false, risks: [] } };
+      if (input.node === "classify") return { text: "", structured: { route: "planned_change", scope: "local", goal: "bounded", questions: ["What must change?"] } };
       if (input.node === "scout:p1") {
         scoutSessions.push(input.session);
         scoutCalls++;
         if (scoutCalls === 1) return { text: "", sessionId: "scout-aborted", usage: { turns: 8, input: 30_000, output: 100, reasoning: 0, cacheRead: 100_000, cacheWrite: 0, cost: .01 }, budgetStop: { kind: "budget", metric: "turns", used: 8, limit: 8 } };
-        return { text: "", sessionId: "scout-fork", structured: { summary: "grounded", evidence: [], constraints: [], unresolved: [] } };
+        return { text: "", sessionId: "scout-fork", structured: { facts: [], constraints: [], unknowns: [] } };
       }
       if (input.node === "decide:p1") return { text: "", sessionId: "decider", structured: decisionValue("ready", { objective: "fix", targets: ["src/a.ts"], acceptanceCriteria: ["works"], verification: ["npm test"] }) };
-      if (input.node === "implement:p1") return { text: "", sessionId: "impl", structured: { status: "completed", summary: "fixed", changedFiles: ["src/a.ts"], checks: [], blocker: "" } };
-      if (input.node === "verify") return { text: "", sessionId: "verify", structured: { passed: true, summary: "verified", checks: [], failedNodeIds: [], repairable: false, architecturalMismatch: false } };
+      if (input.node === "implement:p1") return { text: "", sessionId: "impl", structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [] } };
+      if (input.node === "verify") return { text: "", sessionId: "verify", structured: { verdict: "pass", checks: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     const config = { recursionLimit: 64, configurable: { thread_id: "budget-continue", langgraphOpenCodeRuntime: runtime } };
@@ -412,7 +441,7 @@ describe("progressive planning graph", () => {
     const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", checkpointer: new MemorySaver() });
     let leases = 0;
     const runtime = { call: async (input: { node: string }) => input.node === "classify"
-      ? { text: "", structured: { route: "answer", scope: "local", summary: "explain", planningFrame: "direct explanation", readOnly: true, risks: [] } }
+      ? { text: "", structured: { route: "answer", scope: "local", goal: "explain" } }
       : { text: "direct answer" } };
     const result = await configured.graph.invoke(configured.initial({ task: "what?", directory: "/repo", worktree: "/repo", runId: "answer" }), { configurable: { thread_id: "answer", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => { leases++; } } });
     expect(leases).toBe(0);
@@ -420,8 +449,8 @@ describe("progressive planning graph", () => {
   });
 });
 
-function decisionValue(disposition: "ready" | "split", leaf?: { objective: string; targets: string[]; acceptanceCriteria: string[]; verification: string[] }, children: Array<{ key: string; title: string; description: string; level: string; dependencies: string[] }> = []) {
-  return { disposition, summary: disposition, options: [], selectedOption: "", confidence: 1, question: "", children, ...(leaf ? { leaf } : {}) };
+function decisionValue(disposition: "ready" | "split", leaf?: { objective: string; targets: string[]; acceptanceCriteria: string[]; verification: string[] }, children: Array<{ key: string; title: string; question: string; dependencies: string[] }> = []) {
+  return disposition === "ready" ? { disposition, leaf } : { disposition, children };
 }
 
 describe("worktree queue", () => {
@@ -519,7 +548,7 @@ describe("OpenCode automatic graph routing", () => {
       status: async () => ({ data: {} }),
       messages: async ({ path: requestPath }: { path: { id: string } }) => ({ data: requestPath.id === "root"
         ? ["message-1", "message-command"].map((parentID) => ({ info: { role: "assistant", parentID }, parts: [{ type: "text", text: "The answer is 4." }] }))
-        : [{ info: { role: "assistant", ...(titles.get(requestPath.id)?.includes("classify") ? { structured: { route: "answer", scope: "local", summary: "answer question", planningFrame: "direct answer", readOnly: true, risks: [] } } : {}) }, parts: [{ type: "text", text: "The answer is 4." }] }],
+        : [{ info: { role: "assistant", ...(titles.get(requestPath.id)?.includes("classify") ? { structured: { route: "answer", scope: "local", goal: "answer question" } } : {}) }, parts: [{ type: "text", text: "The answer is 4." }] }],
       }),
       abort: async () => ({ data: true }),
     } };
