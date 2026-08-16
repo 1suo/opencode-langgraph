@@ -135,7 +135,7 @@ export const SolutionDeltaSchema = z.object({
   evidence: z.array(z.object({ text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference") })).default([]),
   candidates: z.array(z.object({
     key: z.string().min(1), proposition: z.string().min(1), outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible"),
-    reasons: z.array(z.string()).default([]), evidenceRefs: z.array(z.string()).default([]), nextLod: z.array(ConditionalRegionSchema).default([]),
+    reasons: z.array(z.string()).default([]), evidenceRefs: z.array(z.string()).default([]), nextLod: z.array(ConditionalRegionSchema).default([]).describe("Decisions that can only be made after this approach is chosen. Never list implementation steps, files, components, or tests here."),
   })).default([]),
   constraints: z.array(z.object({ kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]), subject: z.string().min(1), target: z.string().min(1), reason: z.string().default("") })).default([]),
   select: z.array(z.string()).default([]),

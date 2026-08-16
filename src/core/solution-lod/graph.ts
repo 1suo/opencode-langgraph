@@ -47,9 +47,10 @@ function structured<Output>(result: AgentCallResult, schema: ZodType<Output>): O
 }
 
 function lineage(network: SolutionNetwork, regionId: string) {
-  const result = []; let cursor = network.regions.find((item) => item.id === regionId);
+  const result: string[] = []; let cursor = network.regions.find((item) => item.id === regionId);
   while (cursor) {
-    result.unshift({ id: cursor.id, lod: cursor.lod, objective: cursor.objective, selectedCandidates: cursor.selectedCandidateIds.map((id) => network.candidates.find((item) => item.id === id)?.proposition).filter(Boolean) });
+    const decisions = cursor.selectedCandidateIds.map((id) => network.candidates.find((item) => item.id === id)?.proposition).filter((item): item is string => Boolean(item));
+    result.unshift(...decisions);
     cursor = cursor.parentId ? network.regions.find((item) => item.id === cursor?.parentId) : undefined;
   }
   return result;
@@ -59,24 +60,33 @@ export function projectActivationContext(state: SolutionLodState, activation: Ac
   const region = state.network.regions.find((item) => item.id === activation.regionId);
   if (!region) throw new Error(`Activation ${activation.id} references missing region ${activation.regionId}`);
   const refs = new Set([...activation.contextRefs, ...region.evidenceIds, ...region.constraintIds, ...region.artifactIds]);
-  return {
-    task: state.originalTask,
-    conversationContext: state.conversationContext || undefined,
-    activation: { id: activation.id, capability: activation.capability, request: activation.request, expectedDelta: activation.expectedDelta },
-    availableCapabilities: [
-      { capability: "inspect", useWhen: "A named repository fact is missing", produces: "evidence and evidence-backed constraints" },
-      { capability: "synthesize", useWhen: "The current domain must be formed or collapsed from available evidence", produces: "candidates, selection constraints, and conditional next-LOD regions" },
-      { capability: "implement", useWhen: "A change region is already actionable", produces: "workspace artifacts and focused checks" },
-      { capability: "verify", useWhen: "A change region has implementation artifacts", produces: "criterion-linked pass, repair, reopen, or fail findings" },
-      { capability: "present", useWhen: "An answer region is already actionable", produces: "the user-facing answer" },
-    ],
-    region: { id: region.id, edge: region.edge, lod: region.lod, objective: region.objective, delivery: region.delivery, allowedVariables: region.allowedVariables, acceptanceCriteria: region.acceptanceCriteria, status: region.status },
-    collapsedAncestry: lineage(state.network, region.id),
-    domain: state.network.candidates.filter((item) => item.regionId === region.id).map(({ id, key, proposition, status, eliminationReasons, evidenceIds, nextLod }) => ({ id, key, proposition, status, eliminationReasons, evidenceIds, conditionalNextLod: nextLod })),
-    evidence: state.network.evidence.filter((item) => refs.has(item.id)).map(({ id, text, source, kind }) => ({ id, text, source, kind })),
-    constraints: state.network.constraints.filter((item) => refs.has(item.id) || item.subject === region.id || region.candidateIds.includes(item.subject) || region.candidateIds.includes(item.target)),
-    artifacts: state.network.artifacts.filter((item) => refs.has(item.id)),
+  const facts = state.network.evidence.filter((item) => refs.has(item.id)).map(({ id, text, source }) => ({ referenceId: id, fact: text, source }));
+  const rules = state.network.constraints
+    .filter((item) => refs.has(item.id) || item.subject === region.id || region.candidateIds.includes(item.subject) || region.candidateIds.includes(item.target))
+    .map(({ id, kind, subject, target, reason }) => ({ referenceId: id, relationship: kind, from: subject, to: target, explanation: reason }));
+  const filesAndChecks = state.network.artifacts.filter((item) => refs.has(item.id)).map(({ id, kind, path, summary, passed }) => ({ referenceId: id, kind, path, summary, passed }));
+  const decisionsAlreadyMade = lineage(state.network, region.id);
+  const common = {
+    userRequest: state.originalTask,
+    relevantConversation: state.conversationContext || undefined,
+    assignment: activation.request,
+    currentTask: region.objective,
+    successCriteria: region.acceptanceCriteria,
+    decisionsAlreadyMade,
+    facts,
+    rules,
+    filesAndChecks,
   };
+  const plainStatus = { possible: "still possible", eliminated: "rejected", selected: "chosen", equivalent: "interchangeable" } as const;
+  const approachesAlreadyConsidered = state.network.candidates.filter((item) => item.regionId === region.id).map(({ id, proposition, status, eliminationReasons, evidenceIds, nextLod }) => ({
+    referenceId: id, approach: proposition, status: plainStatus[status], reasonsRejected: eliminationReasons, supportingFactIds: evidenceIds,
+    decisionsNeededAfterChoosing: nextLod.map((item) => ({ decision: item.objective, decideOnlyAbout: item.allowedVariables, successCriteria: item.acceptanceCriteria, independentlyDeliverable: item.edge === "partOf" })),
+  }));
+  if (activation.capability === "inspect") return { ...common, questionToInvestigate: activation.request, doNotDecideTheApproach: region.delivery === "change" };
+  if (activation.capability === "synthesize") return { ...common, decisionToMake: region.objective, decideOnlyAbout: region.allowedVariables, approachesAlreadyConsidered, helpAvailable: { inspect: "request one named missing repository fact" } };
+  if (activation.capability === "implement") return { ...common, selectedApproach: decisionsAlreadyMade, ifBlocked: { inspect: "request one missing repository fact", synthesize: "request reconsideration only if a supplied decision is contradicted" } };
+  if (activation.capability === "verify") return { ...common, changeToVerify: region.objective };
+  return { ...common, answerToProduce: region.objective };
 }
 
 function statusPaths(worktree: string): Map<string, string> {

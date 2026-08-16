@@ -13,6 +13,7 @@ import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
 import { ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, reopenRegion } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
+import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
 import type { SolutionLodState } from "../src/core/solution-lod/types.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
@@ -431,6 +432,30 @@ describe("solution LOD reducer", () => {
     expect(projection).toContain("relevant");
     expect(projection).not.toContain("unrelated");
     expect(projection).not.toContain("nextActivationId");
+  });
+
+  it("gives agents concise role-native instructions instead of controller vocabulary", () => {
+    for (const contract of Object.values(SOLUTION_ROLE_CONTRACTS)) {
+      expect(contract.systemPrompt).not.toMatch(/\b(?:LOD|ancestry|region|collapsed|domain|activation|allowedVariables)\b/i);
+      expect(contract.systemPrompt.length).toBeLessThan(900);
+    }
+    const current = state();
+    current.network.regions[0].acceptanceCriteria = ["target behavior works"];
+    current.network.candidates.push({ id: "r1:direct", regionId: "r1", key: "direct", proposition: "Extend the existing implementation", status: "selected", evidenceIds: [], eliminationReasons: [], nextLod: [] });
+    current.network.regions[0].candidateIds = ["r1:direct"];
+    current.network.regions[0].selectedCandidateIds = ["r1:direct"];
+    const implement = { ...current.network.activations[0], capability: "implement" as const, request: "Implement the selected behavior" };
+    const projection = projectActivationContext(current, implement);
+    expect(projection).toMatchObject({
+      currentTask: "change",
+      successCriteria: ["target behavior works"],
+      decisionsAlreadyMade: ["Extend the existing implementation"],
+      selectedApproach: ["Extend the existing implementation"],
+    });
+    expect(projection).not.toHaveProperty("region");
+    expect(projection).not.toHaveProperty("collapsedAncestry");
+    expect(projection).not.toHaveProperty("domain");
+    expect(projection).not.toHaveProperty("availableCapabilities");
   });
 
   it("deduplicates unchanged activations and reports convergence instead of looping", () => {
