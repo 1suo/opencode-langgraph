@@ -70,7 +70,7 @@ export interface GraphDisplayNode {
 
 export interface ConnectorGraph<State extends Record<string, unknown> = Record<string, unknown>> {
   graph: CompiledStateGraph<any, any, any, any, any, any, any, any, any>;
-  initial(input: { task: string; directory: string; worktree: string; runId: string }): State;
+  initial(input: { task: string; conversationContext?: string; directory: string; worktree: string; runId: string }): State;
   result?(state: State): string;
   progress?(state: State): GraphProgressSnapshot | undefined;
   display?: Record<string, GraphDisplayNode>;

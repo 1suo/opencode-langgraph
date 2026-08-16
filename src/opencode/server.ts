@@ -23,6 +23,42 @@ function messageModel(info: { role: string; model?: { providerID: string; modelI
   if (info.providerID && info.modelID) return { providerID: info.providerID, modelID: info.modelID };
 }
 
+const CONTEXT_TURNS = 8;
+const CONTEXT_CHARS = 6_000;
+const CONTEXT_TURN_CHARS = 1_200;
+
+type ConversationMessage = {
+  info: { id?: string; role: string };
+  parts: Array<{ type: string; text?: string; synthetic?: boolean; ignored?: boolean }>;
+};
+
+function compactText(text: string, limit = CONTEXT_TURN_CHARS): string {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1).trimEnd()}…`;
+}
+
+export function buildConversationContext(messages: ConversationMessage[], currentMessageId: string, currentTask: string): string {
+  const turns = messages.flatMap((message) => {
+    if (message.info.id === currentMessageId || (message.info.role !== "user" && message.info.role !== "assistant")) return [];
+    const text = compactText(message.parts
+      .filter((part) => part.type === "text" && !part.synthetic && !part.ignored && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n"));
+    return text ? [{ role: message.info.role, text }] : [];
+  });
+  const last = turns.at(-1);
+  if (last?.role === "user" && last.text === compactText(currentTask)) turns.pop();
+  const selected: typeof turns = [];
+  let used = 0;
+  for (const turn of turns.slice(-CONTEXT_TURNS).reverse()) {
+    const rendered = `${turn.role.toUpperCase()}: ${turn.text}`;
+    if (selected.length && used + rendered.length + 1 > CONTEXT_CHARS) break;
+    selected.unshift(turn);
+    used += rendered.length + 1;
+  }
+  return selected.map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`).join("\n");
+}
+
 export const server: Plugin = async (plugin) => {
   const internalMessages = new Set<string>();
   const manualMessages = new Set<string>();
@@ -93,6 +129,8 @@ export const server: Plugin = async (plugin) => {
         return;
       }
       if (!manual && graphState?.enabled !== true) return;
+      const history = await plugin.client.session.messages({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
+      const conversationContext = buildConversationContext(history.data as ConversationMessage[], rootMessageID, task);
       output.message.agent = PRESENTER_AGENT;
       output.parts.push({
         id: `prt_${randomUUID().replaceAll("-", "")}`,
@@ -105,7 +143,7 @@ export const server: Plugin = async (plugin) => {
       const controller = new AbortController();
       registerController(input.sessionID, controller);
       void executeGraph(plugin, {
-        task, rootSessionId: input.sessionID, userMessageId: rootMessageID,
+        task, conversationContext, rootSessionId: input.sessionID, userMessageId: rootMessageID,
         directory: plugin.directory, worktree: executionWorktree(plugin.directory, plugin.worktree), parentModel,
         graph: graphState?.graph, signal: controller.signal,
       })
@@ -175,6 +213,7 @@ interface GraphExecution {
 
 interface ExecuteGraphInput {
   task: string;
+  conversationContext?: string;
   rootSessionId: string;
   userMessageId: string;
   directory: string;
@@ -234,7 +273,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
   const serialized = drawable.toJSON() as { nodes: Array<{ id: string }> | Record<string, unknown>; edges: Array<{ source: string; target: string }> };
   const topology = { nodes: Array.isArray(serialized.nodes) ? serialized.nodes.map((node) => node.id) : Object.keys(serialized.nodes), edges: serialized.edges.map(({ source, target }) => ({ source, target })) };
   const mermaid = drawable.drawMermaid({ withStyles: false });
-  const initialState = configured.initial({ task: input.task, directory: input.directory, worktree: input.worktree, runId });
+  const initialState = configured.initial({ task: input.task, conversationContext: input.conversationContext, directory: input.directory, worktree: input.worktree, runId });
   emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__start__", status: "active", agent: "langgraph", model: "langgraph", state: initialState, mermaid, topology, progress: configured.progress?.(initialState) });
   try {
     const result = await configured.graph.invoke(initialState, { recursionLimit: 512, configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });

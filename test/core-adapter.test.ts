@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, isInterrupted } from "@langchain/langgraph";
 import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
-import { server } from "../src/opencode/server.js";
+import { buildConversationContext, server } from "../src/opencode/server.js";
 import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
@@ -781,6 +781,30 @@ describe("durable checkpoints", () => {
 });
 
 describe("OpenCode automatic graph routing", () => {
+  it("passes a bounded semantic conversation frame without duplicating the current message", () => {
+    const long = "x".repeat(2_000);
+    const context = buildConversationContext([
+      { info: { id: "old-user", role: "user" }, parts: [{ type: "text", text: "Implement the requested fix" }] },
+      { info: { id: "tool", role: "assistant" }, parts: [{ type: "reasoning", text: "private reasoning" }, { type: "tool", text: "tool output" }] },
+      { info: { id: "old-assistant", role: "assistant" }, parts: [{ type: "text", text: long }, { type: "text", text: "hidden", synthetic: true }] },
+      { info: { id: "current", role: "user" }, parts: [{ type: "text", text: "Fix that too" }] },
+    ], "current", "Fix that too");
+    expect(context).toContain("USER: Implement the requested fix");
+    expect(context).toContain("ASSISTANT: ");
+    expect(context).not.toContain("private reasoning");
+    expect(context).not.toContain("tool output");
+    expect(context).not.toContain("hidden");
+    expect(context).not.toContain("Fix that too");
+    expect(context.length).toBeLessThan(1_300);
+  });
+
+  it("drops an unpersisted current-message duplicate by content", () => {
+    expect(buildConversationContext([
+      { info: { id: "prior", role: "user" }, parts: [{ type: "text", text: "Earlier requirement" }] },
+      { info: { id: "different-api-id", role: "user" }, parts: [{ type: "text", text: "Continue" }] },
+    ], "current", "Continue")).toBe("USER: Earlier requirement");
+  });
+
   it("persists cross-process cancellation and emits a terminal event", async () => {
     const state = temp("opencode-langgraph-cancel-");
     const project = temp("opencode-langgraph-cancel-project-");
@@ -865,6 +889,10 @@ describe("OpenCode automatic graph routing", () => {
       const events = readPluginEvents("root");
       expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "answer", "__end__"]));
       expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
+      expect(events.find((event) => event.userMessageId === "message-1" && event.node === "__start__")?.state).toMatchObject({
+        originalTask: "What is 2+2?",
+        conversationContext: "ASSISTANT: The answer is 4.\nASSISTANT: The answer is 4.",
+      });
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;

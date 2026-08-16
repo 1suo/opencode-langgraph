@@ -182,7 +182,7 @@ export interface PendingBudget {
 
 export interface ProgressiveLodState extends Record<string, unknown> {
   stateVersion: 2;
-  runId: string; originalTask: string; directory: string; worktree: string; phase: string;
+  runId: string; originalTask: string; conversationContext?: string; directory: string; worktree: string; phase: string;
   profile?: TaskProfile; budget: ScopeBudget; roleLimits: ProgressiveRoleLimits;
   plan: PlanNode[]; activeNodeId?: string; activeLeafId?: string;
   evidence: Evidence[]; constraints: Constraint[]; research?: ResearchPacket; decision?: DetailDecision;
