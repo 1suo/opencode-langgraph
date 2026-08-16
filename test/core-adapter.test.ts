@@ -862,8 +862,8 @@ describe("OpenCode graph viewer", () => {
     expect(graphHelpText()).toContain("/graph-select");
     expect(graphHelpText()).toContain(".opencode/langgraph.ts");
     expect(graphHelpText()).toContain("defineGraph({ graph, initial, result, progress? })");
-    expect(graphHelpText()).toContain("G run graph");
-    expect(graphHelpText()).toContain("4 prompt");
+    expect(graphHelpText()).toContain("G topology");
+    expect(graphHelpText()).toContain("P prompt");
     expect(effectivePrompt({ prompt: { system: "ROLE", input: '{"task":"x"}', schemaInstruction: "SCHEMA" } } as never)).toBe('SYSTEM\nROLE\n\nINPUT\n{"task":"x"}\n\nOUTPUT CONTRACT\nSCHEMA');
   });
 
