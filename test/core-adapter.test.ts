@@ -11,7 +11,7 @@ import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGra
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
-import { ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, reopenRegion } from "../src/core/solution-lod/reducer.js";
+import { completeVerification, ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, reopenRegion } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
 import type { SolutionLodState } from "../src/core/solution-lod/types.js";
@@ -508,6 +508,54 @@ describe("solution LOD reducer", () => {
     expect(propagateNetwork(network).activations.find((item) => item.id === "a2")?.status).toBe("waiting");
     network.revision = 2;
     expect(propagateNetwork(network).activations.find((item) => item.id === "a2")?.status).toBe("queued");
+  });
+
+  it("reopens the implicated region on a failed verification instead of dead-ending", () => {
+    const network = initialNetwork("change");
+    network.activations[0].status = "completed";
+    network.regions[0].status = "implemented";
+    network.regions[0].candidateIds = ["r1:choice", "r1:alt"];
+    network.regions[0].selectedCandidateIds = ["r1:choice"];
+    network.candidates.push(
+      { id: "r1:choice", regionId: "r1", key: "choice", proposition: "chosen approach", status: "selected", evidenceIds: [], eliminationReasons: [], nextLod: [] },
+      { id: "r1:alt", regionId: "r1", key: "alt", proposition: "alternative approach", status: "possible", evidenceIds: [], eliminationReasons: [], nextLod: [] },
+    );
+    network.activations.push({ id: "a2", capability: "verify", regionId: "r1", request: "verify", expectedDelta: "verification:r1", contextRefs: ["r1"], status: "running", basisRevision: 0 });
+    const verified = completeVerification(network, "a2", { verdict: "fail", summary: "evidence contradicts the design", findings: [], checks: [], activations: [] });
+    expect(verified.regions[0].status).toBe("superposed");
+    expect(verified.regions[0].contradiction).toContain("evidence contradicts");
+    const scheduled = ensureRunnableWork(verified);
+    expect(scheduled.done).toBe(false);
+    expect(scheduled.network.activations.at(-1)).toMatchObject({ capability: "synthesize", status: "queued" });
+  });
+
+  it("treats transitively chained equivalence as one interchangeable set", () => {
+    const current = state();
+    const network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["one behavior"] }, evidence: [], activations: [], actionable: true,
+      candidates: [
+        { key: "a", proposition: "A", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "b", proposition: "B", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "c", proposition: "C", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] },
+      ],
+      constraints: [{ kind: "equivalent", subject: "a", target: "b", reason: "same" }, { kind: "equivalent", subject: "b", target: "c", reason: "same" }],
+      select: ["a", "b", "c"],
+    });
+    expect(network.regions[0].status).not.toBe("contradiction");
+    expect(network.regions[0]).toMatchObject({ status: "actionable", selectedCandidateIds: ["r1:a", "r1:b", "r1:c"] });
+  });
+
+  it("keeps distinct candidates whose normalized keys collide", () => {
+    const current = state();
+    const network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false,
+      candidates: [
+        { key: "auth service", proposition: "Auth service", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "auth-service", proposition: "Auth-service component", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+      ], constraints: [], select: [],
+    });
+    expect(network.candidates).toHaveLength(2);
+    expect(network.candidates.map((candidate) => candidate.proposition).sort()).toEqual(["Auth service", "Auth-service component"]);
   });
 });
 

@@ -26,6 +26,12 @@ function candidateId(regionId: string, key: string): string {
   const normalized = normalize(key);
   return normalized.startsWith(`${regionId}:`) ? `${regionId}:${slug(normalized.slice(regionId.length + 1))}` : `${regionId}:${slug(normalized)}`;
 }
+function uniqueCandidateId(network: SolutionNetwork, regionId: string, key: string): string {
+  const base = candidateId(regionId, key);
+  const owner = network.candidates.find((item) => item.id === base);
+  if (!owner || normalize(owner.key) === normalize(key)) return base;
+  return `${base}-${createHash("sha256").update(normalize(key)).digest("hex").slice(0, 6)}`;
+}
 function candidateRef(network: SolutionNetwork, regionId: string, ref: string): string {
   if (knownRef(network, ref)) return ref;
   return candidateId(regionId, ref);
@@ -63,8 +69,29 @@ function exposeChildren(network: SolutionNetwork, region: SolutionRegion, candid
   return changed;
 }
 
+function equivalenceClasses(network: SolutionNetwork): Map<string, string> {
+  const adjacent = new Map<string, string[]>();
+  for (const candidate of network.candidates) adjacent.set(candidate.id, []);
+  for (const constraint of network.constraints) {
+    if (constraint.kind !== "equivalent" || !adjacent.has(constraint.subject) || !adjacent.has(constraint.target)) continue;
+    adjacent.get(constraint.subject)!.push(constraint.target);
+    adjacent.get(constraint.target)!.push(constraint.subject);
+  }
+  const classes = new Map<string, string>();
+  for (const start of adjacent.keys()) {
+    if (classes.has(start)) continue;
+    const stack = [start]; classes.set(start, start);
+    while (stack.length) {
+      const current = stack.pop()!;
+      for (const next of adjacent.get(current)!) if (!classes.has(next)) { classes.set(next, start); stack.push(next); }
+    }
+  }
+  return classes;
+}
+
 export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
   const network = cloneNetwork(input);
+  const equivalence = equivalenceClasses(network);
   let changed = true;
   let anyChange = false;
   while (changed) {
@@ -103,7 +130,7 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
       }
       if (!selected.length && viable.length === 1) { select(viable[0].id, "only viable candidate"); selected = [viable[0]]; }
       if (selected.length) {
-        const equivalent = (left: string, right: string) => network.constraints.some((item) => item.kind === "equivalent" && (item.subject === left && item.target === right || item.subject === right && item.target === left));
+        const equivalent = (left: string, right: string) => equivalence.get(left) === equivalence.get(right);
         if (selected.some((candidate, index) => selected.slice(index + 1).some((other) => !equivalent(candidate.id, other.id)))) {
           const contradiction = "A solution region selected multiple non-equivalent alternatives; synthesize one complete candidate at this LOD.";
           if (region.status !== "contradiction" || region.contradiction !== contradiction) { region.status = "contradiction"; region.contradiction = contradiction; changed = anyChange = true; }
@@ -155,7 +182,7 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     region.evidenceIds = [...new Set([...region.evidenceIds, evidence.id])]; localEvidence.set(item.source, evidence.id);
   }
   for (const item of resolvedAnswer ? [] : delta.candidates) {
-    const id = candidateId(region.id, item.key);
+    const id = uniqueCandidateId(network, region.id, item.key);
     let candidate = network.candidates.find((existing) => existing.id === id);
     const evidenceIds = item.evidenceRefs.map((ref) => localEvidence.get(ref) ?? ref).filter((ref) => network.evidence.some((evidence) => evidence.id === ref));
     if (!candidate) {
@@ -247,10 +274,10 @@ export function completeVerification(networkInput: SolutionNetwork, activationId
   for (const request of output.activations) addActivation(network, { ...request, regionId: request.regionId ?? region.id, contextRefs: request.contextRefs, senderActivationId: activation.id });
   if (output.verdict === "pass") region.status = "verified";
   else if (output.verdict === "repair") region.status = "actionable";
-  else if (output.verdict === "reopen") {
+  else {
     const target = output.findings[0]?.regionId ?? region.id;
     network = reopenRegion(network, target, output.summary || output.findings.map((item) => item.problem).join("; "));
-  } else { region.status = "blocked"; region.contradiction = output.summary || "Verification failed."; }
+  }
   network.revision++; return network;
 }
 
