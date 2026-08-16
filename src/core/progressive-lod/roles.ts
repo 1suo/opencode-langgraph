@@ -58,7 +58,7 @@ export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, Progressi
   },
   decider: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: DECIDER_OPENCODE_AGENT, tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.decider.maxTurns!,
-    systemPrompt: "Decide whether the active concern is implementation-ready from the supplied facts. Choose one outcome only: ready with a self-contained bounded contract that carries the implementation-relevant discoveries, refine with one unanswered concern, split into independent concerns, remove, reopen_parent, or interrupt for indispensable user input. Treat inference as uncertain and do not inspect the repository.",
+    systemPrompt: "Given the task, active concern, architectural constraints, evidence, dependencies, and ancestry supplied here, advance exactly one engineering-planning edge. Never implement, solve the task, or recursively expand a subtree. Choose ready only when no further detail is needed and emit a concise handoff contract for a separate implementer; refine with the single next unanswered concern; split into only the immediate independent child concerns and their dependencies; otherwise remove, reopen_parent, or interrupt for indispensable user input. Carry only facts needed by the next role; do not repeat operating protocol, evidence prose, or the whole task. Treat inference as uncertain and do not inspect the repository.",
   },
   answer: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: { ...READ_TOOLS, bash: false }, maxSteps: 24,

@@ -111,6 +111,7 @@ export interface AgentCall {
   schema?: Record<string, unknown>;
   schemaName?: string;
   retryCount?: number;
+  validateStructured?: (value: unknown) => unknown;
   session?: AgentSessionDirective;
   limits?: AgentCallLimits;
   directory?: string;
@@ -146,6 +147,7 @@ export interface GraphProgressNode {
   dependencies?: string[];
   evidence?: number;
   confidence?: number;
+  agents?: string[];
 }
 
 export interface GraphProgressSnapshot {

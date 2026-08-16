@@ -105,6 +105,20 @@ function parseCommandStructured(output: string): unknown {
   return JSON.parse((fenced ?? output).trim());
 }
 
+function addUsage(left: AgentUsage, right: AgentUsage | undefined): AgentUsage {
+  const value = right ?? { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+  return { turns: left.turns + value.turns, input: left.input + value.input, output: left.output + value.output, reasoning: left.reasoning + value.reasoning, cacheRead: left.cacheRead + value.cacheRead, cacheWrite: left.cacheWrite + value.cacheWrite, cost: left.cost + value.cost };
+}
+
+function remainingLimits(limits: AgentCallLimits, usage: AgentUsage): AgentCallLimits {
+  const remaining = (limit: number | undefined, used: number) => limit === undefined ? undefined : Math.max(0, limit - used);
+  return {
+    ...limits,
+    maxTurns: remaining(limits.maxTurns, usage.turns), maxInputTokens: remaining(limits.maxInputTokens, usage.input),
+    maxCacheReadTokens: remaining(limits.maxCacheReadTokens, usage.cacheRead), maxCost: remaining(limits.maxCost, usage.cost),
+  };
+}
+
 function promptTrace(system: string, input: string, schema?: Record<string, unknown>): AgentPromptTrace {
   return {
     system,
@@ -143,7 +157,8 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const output = await commandCall(model.command, model.args ?? [], model.env, worktree, `${composedPrompt.system}\n\n${composedPrompt.input}${schemaInstruction}`, this.options.signal);
       if (!output) throw new Error(`Command agent ${input.agent} returned no output`);
       this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: agent.model, text: output, state: input.state });
-      return { text: output, structured: input.schema ? parseCommandStructured(output) : undefined };
+      const structured = input.schema ? parseCommandStructured(output) : undefined;
+      return { text: output, structured: structured !== undefined && input.validateStructured ? input.validateStructured(structured) : structured };
     }
     const selected = model.model === "inherit" ? this.options.parentModel : modelId(model.model);
     if (!selected) throw new Error(`Agent ${input.agent} inherits a model, but the parent OpenCode message did not provide one`);
@@ -175,9 +190,9 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     const before = reusingSession
       ? await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true })
       : { data: [] as Array<{ info: { id?: string; role: string; finish?: string; cost?: number; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } }; parts: Part[] }> };
-    const baselineUsage = sessionUsage(before.data);
-    const baselineMessageIds = new Set(before.data.flatMap((message) => message.info.id ? [message.info.id] : []));
-    const baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
+    let baselineUsage = sessionUsage(before.data);
+    let baselineMessageIds = new Set(before.data.flatMap((message) => message.info.id ? [message.info.id] : []));
+    let baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
     this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId, prompt: composedPrompt });
     const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory } }); };
     const unregisterPermission = registerPermissionHandler(sessionId, async (permission) => {
@@ -192,26 +207,47 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     });
     this.options.signal.addEventListener("abort", abort, { once: true });
     try {
-      const schemaInstruction = composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : "";
-      await this.options.plugin.client.session.promptAsync({
-        path: { id: sessionId },
-        query: { directory },
-        body: {
-          agent: agent.opencodeAgent,
-          model: selected,
-          system: composedPrompt.system,
-          tools: agent.tools,
-          parts: [{ type: "text", text: `${composedPrompt.input}${schemaInstruction}` }],
-        } as never,
-        throwOnError: true,
-      });
-      const output = await this.waitForAnswer(
-        sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, directory,
-        agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
-        { maxTurns: agent.maxSteps, ...input.limits }, baselineUsage, baselineMessageIds, baselinePartIds,
-      );
-      this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: output.usage });
-      return { ...output, sessionId };
+      const limits = { maxTurns: agent.maxSteps, ...input.limits };
+      const attempts = input.schema ? Math.max(1, Math.min(1 + (input.retryCount ?? 1), limits.maxTurns ?? 2)) : 1;
+      let usage: AgentUsage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+      const tools: AgentToolTrace[] = [];
+      let prompt = `${composedPrompt.input}${composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : ""}`;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        await this.options.plugin.client.session.promptAsync({
+          path: { id: sessionId }, query: { directory },
+          body: { agent: agent.opencodeAgent, model: selected, system: composedPrompt.system, tools: agent.tools, parts: [{ type: "text", text: prompt }] } as never,
+          throwOnError: true,
+        });
+        const output = await this.waitForAnswer(
+          sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, directory,
+          agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
+          remainingLimits(limits, usage), usage, baselineUsage, baselineMessageIds, baselinePartIds,
+        );
+        usage = addUsage(usage, output.usage);
+        if (output.tools) tools.push(...output.tools);
+        if (output.budgetStop) return { ...output, usage, ...(tools.length ? { tools } : {}), sessionId };
+        if (!input.schema) {
+          const measured = usage.turns ? usage : undefined;
+          this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: measured });
+          return { ...output, ...(measured ? { usage: measured } : {}), ...(tools.length ? { tools } : {}), sessionId };
+        }
+        try {
+          const raw = output.structured !== undefined ? output.structured : parseCommandStructured(output.text);
+          const structured = input.validateStructured ? input.validateStructured(raw) : raw;
+          const measured = usage.turns ? usage : undefined;
+          this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: measured });
+          return { ...output, structured, ...(measured ? { usage: measured } : {}), ...(tools.length ? { tools } : {}), sessionId };
+        } catch (error) {
+          if (attempt + 1 >= attempts) throw new Error(`${input.node} returned invalid structured output after ${attempts} attempts: ${error instanceof Error ? error.message : String(error)}`);
+          this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: `Invalid structured output; retrying (${attempt + 1}/${attempts - 1})`, state: input.state, sessionId, usage });
+          const current = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true });
+          baselineUsage = sessionUsage(current.data);
+          baselineMessageIds = new Set(current.data.flatMap((message) => message.info.id ? [message.info.id] : []));
+          baselinePartIds = new Set(current.data.flatMap((message) => message.parts.map((part) => part.id)));
+          prompt = `Your previous response was incomplete or failed its output contract. Return a shorter complete JSON value that matches the contract exactly. Do not use Markdown.\n\n${composedPrompt.schemaInstruction}`;
+        }
+      }
+      throw new Error(`${input.node} returned no structured output`);
     } catch (error) {
       this.options.onEvent?.({ node: input.node, status: this.options.signal.aborted ? "interrupted" : "failed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: error instanceof Error ? error.message : String(error), state: input.state, sessionId });
       throw error;
@@ -221,7 +257,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, directory: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, directory: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, priorUsage: AgentUsage, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastFingerprint = "";
@@ -237,7 +273,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const usageFingerprint = JSON.stringify(usage);
       if (usageFingerprint !== lastUsage) {
         lastUsage = usageFingerprint;
-        this.options.onEvent?.({ node, status: "active", agent, model, sessionId, usage });
+        this.options.onEvent?.({ node, status: "active", agent, model, sessionId, usage: addUsage(priorUsage, usage) });
       }
       const fingerprint = activityFingerprint(messages.data);
       if (fingerprint !== lastFingerprint) {

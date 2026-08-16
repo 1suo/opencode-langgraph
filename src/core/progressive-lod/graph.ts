@@ -211,7 +211,7 @@ function progress(state: ProgressiveLodState): GraphProgressSnapshot {
   return {
     phase: state.phase, scope: state.profile?.scope, activeNodeId: state.activeNodeId ?? state.activeLeafId, callsUsed: state.callsUsed, callBudget: state.budget.calls,
     summary: state.verification?.summary ?? state.profile?.goal, usage: state.usage,
-    nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, level: node.level, depth: node.depth, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence })),
+    nodes: state.plan.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, level: node.level, depth: node.depth, status: node.status, dependencies: node.dependencies, evidence: node.evidenceIds.length, confidence: node.confidence, agents: node.agents })),
   };
 }
 
@@ -225,7 +225,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
 
   const builder = new StateGraph(ProgressiveState)
     .addNode("classify", async (state: ProgressiveLodState, config?: RunnableConfig) => {
-      const result = await runtime(config).call({ agent: classifier, node: "classify", state, limits: state.roleLimits.classifier, schema: z.toJSONSchema(ClassificationSchema) as Record<string, unknown>, prompt: JSON.stringify({ task: state.originalTask }) });
+      const result = await runtime(config).call({ agent: classifier, node: "classify", state, limits: state.roleLimits.classifier, schema: z.toJSONSchema(ClassificationSchema) as Record<string, unknown>, validateStructured: (value) => ClassificationSchema.parse(value), prompt: JSON.stringify({ task: state.originalTask }) });
       if (result.budgetStop) throw new Error(`Classifier exceeded ${result.budgetStop.metric} budget`);
       const classified = structured(result, ClassificationSchema, "classify");
       const profile = classified.route === "planned_change" ? classified : { ...classified, questions: undefined };
@@ -235,7 +235,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("acquire", async (_state: ProgressiveLodState, config?: RunnableConfig) => { const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined; if (acquire) await acquire(); return {}; })
     .addNode("initialize", (state: ProgressiveLodState) => ({
       ...(state.profile?.route === "direct_change" ? { phase: "implementing", activeNodeId: undefined, activeLeafId: "p1", resumeRole: "implementer" as const } : { phase: "scouting", activeNodeId: "p1", activeLeafId: undefined, resumeRole: "scout" as const }), nextId: 2,
-      plan: [{ id: "p1", title: state.profile?.goal ?? state.originalTask, description: state.originalTask, level: state.profile?.goal ?? state.originalTask, depth: 0, status: state.profile?.route === "direct_change" ? "implementing" as const : "active" as const, dependencies: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0, scoutSessionMode: "fresh" as const, scoutTurns: 0, ...(state.profile?.route === "direct_change" ? { leaf: { objective: state.profile.goal, targets: ["Files required by the request"], acceptanceCriteria: [state.originalTask], verification: ["Run focused checks appropriate to the requested change"] } } : {}) }],
+      plan: [{ id: "p1", title: state.profile?.goal ?? state.originalTask, description: state.originalTask, level: state.profile?.goal ?? state.originalTask, depth: 0, status: state.profile?.route === "direct_change" ? "implementing" as const : "active" as const, dependencies: [], evidenceIds: [], confidence: 1, contextCycles: 0, reopenCount: 0, agents: [classifier], scoutSessionMode: "fresh" as const, scoutTurns: 0, ...(state.profile?.route === "direct_change" ? { leaf: { objective: state.profile.goal, targets: ["Files required by the request"], acceptanceCriteria: [state.originalTask], verification: ["Run focused checks appropriate to the requested change"] } } : {}) }],
     }))
     .addNode("guard", (state: ProgressiveLodState) => {
       const pending = budgetExceeded(state) ? { scope: "global" as const, role: state.resumeRole ?? "scout", nodeId: state.activeNodeId ?? state.activeLeafId, stop: globalStop(state) } : contextCycleStop(state);
@@ -247,7 +247,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
         agent: options.scoutAgent, node: `scout:${active.id}`, state, limits: state.roleLimits.scout,
         session: state.resumeFromAbortedSession
           ? resumableSession(active.scoutSessionId, true)
-          : sessionDirective(active.scoutSessionId, active.scoutSessionMode, active.scoutTurns), schema: z.toJSONSchema(ResearchSchema) as Record<string, unknown>,
+          : sessionDirective(active.scoutSessionId, active.scoutSessionMode, active.scoutTurns), schema: z.toJSONSchema(ResearchSchema) as Record<string, unknown>, validateStructured: (value) => ResearchSchema.parse(value),
         prompt: JSON.stringify(branchProjection(state)),
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
@@ -260,7 +260,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const active = state.plan.find((node) => node.id === state.activeNodeId); if (!active) throw new Error("Decider requires an active branch");
       const result = await runtime(config).call({
         agent: options.deciderAgent, node: `decide:${active.id}`, state, limits: state.roleLimits.decider,
-        session: resumableSession(state.deciderSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(DetailDecisionSchema) as Record<string, unknown>,
+        session: resumableSession(state.deciderSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(DetailDecisionSchema) as Record<string, unknown>, validateStructured: (value) => DetailDecisionSchema.parse(value),
         prompt: JSON.stringify(branchProjection(state)),
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
@@ -269,7 +269,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     })
     .addNode("merge", (state: ProgressiveLodState) => {
       if (!state.decision) throw new Error("Merge requires a detail decision");
-      const merged = applyDecision(state, state.decision);
+      const merged = applyDecision(state, state.decision, options.deciderAgent);
       const constraints = state.humanAnswer ? [...state.constraints, { id: `c${state.constraints.length + 1}`, text: `User decision: ${state.humanAnswer}`, source: "user", nodeId: state.activeNodeId }] : state.constraints;
       return { ...merged, constraints, decision: undefined, research: undefined, humanAnswer: "", humanQuestion: merged.humanQuestion, resumeRole: merged.activeNodeId ? "scout" as const : "implementer" as const, phase: merged.humanQuestion ? "waiting-human" : merged.activeNodeId ? "scouting" : "selecting-leaf" };
     })
@@ -297,7 +297,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("implement", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Implementation requires one grounded leaf");
       const existing = state.implementationSessions[leaf.id];
-      const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: state.roleLimits.implementer, session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify(leafPayload(state, leaf)) });
+      const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: state.roleLimits.implementer, session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify(leafPayload(state, leaf)) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1; const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? existing };
       if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "implementer" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "implementer" as const, phase: "budget-paused" };
       const output = implementationResult(structured(result, ImplementationResultSchema, "implement"));
@@ -324,7 +324,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
           const node = state.plan.find((item) => item.id === leaf.leafId);
           for (const dependency of node?.dependencies ?? []) { relevant.add(dependency); for (const item of dependencyLeaves(state, dependency)) relevant.add(item.id); }
         }
-        const result = await runtime(config).call({ agent: verifier, node: "verify", state, directory: workspace, worktree: workspace, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, prompt: isolatedPayload({ task: state.originalTask, constraints: state.constraints.filter((item) => !item.nodeId || relevant.has(item.nodeId)).map(({ text }) => text), leaves }, state) });
+        const result = await runtime(config).call({ agent: verifier, node: "verify", state, directory: workspace, worktree: workspace, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, validateStructured: (value) => VerificationSchema.parse(value), prompt: isolatedPayload({ task: state.originalTask, constraints: state.constraints.filter((item) => !item.nodeId || relevant.has(item.nodeId)).map(({ text }) => text), leaves }, state) });
         const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
         if (result.budgetStop) {
           retainWorkspace = true;
@@ -345,7 +345,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Repair requires one failed leaf");
       const sessionId = state.implementationSessions[leaf.id]; if (!sessionId) throw new Error(`Repair has no implementation session for ${leaf.id}`);
       const findings = state.verification?.checks.filter((check) => check.name === leaf.id).map((check) => check.evidence) ?? [];
-      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify({ leafId: leaf.id, findings }) });
+      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify({ leafId: leaf.id, findings }) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? sessionId };
       if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "repair" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "repair" as const, phase: "budget-paused" };

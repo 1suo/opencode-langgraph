@@ -50,19 +50,20 @@ export interface DecisionMerge {
   decisions: Record<string, string>;
 }
 
-export function applyDecision(state: ProgressiveLodState, decision: DetailDecision): DecisionMerge {
-  const plan = state.plan.map((node) => ({ ...node, dependencies: [...node.dependencies], evidenceIds: [...node.evidenceIds] }));
+export function applyDecision(state: ProgressiveLodState, decision: DetailDecision, agent = "decider"): DecisionMerge {
+  const plan = state.plan.map((node) => ({ ...node, dependencies: [...node.dependencies], evidenceIds: [...node.evidenceIds], agents: [...(node.agents ?? [])] }));
   const target = plan.find((node) => node.id === state.activeNodeId);
   if (!target) throw new Error("Detail decision requires an active plan node");
   const evidenceIds = state.research?.evidence.map((item) => item.id) ?? [];
   target.evidenceIds = [...new Set([...target.evidenceIds, ...evidenceIds])];
   target.contextCycles++;
+  target.agents = [...new Set([...(target.agents ?? []), agent])];
   const decisions = { ...state.decisions, [target.id]: decision.disposition };
   let nextId = state.nextId;
   let humanQuestion = "";
 
   if (decision.disposition === "ready") {
-    target.leaf = decision.leaf;
+    target.leaf = { objective: decision.objective, targets: decision.targets, acceptanceCriteria: decision.acceptanceCriteria, verification: decision.verification };
     target.status = "ready";
   } else if (decision.disposition === "refine" || decision.disposition === "split") {
     const children = decision.disposition === "refine" ? [decision.child] : decision.children;
@@ -75,6 +76,7 @@ export function applyDecision(state: ProgressiveLodState, decision: DetailDecisi
         id, parentId: target.id, title: child.title, description: child.question, level: child.title, depth: target.depth + 1,
         status: "pending", dependencies: child.dependencies.map((dependency) => localIds.get(dependency) ?? dependency).filter((dependency) => plan.some((node) => node.id === dependency) || [...localIds.values()].includes(dependency)),
         evidenceIds: [...target.evidenceIds], confidence: target.confidence, contextCycles: 0, reopenCount: 0,
+        agents: [agent],
         scoutSessionId: target.scoutSessionId, scoutSessionMode: decision.disposition === "refine" ? "continue" : target.scoutSessionId ? "fork" : "fresh", scoutTurns: target.scoutTurns,
       });
     }

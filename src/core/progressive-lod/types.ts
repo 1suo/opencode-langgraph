@@ -42,6 +42,7 @@ export interface PlanNode {
   confidence: number;
   contextCycles: number;
   reopenCount: number;
+  agents?: string[];
   leaf?: LeafContract;
   scoutSessionId?: string;
   scoutSessionMode?: "continue" | "fork" | "fresh";
@@ -62,7 +63,7 @@ export interface DecisionChild {
   dependencies: string[];
 }
 export type DetailDecision =
-  | { disposition: "ready"; leaf: LeafContract }
+  | ({ disposition: "ready" } & LeafContract)
   | { disposition: "refine"; child: DecisionChild }
   | { disposition: "split"; children: DecisionChild[] }
   | { disposition: "remove"; reason?: string }
@@ -138,14 +139,14 @@ export const ResearchSchema = z.object({
   unknowns: z.array(z.string().max(500)).max(8).default([]),
 });
 
-const LeafSchema = z.object({
+const LeafFields = {
   objective: z.string().min(1).max(1200), targets: z.array(z.string().min(1).max(500)).min(1).max(20),
   acceptanceCriteria: z.array(z.string().min(1).max(700)).min(1).max(12),
   verification: z.array(z.string().min(1).max(500)).min(1).max(12),
-});
+};
 const DecisionChildSchema = z.object({ key: z.string().min(1).max(80), title: z.string().min(1).max(300), question: z.string().min(1).max(700), dependencies: z.array(z.string().max(80)).max(12).default([]) });
 export const DetailDecisionSchema = z.discriminatedUnion("disposition", [
-  z.object({ disposition: z.literal("ready"), leaf: LeafSchema }),
+  z.object({ disposition: z.literal("ready"), ...LeafFields }),
   z.object({ disposition: z.literal("refine"), child: DecisionChildSchema }),
   z.object({ disposition: z.literal("split"), children: z.array(DecisionChildSchema).min(2).max(8) }),
   z.object({ disposition: z.literal("remove"), reason: z.string().max(500).optional() }),

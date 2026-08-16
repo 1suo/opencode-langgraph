@@ -128,13 +128,13 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 5. Wrap the compiled graph with `defineGraph({ graph, initial, result })`. `initial` maps an OpenCode message into graph state; `result` maps final state back into the root chat.
 6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`.
 
-Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Structured nodes give OpenCode and command models a JSON Schema output contract, parse native structured values or JSON text, and validate with Zod before state mutation. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
+Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Structured nodes receive a portable JSON Schema text contract; malformed, truncated, or schema-invalid output is retried in that same scoped session before state mutation. This avoids provider-specific structured-output tool modes. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
 
 For optional anti-overengineering guidance, add `@dietrichgebert/ponytail` once to the global OpenCode plugin list and start with its `lite` mode. Do not also add the checkout-relative Ponytail path unless running from that checkout.
 
 Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer. Checkpoints and run metadata are plugin-private persistence: the connector resolves the current session's run internally, and agents must never read those files.
 
-The F8 viewer opens on the semantic plan tree. Press `G` for the focused execution-state graph, `2` for node executions, `3` for output, `4` for that execution's fully composed system/input/schema prompt, and `T` for raw state. Long execution traces collapse independently before and after the selected execution. Navigation hints live in panel headers.
+The F8 viewer opens on a live semantic plan matrix with colored status, LOD, dependency, evidence, confidence, and contributing-agent badges. Press `G` for the controller flow, `2` for the chronological execution trace, `3` for output, `4` for that execution's fully composed system/input/schema prompt, and `T` for raw state. While live, the selected execution follows new nodes until you navigate backward. Long traces collapse independently before and after the selection; navigation hints live in panel headers.
 
 Graph-owned start, resume, result, and failure messages use a hidden one-step presenter with every tool disabled. The normal root build agent never executes those lifecycle messages.
 

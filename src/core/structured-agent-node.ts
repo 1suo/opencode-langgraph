@@ -22,6 +22,7 @@ export function structuredAgentNode<State extends Record<string, unknown>, Outpu
       node: options.node ?? options.agent,
       state,
       schema: z.toJSONSchema(options.schema) as Record<string, unknown>,
+      validateStructured: (value) => options.schema.parse(value),
       schemaName: options.node ?? options.agent,
       retryCount: options.retries ?? 2,
     });

@@ -26,4 +26,4 @@ LangGraph compilation remains authoritative for graph structure. The connector a
 
 ## UI
 
-The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current semantic state. `/graph` opens the plan tree first, with topology, executions, output, and raw state available from header key hints.
+The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current semantic state. `/graph` opens the colored plan matrix first, with contributing-agent attribution kept distinct from the chronological execution trace, controller flow, node output, prompt, and raw state available from header key hints.

@@ -34,7 +34,7 @@ The graph is a controller, not another general agent. It gives each role one tas
 | verifier | inherited | read/search/test shell in disposable mirror | fresh aggregate pass; fork only after a budget pause | leaf-specific verdicts |
 | repair | inherited | build tools, no subagents | continue failed leaf | bounded repair artifacts |
 
-All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime appends the stable structured-output instruction. Each call records those three effective prompt layers for F8 inspection.
+All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime supplies a portable JSON Schema text contract and retries malformed, truncated, or schema-invalid output in the same scoped session before state mutation. This deliberately avoids provider-specific structured-output tool modes. Each call records the system, input, and output-contract layers for F8 inspection.
 
 The scout receives explicit unanswered questions, ancestry titles, lineage-scoped constraints, relevant compact facts with provenance, replan issues, sibling status, and dependency contracts/results. It never receives unrelated descriptions or controller bookkeeping. The decider receives that same distilled projection once; research is not duplicated beside it.
 
@@ -149,7 +149,7 @@ All options are optional. Model values are `inherit` or `provider/model`. Role l
 
 Checkpoints live below `$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints/`, or `~/.local/state` by default. Run metadata links every execution to its root session and originating user message. This storage is private to the connector: the connector resolves the current session's run internally, and no model receives a state-file path or needs filesystem permission. The next root message resumes only an interrupted run; otherwise it creates a new run. Root lifecycle/result rendering uses a dedicated tool-free presenter, never the normal build agent.
 
-The prompt legend is `[F7] graph:off|{actual graph name} · [F8] view · [F9] help`. F8 opens the semantic plan tree; the selected execution exposes output, effective prompt, and raw state. Status glyphs distinguish expanded (`◇`), ready (`◆`), active (`▶`), implemented (`■`), verified (`✓`), failed (`×`), and removed (`·`). Navigation hints remain in panel headers.
+The prompt legend is `[F7] graph:off|{actual graph name} · [F8] view · [F9] help`. F8 opens the live semantic plan matrix; every item carries role-colored contributing-agent badges, while the execution trace remains a separate chronological view. The selected execution exposes output, effective prompt, and raw state. Status glyphs distinguish expanded (`◇`), ready (`◆`), active (`▶`), implemented (`■`), verified (`✓`), failed (`×`), and removed (`·`). Navigation hints remain in panel headers.
 
 ## Release acceptance
 

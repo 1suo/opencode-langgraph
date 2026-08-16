@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import path from "node:path";
 import { loadConnectorDefinition } from "../core/config.js";
 import { adoptHomeGraphState, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, type PluginRunEvent } from "./store.js";
@@ -209,6 +209,37 @@ function statusColor(event: PluginRunEvent, theme: TuiPluginApi["theme"]["curren
   return theme.textMuted;
 }
 
+type Theme = TuiPluginApi["theme"]["current"];
+type ProgressSnapshot = NonNullable<PluginRunEvent["progress"]>;
+type ProgressNode = ProgressSnapshot["nodes"][number];
+
+function statusTone(value: string, theme: Theme) {
+  if (value === "failed") return theme.error;
+  if (value === "active" || value === "implementing" || value === "interrupted") return theme.warning;
+  if (value === "verified" || value === "completed") return theme.success;
+  if (value === "ready" || value === "implemented") return theme.info;
+  if (value === "expanded") return theme.secondary;
+  return theme.textMuted;
+}
+
+function shortAgent(value: string): string {
+  return value.replace(/^langgraph-/, "").replace(/[^a-z0-9]+/gi, "-").toUpperCase();
+}
+
+function roleColor(value: string, theme: Theme) {
+  const role = value.toLowerCase();
+  if (role.includes("classif")) return theme.secondary;
+  if (role.includes("scout") || role.includes("research")) return theme.info;
+  if (role.includes("decid") || role.includes("plan")) return theme.accent;
+  if (role.includes("implement") || role.includes("build") || role.includes("repair")) return theme.primary;
+  if (role.includes("verif") || role.includes("review") || role.includes("test")) return theme.success;
+  if (role === "human") return theme.warning;
+  const palette = [theme.primary, theme.secondary, theme.accent, theme.info, theme.success];
+  let hash = 0;
+  for (const character of role) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
+  return palette[Math.abs(hash) % palette.length];
+}
+
 function printable(value: unknown): string {
   if (value === undefined) return "No state captured for this execution.";
   try { return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item, 2); }
@@ -223,36 +254,98 @@ function compactNumber(value: number): string {
 
 function planId(value: string): number { const parsed = Number(value.replace(/^p/, "")); return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER; }
 
-export function renderPlanTree(events: PluginRunEvent[]): string {
+function progressSnapshot(events: PluginRunEvent[]): ProgressSnapshot | undefined {
   const runId = latestRunId(events);
-  const snapshot = events.filter((event) => event.runId === runId && event.progress).at(-1)?.progress;
-  if (!snapshot?.nodes.length) return "";
-  const byParent = new Map<string | undefined, typeof snapshot.nodes>();
+  return events.filter((event) => event.runId === runId && event.progress).at(-1)?.progress;
+}
+
+interface PlanRow { node: ProgressNode; branch: string; continuation: string }
+
+function planRows(snapshot: ProgressSnapshot): PlanRow[] {
+  const byParent = new Map<string | undefined, ProgressNode[]>();
   for (const node of snapshot.nodes) byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]);
-  const glyph = (value: string) => value === "verified" ? "✓" : value === "implemented" ? "■" : value === "expanded" ? "◇" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
-  const usage = snapshot.usage;
-  const calls = snapshot.callsUsed !== undefined && snapshot.callBudget !== undefined ? Math.min(1, snapshot.callsUsed / snapshot.callBudget) : undefined;
-  const callBar = calls === undefined ? "" : `${"█".repeat(Math.round(calls * 10))}${"░".repeat(10 - Math.round(calls * 10))}`;
-  const lines = [
-    `LOD  ${snapshot.phase.toUpperCase()}${snapshot.scope ? ` / ${snapshot.scope.toUpperCase()}` : ""}`,
-    snapshot.callsUsed !== undefined ? `CALLS  ${callBar} ${snapshot.callsUsed}/${snapshot.callBudget ?? "?"}${usage ? `   TURNS ${usage.turns}` : ""}` : "",
-    usage ? `TOKENS  ${compactNumber(usage.input)} input · ${compactNumber(usage.cacheRead)} cached` : "",
-    "",
-  ].filter((line, index, all) => line || index === all.length - 1);
+  const rows: PlanRow[] = [];
   const visit = (parentId: string | undefined, prefix: string) => {
     const children = (byParent.get(parentId) ?? []).sort((a, b) => planId(a.id) - planId(b.id) || a.id.localeCompare(b.id));
     children.forEach((node, index) => {
       const last = index === children.length - 1;
-      const branch = `${prefix}${last ? "└─" : "├─"}`;
-      const continuation = `${prefix}${last ? "   " : "│  "}`;
-      const metrics = [`LOD ${node.depth}`, node.status.toUpperCase(), node.evidence ? `${node.evidence} EVIDENCE` : "", node.confidence !== undefined ? `${Math.round(node.confidence * 100)}%` : ""].filter(Boolean).map((value) => `[${value}]`).join(" ");
-      lines.push(`${branch} ${glyph(node.status)} ${node.id}  ${node.title}`, `${continuation}   ${node.level}`, `${continuation}   ${metrics}`);
+      rows.push({ node, branch: `${prefix}${last ? "└─" : "├─"}`, continuation: `${prefix}${last ? "   " : "│  "}` });
       visit(node.id, `${prefix}${last ? "   " : "│  "}`);
     });
   };
   visit(undefined, "");
+  return rows;
+}
+
+function planGlyph(value: string): string {
+  return value === "verified" ? "✓" : value === "implemented" ? "■" : value === "expanded" ? "◇" : value === "active" || value === "implementing" ? "▶" : value === "failed" ? "×" : value === "removed" ? "·" : value === "ready" ? "◆" : "○";
+}
+
+export function renderPlanTree(events: PluginRunEvent[]): string {
+  const snapshot = progressSnapshot(events);
+  if (!snapshot?.nodes.length) return "";
+  const usage = snapshot.usage;
+  const calls = snapshot.callsUsed !== undefined && snapshot.callBudget !== undefined ? Math.min(1, snapshot.callsUsed / snapshot.callBudget) : undefined;
+  const callBar = calls === undefined ? "" : `${"█".repeat(Math.round(calls * 10))}${"░".repeat(10 - Math.round(calls * 10))}`;
+  const lines = [
+    `PLAN::MATRIX  [${snapshot.phase.toUpperCase()}]${snapshot.scope ? ` [${snapshot.scope.toUpperCase()}]` : ""}`,
+    snapshot.callsUsed !== undefined ? `CALLS  ${callBar} ${snapshot.callsUsed}/${snapshot.callBudget ?? "?"}${usage ? `   TURNS ${usage.turns}` : ""}` : "",
+    usage ? `TOKENS  ${compactNumber(usage.input)} input · ${compactNumber(usage.cacheRead)} cached` : "",
+    "",
+  ].filter((line, index, all) => line || index === all.length - 1);
+  for (const { node, branch, continuation } of planRows(snapshot)) {
+    const metrics = [`LOD:${node.depth}`, `STATUS:${node.status.toUpperCase()}`, node.evidence ? `EVIDENCE:${node.evidence}` : "", node.confidence !== undefined ? `CONF:${Math.round(node.confidence * 100)}%` : "", node.dependencies?.length ? `DEPS:${node.dependencies.join(",")}` : ""].filter(Boolean).map((value) => `[${value}]`).join(" ");
+    const agents = node.agents?.length ? node.agents.map((agent) => `[${shortAgent(agent)}]`).join(" ") : "[CONTROLLER]";
+    lines.push(`${branch} ${planGlyph(node.status)} ${node.id}  ${node.title}`, `${continuation}   ${node.level}`, `${continuation}   ${metrics} ${agents}`);
+  }
   if (snapshot.summary) lines.push("", snapshot.summary);
   return lines.join("\n");
+}
+
+function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme }) {
+  const snapshot = createMemo(() => progressSnapshot(props.events));
+  const rows = createMemo(() => snapshot() ? planRows(snapshot()!) : []);
+  const calls = createMemo(() => {
+    const value = snapshot();
+    return value?.callsUsed !== undefined && value.callBudget !== undefined ? Math.min(1, value.callsUsed / value.callBudget) : undefined;
+  });
+  const callBar = createMemo(() => calls() === undefined ? "----------" : `${"#".repeat(Math.round(calls()! * 10))}${"-".repeat(10 - Math.round(calls()! * 10))}`);
+  return (
+    <Show when={snapshot()}>{(value) => (
+      <box flexDirection="column" gap={1}>
+        <box flexDirection="row" gap={1}>
+          <text fg={statusTone(value().phase, props.theme)}><b>[{value().phase.toUpperCase()}]</b></text>
+          <Show when={value().scope}><text fg={props.theme.secondary}>[{value().scope!.toUpperCase()}]</text></Show>
+          <text fg={props.theme.textMuted}>LOD TREE // LIVE STATE</text>
+        </box>
+        <box flexDirection="row" gap={2}>
+          <text fg={props.theme.info}>CALLS [{callBar()}] {value().callsUsed ?? 0}/{value().callBudget ?? "?"}</text>
+          <Show when={value().usage}>{(usage) => <text fg={props.theme.textMuted}>TURN:{usage().turns} IN:{compactNumber(usage().input)} CACHE:{compactNumber(usage().cacheRead)}</text>}</Show>
+        </box>
+        <For each={rows()}>{({ node, branch, continuation }) => (
+          <box flexDirection="column">
+            <box flexDirection="row" gap={1}>
+              <text fg={statusTone(node.status, props.theme)}>{branch} {planGlyph(node.status)} <b>{node.id}</b></text>
+              <text fg={props.theme.text}><b>{node.title}</b></text>
+            </box>
+            <box flexDirection="row" gap={1}>
+              <text fg={props.theme.borderSubtle}>{continuation}   ├─</text>
+              <text fg={props.theme.textMuted}>{node.level}</text>
+            </box>
+            <box flexDirection="row" gap={1}>
+              <text fg={props.theme.borderSubtle}>{continuation}   └─</text>
+              <text fg={statusTone(node.status, props.theme)}>[LOD:{node.depth}] [{node.status.toUpperCase()}]</text>
+              <Show when={node.evidence}><text fg={props.theme.info}>[E:{node.evidence}]</text></Show>
+              <Show when={node.confidence !== undefined}><text fg={props.theme.secondary}>[C:{Math.round(node.confidence! * 100)}%]</text></Show>
+              <Show when={node.dependencies?.length}><text fg={props.theme.warning}>[DEP:{node.dependencies!.join(",")}]</text></Show>
+              <For each={node.agents?.length ? node.agents : ["controller"]}>{(agent) => <text fg={roleColor(agent, props.theme)}>[{shortAgent(agent)}]</text>}</For>
+            </box>
+          </box>
+        )}</For>
+        <Show when={value().summary}><text fg={props.theme.textMuted}>// {value().summary}</text></Show>
+      </box>
+    )}</Show>
+  );
 }
 
 function executions(events: PluginRunEvent[]): PluginRunEvent[] {
@@ -435,13 +528,13 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
     <Show when={nodes().length > 0}>
       <box paddingTop={1} flexDirection="column" gap={1}>
         <box flexDirection="row" justifyContent="space-between">
-          <text fg={theme().text}><b>LANGGRAPH</b></text>
+          <text fg={theme().primary}><b>LANGGRAPH::LIVE</b></text>
           <text fg={theme().textMuted}>{events().at(-1)?.graph ?? "graph"}</text>
         </box>
         <Show when={semantic()}>{(value) => (
           <box flexDirection="column">
-            <text fg={theme().textMuted}>{value().phase} · {value().scope ?? "classifying"} · {value().callsUsed ?? 0}/{value().callBudget ?? "?"}{value().usage ? ` · ${value().usage!.turns}t · ${compactNumber(value().usage!.input)}in` : ""}</text>
-            <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={theme().warning} wrapMode="word">▶ {node().title}</text>}</Show>
+            <text fg={statusTone(value().phase, theme())}>[{value().phase.toUpperCase()}] [{(value().scope ?? "classifying").toUpperCase()}] {value().callsUsed ?? 0}/{value().callBudget ?? "?"}{value().usage ? ` · ${value().usage!.turns}t · ${compactNumber(value().usage!.input)}in` : ""}</text>
+            <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={statusTone(node().status, theme())} wrapMode="word">{planGlyph(node().status)} {node().id} {node().title}</text>}</Show>
           </box>
         )}</Show>
         <For each={nodes()}>{(event) => (
@@ -449,9 +542,9 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
             <box flexDirection="row" gap={1}>
               <text fg={statusColor(event, theme())}>{status(event, spinner())}</text>
               <text fg={theme().text} wrapMode="none"><b>{event.node.replaceAll("_", " ")}</b></text>
-              <text fg={statusColor(event, theme())}>{event.status}</text>
+              <text fg={statusColor(event, theme())}>[{event.status.toUpperCase()}]</text>
             </box>
-            <text fg={theme().textMuted} wrapMode="none">  {event.agent}  {event.model}</text>
+            <text fg={roleColor(event.agent, theme())} wrapMode="none">  [{shortAgent(event.agent)}] {event.model}</text>
             <Show when={event.usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">  {usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache</text>}</Show>
           </box>
         )}</For>
@@ -469,6 +562,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const currentRun = createMemo(() => latest(events()));
   const [scrollPosition, setScrollPosition] = createSignal({ x: 0, y: 0 });
   const [selected, setSelected] = createSignal(initialSelection(events()));
+  const [followLatest, setFollowLatest] = createSignal(true);
   const layout = createMemo(() => renderEventGraph(events(), spinner(), selected()));
   const [pane, setPane] = createSignal<"plan" | "topology" | "nodes" | "output">(planTree() ? "plan" : "topology");
   const [detail, setDetail] = createSignal<"output" | "state" | "prompt">("output");
@@ -488,12 +582,17 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     props.api.renderer.requestRender();
   };
   const selectPrevious = () => {
+    setFollowLatest(false);
     setSelected((value) => Math.max(0, value - 1));
     outputBox?.scrollTo(0);
     props.api.renderer.requestRender();
   };
   const selectNext = () => {
-    setSelected((value) => Math.min(nodes().length - 1, value + 1));
+    setSelected((value) => {
+      const next = Math.min(nodes().length - 1, value + 1);
+      setFollowLatest(next === nodes().length - 1);
+      return next;
+    });
     outputBox?.scrollTo(0);
     props.api.renderer.requestRender();
   };
@@ -568,41 +667,52 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   onMount(() => {
     setKeymapReady(true);
   });
+  createEffect(() => {
+    const count = nodes().length;
+    if (followLatest() && count) setSelected(count - 1);
+  });
+  const liveStatus = createMemo(() => runIsActive(events()) ? "LIVE" : currentRun().at(-1)?.status?.toUpperCase() ?? "IDLE");
+  const liveColor = createMemo(() => runIsActive(events()) ? theme().warning : currentRun().at(-1)?.status === "failed" ? theme().error : theme().success);
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" flexDirection="column" padding={1}>
       <box flexDirection="row" gap={2} flexShrink={0}>
-        <text fg={theme().primary}><b>LANGGRAPH</b></text>
-        <text fg={theme().textMuted}>{currentRun().at(-1)?.graph ?? "no run"} · {currentRun().at(-1)?.runId ?? "idle"}</text>
+        <text fg={theme().primary}><b>LANGGRAPH//OPS</b></text>
+        <text fg={liveColor()}><b>[{liveStatus()}]</b></text>
+        <text fg={theme().secondary}>[{(currentRun().at(-1)?.graph ?? "no-graph").toUpperCase()}]</text>
+        <text fg={theme().textMuted}>RUN::{middleEllipsis(currentRun().at(-1)?.runId ?? "idle", 18)}</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
-        <box onMouseUp={() => activatePane(planTree() ? "plan" : "topology")} width="62%" flexShrink={0} border={true} borderColor={pane() === "plan" || pane() === "topology" ? theme().primary : theme().border} title={pane() === "topology" ? ` RUN GRAPH [G] · PLAN [1] · PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "ARROWS")}] ` : ` PLAN [1] · RUN GRAPH [G] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} overflow="hidden">
+        <box onMouseUp={() => activatePane(planTree() ? "plan" : "topology")} width="62%" flexShrink={0} border={true} borderColor={pane() === "plan" || pane() === "topology" ? theme().borderActive : theme().border} title={pane() === "topology" ? ` CONTROL FLOW [G] :: PLAN MATRIX [1] :: PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "ARROWS")}] ` : ` PLAN MATRIX [1] :: CONTROL FLOW [G] :: SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} overflow="hidden">
           <Show when={pane() === "plan" && planTree()} fallback={
             <Show when={layout().canvas} fallback={<text fg={theme().textMuted}>No LangGraph execution has run in this project.</text>}>
               <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height} flexShrink={0}>
                 <text position="absolute" left={0} top={0} fg={theme().text}>{layout().canvas}</text>
               </box>
             </Show>
-          }><scrollbox ref={(value) => { planBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><text fg={theme().text}>{planTree()}</text></scrollbox></Show>
+          }><scrollbox ref={(value) => { planBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><PlanTreeView events={events()} theme={theme()} /></scrollbox></Show>
         </box>
         <box flexGrow={1} minWidth={24} flexDirection="column" gap={1}>
-          <box onMouseUp={() => activatePane("nodes")} height="38%" minHeight={6} border={true} borderColor={pane() === "nodes" ? theme().primary : theme().border} title={` EXECUTIONS ${Math.min(selected() + 1, nodes().length)}/${nodes().length} [${keyHint(["langgraph.view.nodes"], "2")}] · SELECT [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
+          <box onMouseUp={() => activatePane("nodes")} height="38%" minHeight={6} border={true} borderColor={pane() === "nodes" ? theme().borderActive : theme().border} title={` EXEC TRACE ${Math.min(selected() + 1, nodes().length)}/${nodes().length} [${keyHint(["langgraph.view.nodes"], "2")}] :: SELECT [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
             <Show when={nodes().length} fallback={<text fg={theme().textMuted}>No nodes executed.</text>}>
               <For each={nodes()}>{(item, index) => (
-                <box onMouseUp={() => { setSelected(index()); setPane("nodes"); }} flexDirection="row" gap={1}>
+                <box onMouseUp={() => { setSelected(index()); setFollowLatest(index() === nodes().length - 1); setPane("nodes"); }} flexDirection="row" gap={1}>
                   <text fg={selected() === index() ? theme().primary : theme().textMuted}>{selected() === index() ? "›" : " "}</text>
                   <text fg={statusColor(item, theme())}>{status(item, spinner())}</text>
                   <text fg={selected() === index() ? theme().text : theme().textMuted} wrapMode="none">{item.node.replaceAll("_", " ")}</text>
-                  <text fg={theme().textMuted} wrapMode="none">{item.agent}</text>
+                  <text fg={statusTone(item.status, theme())} wrapMode="none">[{item.status.toUpperCase()}]</text>
+                  <text fg={roleColor(item.agent, theme())} wrapMode="none">[{shortAgent(item.agent)}]</text>
                 </box>
               )}</For>
             </Show>
           </box>
-          <box onMouseUp={() => activatePane("output")} flexGrow={1} minHeight={8} border={true} borderColor={pane() === "output" ? theme().primary : theme().border} title={` ${detail().toUpperCase()} · OUTPUT [${keyHint(["langgraph.view.output"], "3")}] · PROMPT [${keyHint(["langgraph.view.prompt"], "4")}] · STATE [${keyHint(["langgraph.view.state"], "T")}] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column">
+          <box onMouseUp={() => activatePane("output")} flexGrow={1} minHeight={8} border={true} borderColor={pane() === "output" ? theme().borderActive : theme().border} title={` NODE LAB :: ${detail().toUpperCase()} [3] :: PROMPT [4] :: STATE [T] :: SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column">
             <Show when={selectedEvent()} fallback={<text fg={theme().textMuted}>Select an execution.</text>}>
               {(item) => <>
                 <box flexDirection="row" gap={1} flexShrink={0}>
                   <text fg={statusColor(item(), theme())}><b>{status(item(), spinner())} {item().node}</b></text>
-                  <text fg={theme().textMuted}>{item().agent} · {item().model}</text>
+                  <text fg={statusTone(item().status, theme())}>[{item().status.toUpperCase()}]</text>
+                  <text fg={roleColor(item().agent, theme())}>[{shortAgent(item().agent)}]</text>
+                  <text fg={theme().textMuted}>{item().model}</text>
                 </box>
                 <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}>
                   <text fg={theme().text}>{detail() === "output" ? item().text || (item().status === "active" ? `${spinner()} Model is running…` : "No model output captured for this execution.") : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text>
