@@ -65,9 +65,9 @@ export function graphNavigationLayer(controls: GraphControls) {
     commands: [
       { name: "langgraph.graph.back", title: "Return from LangGraph", run: controls.back },
       { name: "langgraph.pane.next", title: "LangGraph: focus next pane", run: controls.cycle },
-      { name: "langgraph.view.graph", title: "LangGraph: focus graph", run: controls.graph },
+      { name: "langgraph.view.graph", title: "LangGraph: show activity", run: controls.graph },
       { name: "langgraph.view.topology", title: "LangGraph: show topology", run: controls.topology },
-      { name: "langgraph.view.nodes", title: "LangGraph: focus executions", run: controls.nodes },
+      { name: "langgraph.view.nodes", title: "LangGraph: show plan", run: controls.nodes },
       { name: "langgraph.view.output", title: "LangGraph: focus output", run: controls.output },
       { name: "langgraph.view.state", title: "LangGraph: inspect state", run: controls.state },
       { name: "langgraph.view.prompt", title: "LangGraph: inspect effective prompt", run: controls.prompt },
@@ -285,17 +285,15 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
   const snapshot = progressSnapshot(events);
   if (!snapshot?.nodes.length) return "";
   const usage = snapshot.usage;
-  const calls = snapshot.callsUsed !== undefined && snapshot.callBudget !== undefined ? Math.min(1, snapshot.callsUsed / snapshot.callBudget) : undefined;
-  const callBar = calls === undefined ? "" : `${"█".repeat(Math.round(calls * 10))}${"░".repeat(10 - Math.round(calls * 10))}`;
   const lines = [
-    `PLAN::MATRIX  [${snapshot.phase.toUpperCase()}]${snapshot.scope ? ` [${snapshot.scope.toUpperCase()}]` : ""}`,
-    snapshot.callsUsed !== undefined ? `CALLS  ${callBar} ${snapshot.callsUsed}/${snapshot.callBudget ?? "?"}${usage ? `   TURNS ${usage.turns}` : ""}` : "",
+    `PLAN  ${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}`,
+    snapshot.callsUsed !== undefined ? `${snapshot.callsUsed} calls${usage ? ` · ${usage.turns} turns` : ""}` : "",
     usage ? `TOKENS  ${compactNumber(usage.input)} input · ${compactNumber(usage.cacheRead)} cached` : "",
     "",
   ].filter((line, index, all) => line || index === all.length - 1);
   for (const { node, branch, continuation } of planRows(snapshot)) {
-    const metrics = [`LOD:${node.depth}`, `STATUS:${node.status.toUpperCase()}`, node.evidence ? `EVIDENCE:${node.evidence}` : "", node.confidence !== undefined ? `CONF:${Math.round(node.confidence * 100)}%` : "", node.dependencies?.length ? `DEPS:${node.dependencies.join(",")}` : ""].filter(Boolean).map((value) => `[${value}]`).join(" ");
-    const agents = node.agents?.length ? node.agents.map((agent) => `[${shortAgent(agent)}]`).join(" ") : "[CONTROLLER]";
+    const metrics = [node.status, `depth ${node.depth}`, node.evidence ? `${node.evidence} evidence` : "", node.dependencies?.length ? `after ${node.dependencies.join(", ")}` : ""].filter(Boolean).join(" · ");
+    const agents = node.agents?.length ? node.agents.map(shortAgent).join(", ") : "controller";
     lines.push(`${branch} ${planGlyph(node.status)} ${node.id}  ${node.title}`, `${continuation}   ${node.level}`, `${continuation}   ${metrics} ${agents}`);
   }
   if (snapshot.summary) lines.push("", snapshot.summary);
@@ -305,21 +303,16 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
 function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme }) {
   const snapshot = createMemo(() => progressSnapshot(props.events));
   const rows = createMemo(() => snapshot() ? planRows(snapshot()!) : []);
-  const calls = createMemo(() => {
-    const value = snapshot();
-    return value?.callsUsed !== undefined && value.callBudget !== undefined ? Math.min(1, value.callsUsed / value.callBudget) : undefined;
-  });
-  const callBar = createMemo(() => calls() === undefined ? "----------" : `${"#".repeat(Math.round(calls()! * 10))}${"-".repeat(10 - Math.round(calls()! * 10))}`);
   return (
     <Show when={snapshot()}>{(value) => (
       <box flexDirection="column" gap={1}>
         <box flexDirection="row" gap={1}>
           <text fg={statusTone(value().phase, props.theme)}><b>[{value().phase.toUpperCase()}]</b></text>
           <Show when={value().scope}><text fg={props.theme.secondary}>[{value().scope!.toUpperCase()}]</text></Show>
-          <text fg={props.theme.textMuted}>LOD TREE // LIVE STATE</text>
+          <text fg={props.theme.textMuted}>PLAN</text>
         </box>
         <box flexDirection="row" gap={2}>
-          <text fg={props.theme.info}>CALLS [{callBar()}] {value().callsUsed ?? 0}/{value().callBudget ?? "?"}</text>
+          <text fg={props.theme.info}>CALLS {value().callsUsed ?? 0}</text>
           <Show when={value().usage}>{(usage) => <text fg={props.theme.textMuted}>TURN:{usage().turns} IN:{compactNumber(usage().input)} CACHE:{compactNumber(usage().cacheRead)}</text>}</Show>
         </box>
         <For each={rows()}>{({ node, branch, continuation }) => (
@@ -334,11 +327,10 @@ function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme }) {
             </box>
             <box flexDirection="row" gap={1}>
               <text fg={props.theme.borderSubtle}>{continuation}   └─</text>
-              <text fg={statusTone(node.status, props.theme)}>[LOD:{node.depth}] [{node.status.toUpperCase()}]</text>
-              <Show when={node.evidence}><text fg={props.theme.info}>[E:{node.evidence}]</text></Show>
-              <Show when={node.confidence !== undefined}><text fg={props.theme.secondary}>[C:{Math.round(node.confidence! * 100)}%]</text></Show>
-              <Show when={node.dependencies?.length}><text fg={props.theme.warning}>[DEP:{node.dependencies!.join(",")}]</text></Show>
-              <For each={node.agents?.length ? node.agents : ["controller"]}>{(agent) => <text fg={roleColor(agent, props.theme)}>[{shortAgent(agent)}]</text>}</For>
+              <text fg={statusTone(node.status, props.theme)}>{node.status} · depth {node.depth}</text>
+              <Show when={node.evidence}><text fg={props.theme.info}>· {node.evidence} evidence</text></Show>
+              <Show when={node.dependencies?.length}><text fg={props.theme.warning}>· after {node.dependencies!.join(",")}</text></Show>
+              <For each={node.agents?.length ? node.agents : ["controller"]}>{(agent) => <text fg={roleColor(agent, props.theme)}>· {shortAgent(agent)}</text>}</For>
             </box>
           </box>
         )}</For>
@@ -499,7 +491,8 @@ USE
 /run-graph <task> once · /graph-resume <answer> · /graph-cancel stop
 
 VIEW
-1 plan · G run graph · 2 executions · 3 output · 4 prompt · T state
+1 activity · 2 plan · 3 inspect · G topology
+↑↓ select · Enter inspect · O output · P prompt · T state · Q back
 
 DESIGN · .opencode/langgraph.ts
 1. Annotation.Root → StateGraph → compile(checkpointer)
@@ -520,12 +513,12 @@ function showGraphHelp(api: TuiPluginApi): void {
 
 function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
   const events = useEvents(() => props.session_id, () => projectPath(props.api), () => stateHome(props.api));
-  const nodes = createMemo(() => executions(events()).slice(-6));
+  const node = createMemo(() => executions(events()).at(-1));
   const spinner = useSpinner(events, props.api);
   const theme = () => props.api.theme.current;
   const semantic = createMemo(() => events().filter((event) => event.progress).at(-1)?.progress);
   return (
-    <Show when={nodes().length > 0}>
+    <Show when={node()}>
       <box paddingTop={1} flexDirection="column" gap={1}>
         <box flexDirection="row" justifyContent="space-between">
           <text fg={theme().primary}><b>LANGGRAPH::LIVE</b></text>
@@ -533,21 +526,21 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
         </box>
         <Show when={semantic()}>{(value) => (
           <box flexDirection="column">
-            <text fg={statusTone(value().phase, theme())}>[{value().phase.toUpperCase()}] [{(value().scope ?? "classifying").toUpperCase()}] {value().callsUsed ?? 0}/{value().callBudget ?? "?"}{value().usage ? ` · ${value().usage!.turns}t · ${compactNumber(value().usage!.input)}in` : ""}</text>
+            <text fg={statusTone(value().phase, theme())}>[{value().phase.toUpperCase()}] [{(value().scope ?? "classifying").toUpperCase()}] {value().callsUsed ?? 0} calls{value().usage ? ` · ${value().usage!.turns}t · ${compactNumber(value().usage!.input)}in` : ""}</text>
             <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={statusTone(node().status, theme())} wrapMode="word">{planGlyph(node().status)} {node().id} {node().title}</text>}</Show>
           </box>
         )}</Show>
-        <For each={nodes()}>{(event) => (
-          <box flexDirection="column">
+        <Show when={node()}>{(event) => (
+          <box flexDirection="column" paddingTop={1}>
             <box flexDirection="row" gap={1}>
-              <text fg={statusColor(event, theme())}>{status(event, spinner())}</text>
-              <text fg={theme().text} wrapMode="none"><b>{event.node.replaceAll("_", " ")}</b></text>
-              <text fg={statusColor(event, theme())}>[{event.status.toUpperCase()}]</text>
+              <text fg={statusColor(event(), theme())}>{status(event(), spinner())}</text>
+              <text fg={theme().text} wrapMode="none"><b>{event().node.replaceAll("_", " ")}</b></text>
+              <text fg={statusColor(event(), theme())}>[{event().status.toUpperCase()}]</text>
             </box>
-            <text fg={roleColor(event.agent, theme())} wrapMode="none">  [{shortAgent(event.agent)}] {event.model}</text>
-            <Show when={event.usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">  {usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache</text>}</Show>
+            <text fg={roleColor(event().agent, theme())} wrapMode="none">  [{shortAgent(event().agent)}] {event().model}</text>
+            <Show when={event().usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">  {usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache</text>}</Show>
           </box>
-        )}</For>
+        )}</Show>
       </box>
     </Show>
   );
@@ -564,7 +557,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const [selected, setSelected] = createSignal(initialSelection(events()));
   const [followLatest, setFollowLatest] = createSignal(true);
   const layout = createMemo(() => renderEventGraph(events(), spinner(), selected()));
-  const [pane, setPane] = createSignal<"plan" | "topology" | "nodes" | "output">(planTree() ? "plan" : "topology");
+  const [pane, setPane] = createSignal<"activity" | "plan" | "topology" | "inspect">("activity");
   const [detail, setDetail] = createSignal<"output" | "state" | "prompt">("output");
   const [keymapReady, setKeymapReady] = createSignal(false);
   let canvas: BoxRenderable | undefined;
@@ -577,7 +570,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     if (!item) return;
     return events().findLast((event) => event.runId === item.runId && event.node === item.node && Boolean(event.prompt) && (!item.sessionId || event.sessionId === item.sessionId));
   });
-  const activatePane = (value: "plan" | "topology" | "nodes" | "output") => {
+  const activatePane = (value: "activity" | "plan" | "topology" | "inspect") => {
     setPane(value);
     props.api.renderer.requestRender();
   };
@@ -608,47 +601,47 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   };
   const controls: GraphControls = {
     back,
-    cycle: () => activatePane(pane() === "plan" ? "topology" : pane() === "topology" ? "nodes" : pane() === "nodes" ? "output" : "plan"),
-    graph: () => activatePane("plan"),
+    cycle: () => activatePane(pane() === "activity" ? "plan" : pane() === "plan" ? "inspect" : "activity"),
+    graph: () => activatePane("activity"),
     topology: () => activatePane("topology"),
-    nodes: () => activatePane("nodes"),
-    output: () => { setDetail("output"); activatePane("output"); outputBox?.scrollTo(0); },
-    state: () => { setDetail("state"); activatePane("output"); outputBox?.scrollTo(0); },
-    prompt: () => { setDetail("prompt"); activatePane("output"); outputBox?.scrollTo(0); },
+    nodes: () => activatePane("plan"),
+    output: () => { setDetail("output"); activatePane("inspect"); outputBox?.scrollTo(0); },
+    state: () => { setDetail("state"); activatePane("inspect"); outputBox?.scrollTo(0); },
+    prompt: () => { setDetail("prompt"); activatePane("inspect"); outputBox?.scrollTo(0); },
     previous: selectPrevious,
     next: selectNext,
-    inspect: () => { if (pane() === "nodes") { activatePane("output"); outputBox?.scrollTo(0); } },
+    inspect: () => { activatePane("inspect"); outputBox?.scrollTo(0); },
     up: () => {
-      if (pane() === "nodes") selectPrevious();
-      else if (pane() === "output") outputBox?.scrollBy(-3);
+      if (pane() === "activity") selectPrevious();
+      else if (pane() === "inspect") outputBox?.scrollBy(-3);
       else if (pane() === "plan") planBox?.scrollBy(-3);
       else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 4) }));
     },
     down: () => {
-      if (pane() === "nodes") selectNext();
-      else if (pane() === "output") outputBox?.scrollBy(3);
+      if (pane() === "activity") selectNext();
+      else if (pane() === "inspect") outputBox?.scrollBy(3);
       else if (pane() === "plan") planBox?.scrollBy(3);
       else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 4) }));
     },
     left: () => { if (pane() === "topology") moveGraph(({ x, y }) => ({ x: Math.max(0, x - 8), y })); },
     right: () => { if (pane() === "topology") moveGraph(({ x, y }) => ({ x: Math.min(Math.max(0, layout().width - 20), x + 8), y })); },
     pageUp: () => {
-      if (pane() === "output") outputBox?.scrollBy(-12);
+      if (pane() === "inspect") outputBox?.scrollBy(-12);
       else if (pane() === "plan") planBox?.scrollBy(-12);
       else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 12) }));
     },
     pageDown: () => {
-      if (pane() === "output") outputBox?.scrollBy(12);
+      if (pane() === "inspect") outputBox?.scrollBy(12);
       else if (pane() === "plan") planBox?.scrollBy(12);
       else if (pane() === "topology") moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 12) }));
     },
     home: () => {
-      if (pane() === "output") outputBox?.scrollTo(0);
+      if (pane() === "inspect") outputBox?.scrollTo(0);
       else if (pane() === "plan") planBox?.scrollTo(0);
       else if (pane() === "topology") moveGraph(() => ({ x: 0, y: 0 }));
     },
     end: () => {
-      if (pane() === "output" && outputBox) outputBox.scrollTo(outputBox.scrollHeight);
+      if (pane() === "inspect" && outputBox) outputBox.scrollTo(outputBox.scrollHeight);
       if (pane() === "plan" && planBox) planBox.scrollTo(planBox.scrollHeight);
     },
   };
@@ -673,6 +666,8 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   });
   const liveStatus = createMemo(() => runIsActive(events()) ? "LIVE" : currentRun().at(-1)?.status?.toUpperCase() ?? "IDLE");
   const liveColor = createMemo(() => runIsActive(events()) ? theme().warning : currentRun().at(-1)?.status === "failed" ? theme().error : theme().success);
+  const semantic = createMemo(() => progressSnapshot(events()));
+  const activePlan = createMemo(() => semantic()?.nodes.find((node) => node.id === semantic()?.activeNodeId));
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" flexDirection="column" padding={1}>
       <box flexDirection="row" gap={2} flexShrink={0}>
@@ -681,47 +676,55 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={theme().secondary}>[{(currentRun().at(-1)?.graph ?? "no-graph").toUpperCase()}]</text>
         <text fg={theme().textMuted}>RUN::{middleEllipsis(currentRun().at(-1)?.runId ?? "idle", 18)}</text>
       </box>
-      <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
-        <box onMouseUp={() => activatePane(planTree() ? "plan" : "topology")} width="62%" flexShrink={0} border={true} borderColor={pane() === "plan" || pane() === "topology" ? theme().borderActive : theme().border} title={pane() === "topology" ? ` CONTROL FLOW [G] :: PLAN MATRIX [1] :: PAN [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down", "langgraph.navigate.left", "langgraph.navigate.right"], "ARROWS")}] ` : ` PLAN MATRIX [1] :: CONTROL FLOW [G] :: SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} overflow="hidden">
-          <Show when={pane() === "plan" && planTree()} fallback={
-            <Show when={layout().canvas} fallback={<text fg={theme().textMuted}>No LangGraph execution has run in this project.</text>}>
-              <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height} flexShrink={0}>
-                <text position="absolute" left={0} top={0} fg={theme().text}>{layout().canvas}</text>
-              </box>
-            </Show>
-          }><scrollbox ref={(value) => { planBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><PlanTreeView events={events()} theme={theme()} /></scrollbox></Show>
-        </box>
-        <box flexGrow={1} minWidth={24} flexDirection="column" gap={1}>
-          <box onMouseUp={() => activatePane("nodes")} height="38%" minHeight={6} border={true} borderColor={pane() === "nodes" ? theme().borderActive : theme().border} title={` EXEC TRACE ${Math.min(selected() + 1, nodes().length)}/${nodes().length} [${keyHint(["langgraph.view.nodes"], "2")}] :: SELECT [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
-            <Show when={nodes().length} fallback={<text fg={theme().textMuted}>No nodes executed.</text>}>
-              <For each={nodes()}>{(item, index) => (
-                <box onMouseUp={() => { setSelected(index()); setFollowLatest(index() === nodes().length - 1); setPane("nodes"); }} flexDirection="row" gap={1}>
+      <box flexDirection="row" gap={2} flexShrink={0}>
+        <text fg={statusTone(semantic()?.phase ?? "idle", theme())}>[{(semantic()?.phase ?? "idle").toUpperCase()}]</text>
+        <Show when={activePlan()}>{(node) => <text fg={theme().text}>{planGlyph(node().status)} {node().id} {node().title}</text>}</Show>
+        <Show when={semantic()?.usage}>{(usage) => <text fg={theme().textMuted}>{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache</text>}</Show>
+      </box>
+      <text fg={theme().textMuted}>[1] Activity  [2] Plan  [3] Inspect  [G] Topology  [↑↓] Navigate  [Enter] Inspect  [Q] Back</text>
+      <Show when={pane() === "activity"}>
+        <scrollbox flexGrow={1} minHeight={0} scrollY={true} viewportCulling={true}>
+          <Show when={nodes().length} fallback={<text fg={theme().textMuted}>No execution activity for this run.</text>}>
+            <For each={nodes()}>{(item, index) => (
+              <box onMouseUp={() => { setSelected(index()); setFollowLatest(index() === nodes().length - 1); }} flexDirection="column" paddingBottom={1}>
+                <box flexDirection="row" gap={1}>
                   <text fg={selected() === index() ? theme().primary : theme().textMuted}>{selected() === index() ? "›" : " "}</text>
                   <text fg={statusColor(item, theme())}>{status(item, spinner())}</text>
-                  <text fg={selected() === index() ? theme().text : theme().textMuted} wrapMode="none">{item.node.replaceAll("_", " ")}</text>
-                  <text fg={statusTone(item.status, theme())} wrapMode="none">[{item.status.toUpperCase()}]</text>
-                  <text fg={roleColor(item.agent, theme())} wrapMode="none">[{shortAgent(item.agent)}]</text>
+                  <text fg={selected() === index() ? theme().text : theme().textMuted}><b>{item.node.replaceAll("_", " ")}</b></text>
+                  <text fg={statusTone(item.status, theme())}>[{item.status.toUpperCase()}]</text>
+                  <text fg={roleColor(item.agent, theme())}>[{shortAgent(item.agent)}]</text>
+                  <text fg={theme().textMuted}>{item.model}{item.usage ? ` · ${item.usage.turns}t · ${compactNumber(item.usage.input)}in` : ""}</text>
                 </box>
-              )}</For>
-            </Show>
-          </box>
-          <box onMouseUp={() => activatePane("output")} flexGrow={1} minHeight={8} border={true} borderColor={pane() === "output" ? theme().borderActive : theme().border} title={` NODE LAB :: ${detail().toUpperCase()} [3] :: PROMPT [4] :: STATE [T] :: SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column">
-            <Show when={selectedEvent()} fallback={<text fg={theme().textMuted}>Select an execution.</text>}>
-              {(item) => <>
-                <box flexDirection="row" gap={1} flexShrink={0}>
-                  <text fg={statusColor(item(), theme())}><b>{status(item(), spinner())} {item().node}</b></text>
-                  <text fg={statusTone(item().status, theme())}>[{item().status.toUpperCase()}]</text>
-                  <text fg={roleColor(item().agent, theme())}>[{shortAgent(item().agent)}]</text>
-                  <text fg={theme().textMuted}>{item().model}</text>
-                </box>
-                <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}>
-                  <text fg={theme().text}>{detail() === "output" ? item().text || (item().status === "active" ? `${spinner()} Model is running…` : "No model output captured for this execution.") : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text>
-                </scrollbox>
-              </>}
-            </Show>
-          </box>
+                <Show when={executionState(item)}>{(value) => <text fg={theme().textMuted}>    {value()}</text>}</Show>
+                <Show when={item.text}><text fg={theme().text} wrapMode="word">    {middleEllipsis(item.text!, 180)}</text></Show>
+              </box>
+            )}</For>
+          </Show>
+        </scrollbox>
+      </Show>
+      <Show when={pane() === "plan"}>
+        <scrollbox ref={(value) => { planBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}>
+          <Show when={planTree()} fallback={<text fg={theme().textMuted}>No semantic plan is available for this graph.</text>}><PlanTreeView events={events()} theme={theme()} /></Show>
+        </scrollbox>
+      </Show>
+      <Show when={pane() === "topology"}>
+        <box flexGrow={1} minHeight={0} overflow="hidden">
+          <Show when={layout().canvas} fallback={<text fg={theme().textMuted}>No execution topology available.</text>}>
+            <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height}><text fg={theme().text}>{layout().canvas}</text></box>
+          </Show>
         </box>
-      </box>
+      </Show>
+      <Show when={pane() === "inspect"}>
+        <box flexGrow={1} minHeight={0} flexDirection="column">
+          <text fg={theme().textMuted}>[O] Output  [P] Effective prompt  [T] Raw state</text>
+          <Show when={selectedEvent()} fallback={<text fg={theme().textMuted}>Select an activity first.</text>}>
+            {(item) => <>
+              <box flexDirection="row" gap={1}><text fg={statusColor(item(), theme())}><b>{status(item(), spinner())} {item().node}</b></text><text fg={roleColor(item().agent, theme())}>[{shortAgent(item().agent)}]</text><text fg={theme().textMuted}>{item().model}</text></box>
+              <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><text fg={theme().text}>{detail() === "output" ? item().text || (item().status === "active" ? `${spinner()} Model is running…` : "No output captured.") : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text></scrollbox>
+            </>}
+          </Show>
+        </box>
+      </Show>
     </box>
   );
 }

@@ -928,11 +928,11 @@ describe("OpenCode graph viewer", () => {
       { id: "p1", title: "Requested behavior", level: "observable outcome", depth: 0, status: "removed", agents: ["langgraph-classifier"] },
       { id: "p2", parentId: "p1", title: "Session handoff", level: "state transition", depth: 1, status: "active", evidence: 2, confidence: .8, agents: ["langgraph-decider"] },
     ] } }]);
-    expect(tree).toContain("PLAN::MATRIX  [PLANNING] [SUBSYSTEM]");
-    expect(tree).toContain("CALLS  █░░░░░░░░░ 3/24");
+    expect(tree).toContain("PLAN  planning · subsystem");
+    expect(tree).toContain("3 calls");
     expect(tree).toContain("└─ ▶ p2  Session handoff");
     expect(tree).toContain("state transition");
-    expect(tree).toContain("[LOD:1] [STATUS:ACTIVE] [EVIDENCE:2] [CONF:80%] [DECIDER]");
+    expect(tree).toContain("active · depth 1 · 2 evidence DECIDER");
   });
 
   it("keeps the most recently started execution visible when runs overlap", () => {
