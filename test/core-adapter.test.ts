@@ -613,17 +613,19 @@ describe("progressive planning graph", () => {
     ]);
   });
 
-  it("stops automatically at the cumulative run budget", async () => {
+  it("does not discard work at cumulative model-usage targets", async () => {
     const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
     const calls: string[] = [];
     const runtime = { call: async (input: { node: string }) => {
       calls.push(input.node);
-      return { text: "", usage: { turns: 24, input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, structured: { route: "planned_change", scope: "local", goal: "bounded", questions: ["What must change?"] } };
+      if (input.node === "classify") return { text: "", usage: { turns: 24, input: 100_001, output: 1, reasoning: 0, cacheRead: 1_000_001, cacheWrite: 0, cost: .031 }, structured: { route: "direct_change", scope: "local", goal: "bounded" } };
+      if (input.node === "implement:p1") return { text: "", structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [] }, tools: [{ tool: "edit" }] };
+      if (input.node === "verify") return { text: "", structured: { verdict: "pass", checks: [] } };
+      throw new Error(`unexpected node ${input.node}`);
     } };
     const completed = await configured.graph.invoke(configured.initial({ task: "bounded", directory: "/repo", worktree: "/repo", runId: "global-stop" }), { configurable: { thread_id: "global-stop", langgraphOpenCodeRuntime: runtime, ...verifierWorkspace } });
-    expect(calls).toEqual(["classify"]);
-    expect(configured.progress?.(completed)?.phase).toBe("failed");
-    expect(configured.result?.(completed)).toContain("Stopped automatically");
+    expect(calls).toEqual(["classify", "implement:p1", "verify"]);
+    expect(configured.progress?.(completed)?.phase).toBe("completed");
   });
 
   it("replans an implementation quantum that produced no mutation", async () => {

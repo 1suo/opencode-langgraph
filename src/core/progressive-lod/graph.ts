@@ -254,9 +254,7 @@ function resumeAfterCallBudget(state: ProgressiveLodState, role: PendingBudget["
 
 function globalBudgetStop(state: ProgressiveLodState): string | undefined {
   const checks: Array<[string, number, number]> = [
-    ["calls", state.callsUsed, state.budget.calls], ["turns", state.usage.turns, state.budget.maxTurns],
-    ["input tokens", state.usage.input, state.budget.maxInputTokens], ["cache-read tokens", state.usage.cacheRead, state.budget.maxCacheReadTokens],
-    ["cost", state.usage.cost, state.budget.maxCost], ["minutes", (Date.now() - state.startedAt) / 60_000, state.budget.minutes],
+    ["calls", state.callsUsed, state.budget.calls], ["minutes", (Date.now() - state.startedAt) / 60_000, state.budget.minutes],
   ];
   const exceeded = checks.find(([, used, limit]) => used >= limit);
   return exceeded ? `${exceeded[0]} ${exceeded[1]}/${exceeded[2]}` : undefined;
@@ -295,7 +293,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("guard", (state: ProgressiveLodState) => {
       if (state.result || state.phase === "failed") return {};
       const globalStop = globalBudgetStop(state);
-      if (globalStop) return { resumeRole: undefined, phase: "failed", result: `Stopped automatically at the ${state.profile?.scope ?? "unknown"} run budget: ${globalStop}.` };
+      if (globalStop) return { resumeRole: undefined, phase: "failed", result: `Stopped automatically at the ${state.profile?.scope ?? "unknown"} controller safety limit: ${globalStop}.` };
       const active = state.plan.find((node) => node.id === state.activeNodeId);
       if (active && active.contextCycles >= state.budget.contextCyclesPerNode) return { resumeRole: undefined, phase: "failed", result: `Planning stopped after ${active.contextCycles} context cycles for ${active.id}; no bounded implementation contract was reached.` };
       return {};
