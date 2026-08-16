@@ -230,7 +230,7 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     network.constraints.push(constraint); region.constraintIds.push(constraint.id); changed = true;
   }
   if (region.delivery === "answer" && delta.answer && delta.answer !== region.answer) { region.answer = normalize(delta.answer); changed = true; }
-  if (delta.actionable && region.acceptanceCriteria.length && region.candidateIds.length) { region.status = "actionable"; changed = true; }
+  if (!resolvedAnswer && delta.actionable && region.acceptanceCriteria.length && region.candidateIds.length) { region.status = "actionable"; changed = true; }
   if (changed) network.revision++;
   for (const request of delta.activations) addActivation(network, { ...request, regionId: request.regionId ?? region.id, contextRefs: request.contextRefs, senderActivationId: activation.id });
   return propagateNetwork(network);

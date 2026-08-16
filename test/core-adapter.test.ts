@@ -345,6 +345,20 @@ describe("solution LOD reducer", () => {
     expect(scheduled.network.activations).toHaveLength(1);
   });
 
+  it("keeps a directly-resolved answer verified even when the delta also claims actionable", () => {
+    const current = state();
+    const network = mergeSolutionDelta(current, "a1", {
+      region: { delivery: "answer" },
+      evidence: [{ text: "The section is already fully implemented", source: "TODO.md:1", kind: "repository" }],
+      candidates: [], constraints: [], select: [], actionable: true, activations: [],
+      resolvedAnswer: { answer: "Already complete.", acceptanceCriteria: ["confirmed implemented"], evidenceRefs: ["TODO.md:1"] },
+    });
+    expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "verified", answer: "Already complete." });
+    network.activations[0].status = "completed";
+    const scheduled = ensureRunnableWork(network);
+    expect(scheduled.done).toBe(true);
+  });
+
   it("allows independent regions to remain at different LODs", () => {
     const current = state();
     current.network = mergeSolutionDelta(current, "a1", {
