@@ -116,7 +116,7 @@ One implementation leaf contains tightly coupled production code, focused tests,
 | subsystem | 24 | 12 | 3 | 2 | 2 | 48 | 250k | 3m | $0.08 |
 | architectural/unknown | 40 | 16 | 3 | 2 | 2 | 80 | 500k | 6m | $0.15 |
 
-Every role has a scheduling quantum for turns, fresh input, cache reads, and live context. The default implementer quantum is 32 turns; scout 16 with 96,000 live-context tokens; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a quantum reached on its final turn. A quantum reached while still busy aborts that child call; the controller then expands all allowances for that role concern together and automatically forks the child session. Usage remains visible as telemetry and never pauses the user workflow.
+Every role has a scheduling quantum for turns, fresh input, cache reads, and live context. The default implementer quantum is 8 turns; scout 16 with 96,000 live-context tokens; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a quantum reached on its final turn. A busy implementer is continued only after producing a mutation; otherwise its leaf is returned for replanning. Other exhausted role quanta expand automatically. Usage remains visible as telemetry and never pauses the user workflow.
 
 The verifier's shell and tests run in a connector-owned copy of the complete visible worktree with live Git metadata excluded. The copy survives an internal verifier reschedule and is removed after a verdict, failure, or cancellation. Post-repair verification starts a fresh session and fresh copy.
 
@@ -134,7 +134,7 @@ export default defineOpenCodeLangGraph({
       implementer: "inherit",
     },
     roleLimits: {
-      implementer: { maxTurns: 32, maxContextTokens: 96_000 },
+      implementer: { maxTurns: 8, maxContextTokens: 64_000 },
     },
     budgets: {
       subsystem: { calls: 24, maxCost: 0.08 },

@@ -92,7 +92,7 @@ describe("typed graph validation", () => {
     expect(definition.agents.decider).toMatchObject({ model: "decider-model", maxSteps: 2, tools: { read: false, bash: false } });
     expect(definition.agents.decider.opencodeAgent).toBe("langgraph-decider");
     expect(definition.agents.verifier).toMatchObject({ model: "verifier-model", maxSteps: 12, tools: { bash: true, edit: false } });
-    expect(definition.agents.implementer).toMatchObject({ model: "implementer-model", maxSteps: 32, tools: { task: false } });
+    expect(definition.agents.implementer).toMatchObject({ model: "implementer-model", maxSteps: 8, tools: { task: false } });
     const file = writeConnectorConfig(project);
     expect(path.relative(project, file)).toBe(typedConfigFile);
     expect(fs.readFileSync(file, "utf8")).toContain('preset: "progressive-lod"');
@@ -552,6 +552,29 @@ describe("progressive planning graph", () => {
       expect.objectContaining({ maxTurns: 16, maxCacheReadTokens: 800_000, maxContextTokens: 96_000 }),
       expect.objectContaining({ maxTurns: 32, maxCacheReadTokens: 1_600_000, maxContextTokens: 192_000 }),
     ]);
+  });
+
+  it("replans an implementation quantum that produced no mutation", async () => {
+    const configured = progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", implementerAgent: "implementer", verifierAgent: "verifier", checkpointer: new MemorySaver() });
+    const prompts: string[] = [];
+    let implementations = 0;
+    const runtime = { call: async (input: { node: string; prompt: string; limits?: { maxTurns?: number } }) => {
+      if (input.node === "classify") return { text: "", structured: { route: "planned_change", scope: "local", goal: "bounded", questions: ["What must change?"] } };
+      if (input.node === "scout:p1") return { text: "", structured: { facts: [], constraints: [], unknowns: [] } };
+      if (input.node === "decide:p1") return { text: "", structured: decisionValue("ready", { objective: "change one file", targets: ["src/a.ts"], acceptanceCriteria: ["works"], verification: ["npm test"] }) };
+      if (input.node === "implement:p1") {
+        prompts.push(input.prompt);
+        implementations++;
+        if (implementations === 1) return { text: "", sessionId: "stalled", tools: [{ tool: "read", status: "completed" }], budgetStop: { kind: "budget", metric: "turns", used: 8, limit: 8 } };
+        return { text: "", sessionId: "completed", structured: { status: "completed", changedFiles: ["src/a.ts"], checks: [] } };
+      }
+      if (input.node === "verify") return { text: "", structured: { verdict: "pass", checks: [] } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const completed = await configured.graph.invoke(configured.initial({ task: "large original task", directory: "/repo", worktree: "/repo", runId: "no-progress" }), { recursionLimit: 64, configurable: { thread_id: "no-progress", langgraphOpenCodeRuntime: runtime, ...verifierWorkspace } });
+    expect(configured.progress?.(completed)?.phase).toBe("completed");
+    expect(implementations).toBe(2);
+    expect(prompts.every((prompt) => !prompt.includes("large original task"))).toBe(true);
   });
 
   it("retains an isolated verifier workspace only across a budget resume", async () => {

@@ -47,7 +47,7 @@ export default defineOpenCodeLangGraph({
   preset: "progressive-lod",
   options: {
     models: { scout: "deepseek/deepseek-v4-flash", verifier: "inherit" },
-    roleLimits: { implementer: { maxTurns: 32, maxCost: 0.08 } },
+    roleLimits: { implementer: { maxTurns: 8, maxCost: 0.08 } },
   },
 })
 ```

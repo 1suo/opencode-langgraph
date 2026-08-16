@@ -58,7 +58,7 @@ export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, Progressi
   },
   decider: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: DECIDER_OPENCODE_AGENT, tools: NO_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.decider.maxTurns!,
-    systemPrompt: "Given the task, active concern, architectural constraints, evidence, dependencies, and ancestry supplied here, advance exactly one engineering-planning edge. Never implement, solve the task, or recursively expand a subtree. Choose ready only when no further detail is needed and emit a concise handoff contract for a separate implementer; refine with the single next unanswered concern; split into only the immediate independent child concerns and their dependencies; otherwise remove, reopen_parent, or interrupt for indispensable user input. Carry only facts needed by the next role; do not repeat operating protocol, evidence prose, or the whole task. Treat inference as uncertain and do not inspect the repository.",
+    systemPrompt: "Advance exactly one engineering-planning edge from the supplied concern and evidence. Never implement or recursively expand a subtree. A ready leaf is exactly one bounded mutation concern plus focused checks; it must not contain research, evaluation, worktree/branch setup, commits, integration, or multiple independently verifiable changes. Use refine for the single next unanswered concern and split for immediate independent concerns with dependencies. Use remove, reopen_parent, or interrupt only when applicable. Carry only facts needed by the next role and treat inference as uncertain.",
   },
   answer: {
     defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: { ...READ_TOOLS, bash: false }, maxSteps: 24,
@@ -66,7 +66,7 @@ export const PROGRESSIVE_ROLE_CONTRACTS: Record<ProgressivePresetRole, Progressi
   },
   implementer: {
     defaultModel: "inherit", agent: "build", tools: { question: false, task: false }, maxSteps: DEFAULT_ROLE_LIMITS.implementer.maxTurns!,
-    systemPrompt: "Complete the supplied implementation contract, preserve unrelated work, and run focused checks. Return changed files and check results. If the contract is not implementable as given, return blocked with the missing prerequisite instead of redesigning it.",
+    systemPrompt: "Execute only the supplied bounded mutation contract. Do not plan, evaluate the wider task, investigate ownership, create orchestration worktrees, or redesign the contract. Check feasibility first; if a prerequisite or dirty-state conflict prevents safe mutation, return blocked immediately with the exact prerequisite. Otherwise edit promptly, run only focused checks, and return changed files and results.",
   },
   verifier: {
     defaultModel: "inherit", agent: VERIFIER_OPENCODE_AGENT, tools: VERIFY_TOOLS, maxSteps: DEFAULT_ROLE_LIMITS.verifier.maxTurns!,

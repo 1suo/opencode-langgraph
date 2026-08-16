@@ -122,8 +122,8 @@ function leafPayload(state: ProgressiveLodState, node: PlanNode): Record<string,
   for (const id of node.dependencies) { ids.add(id); for (const leaf of dependencyLeaves(state, id)) ids.add(leaf.id); }
   const evidenceIds = new Set(state.plan.filter((item) => ids.has(item.id)).flatMap((item) => item.evidenceIds));
   return {
-    task: state.originalTask, leafId: node.id, contract: node.leaf,
-    grounding: state.evidence.filter((item) => evidenceIds.has(item.id)).map(({ claim, source, kind }) => ({ text: claim, source, kind })),
+    leafId: node.id, contract: node.leaf,
+    grounding: state.evidence.filter((item) => evidenceIds.has(item.id) && item.kind === "repository").slice(0, 5).map(({ claim, source }) => ({ text: claim, source, kind: "repository" })),
     issues: state.plan.filter((item) => ids.has(item.id)).flatMap((item) => item.replanIssues ?? []),
     constraints: state.constraints.filter((item) => !item.nodeId || ids.has(item.nodeId)).map(({ text }) => text),
     dependencies: node.dependencies.map((id) => { const dependency = state.plan.find((item) => item.id === id); return { id, title: dependency?.title, leaves: dependencyLeaves(state, id).map((leaf) => { const result = state.implementationResults[leaf.id]; return { id: leaf.id, title: leaf.title, contract: leaf.leaf, artifacts: result ? { changedFiles: result.changedFiles, checks: result.checks } : undefined }; }) }; }),
@@ -177,6 +177,10 @@ function implementationResult(raw: z.infer<typeof ImplementationResultSchema>): 
   const passed = raw.checks.filter((check) => check.passed).length;
   const summary = raw.status === "blocked" ? `Blocked: ${raw.blocker ?? "missing prerequisite"}` : `Changed ${raw.changedFiles.length} file${raw.changedFiles.length === 1 ? "" : "s"}; ${passed}/${raw.checks.length} reported checks passed.`;
   return { ...raw, blocker: raw.blocker ?? "", summary };
+}
+
+function madeMutation(result: AgentCallResult): boolean {
+  return (result.tools ?? []).some((trace) => ["edit", "write", "apply_patch"].includes(trace.tool));
 }
 
 function verificationResult(raw: z.infer<typeof VerificationSchema>, leafCount: number): VerificationOutput {
@@ -297,7 +301,11 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const existing = state.implementationSessions[leaf.id];
       const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: grantedCallLimits(state, "implementer", leaf.id), session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, validateStructured: (value) => ImplementationResultSchema.parse(value), prompt: JSON.stringify(leafPayload(state, leaf)) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1; const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? existing };
-      if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, ...resumeAfterCallBudget(state, "implementer", leaf.id) };
+      if (result.budgetStop && madeMutation(result)) return { usage, callsUsed, implementationSessions: sessions, ...resumeAfterCallBudget(state, "implementer", leaf.id) };
+      if (result.budgetStop) {
+        const output = implementationResult({ status: "blocked", changedFiles: [], checks: [], blocker: `Implementer exhausted ${result.budgetStop.metric} without producing a mutation; the contract requires replanning.` });
+        return { usage, callsUsed, implementationSessions: sessions, implementationResults: { ...state.implementationResults, [leaf.id]: output }, resumeFromAbortedSession: false, activeLeafId: undefined, plan: state.plan.map((node) => node.id === leaf.id ? { ...node, status: "failed" as const } : node), phase: "implementation-blocked" };
+      }
       const output = implementationResult(structured(result, ImplementationResultSchema, "implement"));
       return { usage, callsUsed, implementationSessions: sessions, implementationResults: { ...state.implementationResults, [leaf.id]: output }, resumeFromAbortedSession: false, activeLeafId: undefined, plan: state.plan.map((node) => node.id === leaf.id ? { ...node, status: output.status === "completed" ? "implemented" as const : "failed" as const } : node), phase: output.status === "completed" ? "selecting-leaf" : "implementation-blocked" };
     })
