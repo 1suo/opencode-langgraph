@@ -9,6 +9,8 @@ if (!task) {
   process.exit(2);
 }
 
+process.env.PONYTAIL_DEFAULT_MODE = "off";
+
 const server = await createOpencodeServer({
   port: 0,
   timeout: 30000,

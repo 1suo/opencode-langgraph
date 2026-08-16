@@ -136,7 +136,7 @@ export const SolutionDeltaSchema = z.object({
   candidates: z.array(z.object({
     key: z.string().min(1), proposition: z.string().min(1), outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible"),
     reasons: z.array(z.string()).default([]), evidenceRefs: z.array(z.string()).default([]), nextLod: z.array(ConditionalRegionSchema).default([]).describe("Follow-up work this candidate still needs: 'refines' for a decision that can only be made once it is chosen, 'partOf' for an independent deliverable piece. Never list routine steps, files, tests, or verification — those run automatically after the work is implemented."),
-  })).default([]),
+  })).default([]).describe("Mutually exclusive alternatives to the same goal — exactly one is chosen. Coexisting deliverables that all must be built are NOT candidates; attach them as 'partOf' follow-up pieces to the winning candidate."),
   constraints: z.array(z.object({ kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]), subject: z.string().min(1), target: z.string().min(1), reason: z.string().default("") })).default([]).describe("Dependencies between candidates: 'requires' (one needs another), 'excludes' (mutually incompatible), 'supports' (one strengthens another), 'refutes' (one contradicts another), 'equivalent' (interchangeable)."),
   select: z.array(z.string()).default([]),
   actionable: z.boolean().optional(),
