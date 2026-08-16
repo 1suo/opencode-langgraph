@@ -60,10 +60,16 @@ const progress = configured.progress?.(result);
 console.log(`\n=== RESULT ===`);
 console.log(configured.result?.(result));
 console.log(`\n=== PHASE: ${progress?.phase} ===`);
-const network = (result as { network: { regions: unknown[]; constraints: unknown[]; activations: unknown[] } }).network;
+const network = (result as { network: { regions: unknown[]; candidates: unknown[]; constraints: unknown[]; activations: unknown[] } }).network;
 console.log(`regions=${network.regions.length} constraints=${network.constraints.length} activations=${network.activations.length}`);
-for (const region of network.regions as Array<{ id: string; lod: number; status: string; delivery: string; selectedCandidateIds: string[] }>) {
-  console.log(`  region ${region.id} lod=${region.lod} status=${region.status} delivery=${region.delivery} selected=${region.selectedCandidateIds.length}`);
+for (const region of network.regions as Array<{ id: string; lod: number; status: string; delivery: string; selectedCandidateIds: string[]; contradiction?: string }>) {
+  console.log(`  region ${region.id} lod=${region.lod} status=${region.status} delivery=${region.delivery} selected=${region.selectedCandidateIds.length}${region.contradiction ? ` contradiction="${region.contradiction.slice(0, 100)}"` : ""}`);
+}
+for (const candidate of network.candidates as Array<{ id: string; regionId: string; status: string; proposition: string; eliminationReasons: string[]; nextLod: unknown[] }>) {
+  console.log(`  candidate ${candidate.id} [${candidate.status}] nextLod=${candidate.nextLod.length} | ${candidate.proposition.slice(0, 70)}${candidate.eliminationReasons.length ? ` << ${candidate.eliminationReasons.join("; ").slice(0, 90)}` : ""}`);
+}
+for (const constraint of network.constraints as Array<{ kind: string; subject: string; target: string; reason: string }>) {
+  console.log(`  constraint ${constraint.kind}: ${constraint.subject} -> ${constraint.target} (${constraint.reason.slice(0, 60)})`);
 }
 
 await server.close();

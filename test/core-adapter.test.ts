@@ -559,17 +559,17 @@ describe("solution LOD reducer", () => {
     expect(network.regions[0]).toMatchObject({ status: "actionable", selectedCandidateIds: ["r1:a", "r1:b", "r1:c"] });
   });
 
-  it("keeps distinct candidates whose normalized keys collide", () => {
+  it("merges candidates whose keys normalize to the same slug instead of duplicating them", () => {
     const current = state();
     const network = mergeSolutionDelta(current, "a1", {
       region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false,
       candidates: [
         { key: "auth service", proposition: "Auth service", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
-        { key: "auth-service", proposition: "Auth-service component", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "auth-service", proposition: "Auth service, refined", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
       ], constraints: [], select: [],
     });
-    expect(network.candidates).toHaveLength(2);
-    expect(network.candidates.map((candidate) => candidate.proposition).sort()).toEqual(["Auth service", "Auth-service component"]);
+    expect(network.candidates).toHaveLength(1);
+    expect(network.candidates[0]).toMatchObject({ id: "r1:auth-service", proposition: "Auth service, refined" });
   });
 });
 

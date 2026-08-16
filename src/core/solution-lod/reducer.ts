@@ -26,12 +26,6 @@ function candidateId(regionId: string, key: string): string {
   const normalized = normalize(key);
   return normalized.startsWith(`${regionId}:`) ? `${regionId}:${slug(normalized.slice(regionId.length + 1))}` : `${regionId}:${slug(normalized)}`;
 }
-function uniqueCandidateId(network: SolutionNetwork, regionId: string, key: string): string {
-  const base = candidateId(regionId, key);
-  const owner = network.candidates.find((item) => item.id === base);
-  if (!owner || normalize(owner.key) === normalize(key)) return base;
-  return `${base}-${createHash("sha256").update(normalize(key)).digest("hex").slice(0, 6)}`;
-}
 function candidateRef(network: SolutionNetwork, regionId: string, ref: string): string {
   if (knownRef(network, ref)) return ref;
   return candidateId(regionId, ref);
@@ -182,7 +176,7 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     region.evidenceIds = [...new Set([...region.evidenceIds, evidence.id])]; localEvidence.set(item.source, evidence.id);
   }
   for (const item of resolvedAnswer ? [] : delta.candidates) {
-    const id = uniqueCandidateId(network, region.id, item.key);
+    const id = candidateId(region.id, item.key);
     let candidate = network.candidates.find((existing) => existing.id === id);
     const evidenceIds = item.evidenceRefs.map((ref) => localEvidence.get(ref) ?? ref).filter((ref) => network.evidence.some((evidence) => evidence.id === ref));
     if (!candidate) {

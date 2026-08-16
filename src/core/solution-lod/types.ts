@@ -123,7 +123,7 @@ export const DEFAULT_SOLUTION_ROLE_LIMITS: SolutionRoleLimits = {
 };
 
 const ConditionalRegionSchema = z.object({
-  key: z.string().min(1), objective: z.string().min(1), edge: z.enum(["refines", "partOf"]),
+  key: z.string().min(1), objective: z.string().min(1), edge: z.enum(["refines", "partOf"]).describe("'refines' for a finer decision about the same candidate; 'partOf' for an independent deliverable piece."),
   delivery: z.enum(["answer", "change"]).optional(), allowedVariables: z.array(z.string()).default([]), acceptanceCriteria: z.array(z.string()).default([]),
 });
 
@@ -135,9 +135,9 @@ export const SolutionDeltaSchema = z.object({
   evidence: z.array(z.object({ text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference") })).default([]),
   candidates: z.array(z.object({
     key: z.string().min(1), proposition: z.string().min(1), outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible"),
-    reasons: z.array(z.string()).default([]), evidenceRefs: z.array(z.string()).default([]), nextLod: z.array(ConditionalRegionSchema).default([]).describe("Decisions that can only be made after this approach is chosen. Never list implementation steps, files, components, or tests here."),
+    reasons: z.array(z.string()).default([]), evidenceRefs: z.array(z.string()).default([]), nextLod: z.array(ConditionalRegionSchema).default([]).describe("Follow-up work this candidate still needs: 'refines' for a decision that can only be made once it is chosen, 'partOf' for an independent deliverable piece. Never list routine steps, files, tests, or verification — those run automatically after the work is implemented."),
   })).default([]),
-  constraints: z.array(z.object({ kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]), subject: z.string().min(1), target: z.string().min(1), reason: z.string().default("") })).default([]),
+  constraints: z.array(z.object({ kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]), subject: z.string().min(1), target: z.string().min(1), reason: z.string().default("") })).default([]).describe("Dependencies between candidates: 'requires' (one needs another), 'excludes' (mutually incompatible), 'supports' (one strengthens another), 'refutes' (one contradicts another), 'equivalent' (interchangeable)."),
   select: z.array(z.string()).default([]),
   actionable: z.boolean().optional(),
   answer: z.string().optional(),
