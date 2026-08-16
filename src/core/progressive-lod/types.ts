@@ -117,7 +117,7 @@ export interface ProgressiveRoleLimits {
 
 export const DEFAULT_ROLE_LIMITS: ProgressiveRoleLimits = {
   classifier: { maxTurns: 2, maxInputTokens: 16_000, maxCacheReadTokens: 64_000, maxContextTokens: 48_000 },
-  scout: { maxTurns: 8, maxInputTokens: 64_000, maxCacheReadTokens: 400_000, maxContextTokens: 48_000 },
+  scout: { maxTurns: 16, maxInputTokens: 128_000, maxCacheReadTokens: 800_000, maxContextTokens: 96_000 },
   decider: { maxTurns: 2, maxInputTokens: 20_000, maxCacheReadTokens: 100_000, maxContextTokens: 48_000 },
   implementer: { maxTurns: 32, maxInputTokens: 180_000, maxCacheReadTokens: 2_000_000, maxContextTokens: 96_000 },
   verifier: { maxTurns: 12, maxInputTokens: 90_000, maxCacheReadTokens: 800_000, maxContextTokens: 64_000 },

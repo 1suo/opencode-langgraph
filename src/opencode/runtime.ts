@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
-import type { AgentBudgetStop, AgentCall, AgentCallLimits, AgentCallResult, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition } from "../core/types.js";
+import type { AgentBudgetStop, AgentCall, AgentCallLimits, AgentCallResult, AgentPromptTrace, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition } from "../core/types.js";
 import { registerPermissionHandler } from "./permissions.js";
 
 export interface OpenCodeRuntimeOptions {
@@ -13,7 +13,7 @@ export interface OpenCodeRuntimeOptions {
   worktree: string;
   signal: AbortSignal;
   ask?: (input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) => Promise<void>;
-  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; sessionId?: string; usage?: AgentUsage }) => void;
+  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; sessionId?: string; usage?: AgentUsage; prompt?: AgentPromptTrace }) => void;
 }
 
 function modelId(value: string): { providerID: string; modelID: string } {
@@ -105,6 +105,14 @@ function parseCommandStructured(output: string): unknown {
   return JSON.parse((fenced ?? output).trim());
 }
 
+function promptTrace(system: string, input: string, schema?: Record<string, unknown>): AgentPromptTrace {
+  return {
+    system,
+    input,
+    ...(schema ? { schemaInstruction: `Return only a JSON value matching this JSON Schema. Do not use Markdown fences:\n${JSON.stringify(schema)}` } : {}),
+  };
+}
+
 async function commandCall(command: string, args: string[], env: Record<string, string> | undefined, cwd: string, prompt: string, signal: AbortSignal): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"], signal });
@@ -126,10 +134,11 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     if (!agent) throw new Error(`Unknown LangGraph connector agent: ${input.agent}`);
     const model = this.options.definition.models[agent.model];
     if (!model) throw new Error(`Agent ${input.agent} references unknown model ${agent.model}`);
-    this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: agent.model, state: input.state });
+    const composedPrompt = promptTrace(agent.systemPrompt, input.prompt, input.schema);
     if (model.backend === "command") {
-      const schemaInstruction = input.schema ? `\n\nReturn only JSON matching this JSON Schema:\n${JSON.stringify(input.schema)}` : "";
-      const output = await commandCall(model.command, model.args ?? [], model.env, this.options.worktree, `${agent.systemPrompt}\n\n${input.prompt}${schemaInstruction}`, this.options.signal);
+      this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: agent.model, state: input.state, prompt: composedPrompt });
+      const schemaInstruction = composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : "";
+      const output = await commandCall(model.command, model.args ?? [], model.env, this.options.worktree, `${composedPrompt.system}\n\n${composedPrompt.input}${schemaInstruction}`, this.options.signal);
       if (!output) throw new Error(`Command agent ${input.agent} returned no output`);
       this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: agent.model, text: output, state: input.state });
       return { text: output, structured: input.schema ? parseCommandStructured(output) : undefined };
@@ -167,7 +176,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     const baselineUsage = sessionUsage(before.data);
     const baselineMessageIds = new Set(before.data.flatMap((message) => message.info.id ? [message.info.id] : []));
     const baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
-    this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId });
+    this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId, prompt: composedPrompt });
     const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory: this.options.directory } }); };
     const unregisterPermission = registerPermissionHandler(sessionId, async (permission) => {
       const patterns = Array.isArray(permission.pattern) ? permission.pattern : permission.pattern ? [permission.pattern] : ["*"];
@@ -181,16 +190,16 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     });
     this.options.signal.addEventListener("abort", abort, { once: true });
     try {
-      const schemaInstruction = input.schema ? `\n\nReturn only a JSON value matching this JSON Schema. Do not use Markdown fences:\n${JSON.stringify(input.schema)}` : "";
+      const schemaInstruction = composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : "";
       await this.options.plugin.client.session.promptAsync({
         path: { id: sessionId },
         query: { directory: this.options.directory },
         body: {
           agent: agent.opencodeAgent,
           model: selected,
-          system: agent.systemPrompt,
+          system: composedPrompt.system,
           tools: agent.tools,
-          parts: [{ type: "text", text: `${input.prompt}${schemaInstruction}` }],
+          parts: [{ type: "text", text: `${composedPrompt.input}${schemaInstruction}` }],
         } as never,
         throwOnError: true,
       });

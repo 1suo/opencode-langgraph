@@ -46,6 +46,7 @@ export interface GraphControls {
   nodes(): void;
   output(): void;
   state(): void;
+  prompt(): void;
   previous(): void;
   next(): void;
   inspect(): void;
@@ -69,6 +70,7 @@ export function graphNavigationLayer(controls: GraphControls) {
       { name: "langgraph.view.nodes", title: "LangGraph: focus executions", run: controls.nodes },
       { name: "langgraph.view.output", title: "LangGraph: focus output", run: controls.output },
       { name: "langgraph.view.state", title: "LangGraph: inspect state", run: controls.state },
+      { name: "langgraph.view.prompt", title: "LangGraph: inspect effective prompt", run: controls.prompt },
       { name: "langgraph.node.previous", title: "LangGraph: previous execution", run: controls.previous },
       { name: "langgraph.node.next", title: "LangGraph: next execution", run: controls.next },
       { name: "langgraph.node.inspect", title: "LangGraph: inspect execution", run: controls.inspect },
@@ -92,6 +94,8 @@ export function graphNavigationLayer(controls: GraphControls) {
       { key: "3", cmd: "langgraph.view.output" },
       { key: "o", cmd: "langgraph.view.output" },
       { key: "t", cmd: "langgraph.view.state" },
+      { key: "4", cmd: "langgraph.view.prompt" },
+      { key: "p", cmd: "langgraph.view.prompt" },
       { key: "return", cmd: "langgraph.node.inspect" },
       { key: "up", cmd: "langgraph.navigate.up" },
       { key: "k", cmd: "langgraph.navigate.up" },
@@ -138,6 +142,11 @@ function executionState(event: PluginRunEvent): string {
   const progress = event.progress;
   const active = progress?.nodes.find((node) => node.id === progress.activeNodeId);
   return [progress?.phase, active ? `${active.id} ${active.title}` : progress?.scope, event.agent !== "langgraph" ? event.agent : event.runId].filter(Boolean).join(" · ");
+}
+
+export function effectivePrompt(event: PluginRunEvent | undefined): string {
+  if (!event?.prompt) return "No effective prompt captured for this execution.";
+  return [`SYSTEM\n${event.prompt.system}`, `INPUT\n${event.prompt.input}`, event.prompt.schemaInstruction ? `OUTPUT CONTRACT\n${event.prompt.schemaInstruction}` : ""].filter(Boolean).join("\n\n");
 }
 
 export function renderEventGraph(events: PluginRunEvent[], activeGlyph = "▶", focus?: number): AsciiGraph {
@@ -394,10 +403,10 @@ export function graphHelpText(): string {
 
 USE
 /graph-select choose · /graph-toggle auto
-/run-graph <task> once · /graph-cancel stop
+/run-graph <task> once · /graph-resume <answer> · /graph-cancel stop
 
 VIEW
-1 plan · G run graph · 2 executions · 3 output · T state
+1 plan · G run graph · 2 executions · 3 output · 4 prompt · T state
 
 DESIGN · .opencode/langgraph.ts
 1. Annotation.Root → StateGraph → compile(checkpointer)
@@ -462,13 +471,18 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const [selected, setSelected] = createSignal(initialSelection(events()));
   const layout = createMemo(() => renderEventGraph(events(), spinner(), selected()));
   const [pane, setPane] = createSignal<"plan" | "topology" | "nodes" | "output">(planTree() ? "plan" : "topology");
-  const [detail, setDetail] = createSignal<"output" | "state">("output");
+  const [detail, setDetail] = createSignal<"output" | "state" | "prompt">("output");
   const [keymapReady, setKeymapReady] = createSignal(false);
   let canvas: BoxRenderable | undefined;
   let outputBox: ScrollBoxRenderable | undefined;
   let planBox: ScrollBoxRenderable | undefined;
   const theme = () => props.api.theme.current;
   const selectedEvent = createMemo(() => nodes()[Math.min(selected(), Math.max(0, nodes().length - 1))]);
+  const selectedPromptEvent = createMemo(() => {
+    const item = selectedEvent();
+    if (!item) return;
+    return events().findLast((event) => event.runId === item.runId && event.node === item.node && Boolean(event.prompt) && (!item.sessionId || event.sessionId === item.sessionId));
+  });
   const activatePane = (value: "plan" | "topology" | "nodes" | "output") => {
     setPane(value);
     props.api.renderer.requestRender();
@@ -501,6 +515,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     nodes: () => activatePane("nodes"),
     output: () => { setDetail("output"); activatePane("output"); outputBox?.scrollTo(0); },
     state: () => { setDetail("state"); activatePane("output"); outputBox?.scrollTo(0); },
+    prompt: () => { setDetail("prompt"); activatePane("output"); outputBox?.scrollTo(0); },
     previous: selectPrevious,
     next: selectNext,
     inspect: () => { if (pane() === "nodes") { activatePane("output"); outputBox?.scrollTo(0); } },
@@ -582,7 +597,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
               )}</For>
             </Show>
           </box>
-          <box onMouseUp={() => activatePane("output")} flexGrow={1} minHeight={8} border={true} borderColor={pane() === "output" ? theme().primary : theme().border} title={` ${detail().toUpperCase()} [${keyHint(["langgraph.view.output"], "3")}] · STATE [${keyHint(["langgraph.view.state"], "T")}] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column">
+          <box onMouseUp={() => activatePane("output")} flexGrow={1} minHeight={8} border={true} borderColor={pane() === "output" ? theme().primary : theme().border} title={` ${detail().toUpperCase()} · OUTPUT [${keyHint(["langgraph.view.output"], "3")}] · PROMPT [${keyHint(["langgraph.view.prompt"], "4")}] · STATE [${keyHint(["langgraph.view.state"], "T")}] · SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column">
             <Show when={selectedEvent()} fallback={<text fg={theme().textMuted}>Select an execution.</text>}>
               {(item) => <>
                 <box flexDirection="row" gap={1} flexShrink={0}>
@@ -590,7 +605,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
                   <text fg={theme().textMuted}>{item().agent} · {item().model}</text>
                 </box>
                 <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}>
-                  <text fg={theme().text}>{detail() === "output" ? item().text || (item().status === "active" ? `${spinner()} Model is running…` : "No model output captured for this execution.") : printable(item().state)}</text>
+                  <text fg={theme().text}>{detail() === "output" ? item().text || (item().status === "active" ? `${spinner()} Model is running…` : "No model output captured for this execution.") : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text>
                 </scrollbox>
               </>}
             </Show>

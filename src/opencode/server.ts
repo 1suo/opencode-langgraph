@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { Command, isInterrupted } from "@langchain/langgraph";
-import { tool, type Plugin, type PluginInput, type PluginModule } from "@opencode-ai/plugin";
+import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
 import { loadConnectorDefinition } from "../core/config.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
 import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
+import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT } from "../core/progressive-lod/roles.js";
+
+const PRESENTER_AGENT = CONNECTOR_PRESENTER.name;
 
 function messageModel(info: { role: string; model?: { providerID: string; modelID: string }; providerID?: string; modelID?: string }) {
   if (info.role === "user") return info.model;
@@ -27,13 +30,16 @@ export const server: Plugin = async (plugin) => {
   return {
     event: ({ event }) => forwardPermissionEvent(event),
     config: async (config) => {
+      config.agent ??= {};
+      config.agent[PRESENTER_AGENT] = { description: "Tool-free LangGraph lifecycle presenter", mode: "primary", hidden: true, prompt: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, maxSteps: CONNECTOR_PRESENTER.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
       config.command ??= {};
       config.command["run-graph"] = {
         description: "Run this task through the current session's LangGraph",
-        agent: "build",
+        agent: PRESENTER_AGENT,
         template: "$ARGUMENTS",
       };
-      config.command["graph-cancel"] = { description: "Cancel the active or queued LangGraph run", agent: "build", template: "Cancel the active LangGraph run." };
+      config.command["graph-resume"] = { description: "Resume the current paused LangGraph", agent: PRESENTER_AGENT, template: "$ARGUMENTS" };
+      config.command["graph-cancel"] = { description: "Cancel the active or queued LangGraph run", agent: PRESENTER_AGENT, template: "Cancel the active LangGraph run." };
     },
     "command.execute.before": async (input) => {
       if (input.command === "run-graph") manualMessages.add(input.sessionID);
@@ -64,6 +70,7 @@ export const server: Plugin = async (plugin) => {
       const parentModel = input.model ?? output.message.model;
       const interrupted = readLatestStoredRun(input.sessionID);
       if (!manual && interrupted?.status === "interrupted") {
+        output.message.agent = PRESENTER_AGENT;
         output.parts.push({ id: `prt_${randomUUID().replaceAll("-", "")}`, messageID: rootMessageID, sessionID: input.sessionID, type: "text", synthetic: true, text: "The LangGraph connector is resuming the paused graph with this answer. Reply briefly that it is resuming; do not perform the task yourself." });
         const controller = new AbortController();
         registerController(input.sessionID, controller);
@@ -74,6 +81,7 @@ export const server: Plugin = async (plugin) => {
         return;
       }
       if (!manual && graphState?.enabled !== true) return;
+      output.message.agent = PRESENTER_AGENT;
       output.parts.push({
         id: `prt_${randomUUID().replaceAll("-", "")}`,
         messageID: rootMessageID,
@@ -99,11 +107,7 @@ export const server: Plugin = async (plugin) => {
       if (graphState?.enabled !== true) return;
       const session = await plugin.client.session.get({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
       if (session.data.parentID) return;
-      output.system.push(`The OpenCode LangGraph connector runs a new graph for each user message while graph:on. A synthetic message contains its result or human-input request. Present that result directly and do not redo graph work. langgraph_run and langgraph_resume remain available for explicit manual control.`);
-    },
-    tool: {
-      langgraph_run: graphTool(plugin),
-      langgraph_resume: resumeTool(plugin),
+      output.system.push(CONNECTOR_ROOT_SYSTEM_PROMPT);
     },
   };
 };
@@ -127,7 +131,7 @@ async function postRootMessage(
   try {
     await plugin.client.session.promptAsync({
       path: { id: sessionID }, query: { directory: plugin.directory }, throwOnError: true,
-      body: { messageID, model, agent: "build", parts: [{ type: "text", text }] },
+      body: { messageID, model, agent: PRESENTER_AGENT, system: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, parts: [{ type: "text", text }] },
     });
   } catch (error) {
     internalMessages.delete(messageID);
@@ -296,48 +300,6 @@ async function executeResume(
     cancellation.dispose();
     lease?.release();
   }
-}
-
-function graphTool(plugin: PluginInput) {
-  return tool({
-    description: "Run a configured LangGraph workflow through OpenCode agents.",
-    args: {
-      task: tool.schema.string().min(1).describe("Complete task for the graph"),
-      graph: tool.schema.string().optional().describe("Configured graph name; defaults to the repository default"),
-    },
-    async execute(args, context) {
-      const parent = await plugin.client.session.message({
-        path: { id: context.sessionID, messageID: context.messageID },
-        query: { directory: context.directory },
-        throwOnError: true,
-      });
-      const parentModel = messageModel(parent.data.info);
-      const result = await executeGraph(plugin, {
-        task: args.task, graph: args.graph ?? readSessionGraphName(context.sessionID), rootSessionId: context.sessionID, userMessageId: context.messageID,
-        directory: context.directory, worktree: context.worktree, parentModel,
-        signal: context.abort, ask: context.ask, metadata: context.metadata,
-      });
-      return { title: result.interrupted ? "LangGraph · input required" : result.failed ? "LangGraph · verification failed" : `LangGraph · ${result.graph}`, output: result.interrupted ? `The graph is paused. Ask the user for this input, then call langgraph_resume with runId ${result.runId}:\n${result.output}` : result.output, metadata: { runId: result.runId, graph: result.graph, interrupted: result.interrupted, failed: result.failed } };
-    },
-  });
-}
-
-function resumeTool(plugin: PluginInput) {
-  return tool({
-    description: "Resume a paused LangGraph after the user has answered its human-in-the-loop request.",
-    args: {
-      runId: tool.schema.string().min(1),
-      answer: tool.schema.unknown().describe("User answer passed to LangGraph Command.resume"),
-    },
-    async execute(args, context) {
-      const saved = readStoredRun(args.runId);
-      if (saved.rootSessionId !== context.sessionID) throw new Error("LangGraph run belongs to a different OpenCode session");
-      if (saved.status !== "interrupted") throw new Error(`LangGraph run is ${saved.status}, not interrupted`);
-      const parent = await plugin.client.session.message({ path: { id: context.sessionID, messageID: context.messageID }, query: { directory: context.directory }, throwOnError: true });
-      const result = await executeResume(plugin, saved, args.answer, messageModel(parent.data.info), context.abort, context.ask);
-      return { title: result.interrupted ? "LangGraph · more input required" : result.failed ? "LangGraph · verification failed" : `LangGraph · ${saved.graph}`, output: result.interrupted ? `Ask the user, then call langgraph_resume again with runId ${saved.runId}:\n${result.output}` : result.output, metadata: { runId: saved.runId, interrupted: result.interrupted, failed: result.failed } };
-    },
-  });
 }
 
 const plugin: PluginModule = { id: "opencode-langgraph", server };

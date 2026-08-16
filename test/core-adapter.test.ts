@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, isInterrupted } from "@langchain/langgraph";
 import { describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { server } from "../src/opencode/server.js";
-import { graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
+import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
@@ -64,9 +65,10 @@ describe("typed graph validation", () => {
     const definition = await loadConnectorDefinition(project);
     expect(definition.defaultGraph).toBe("progressive-lod");
     expect(definition.models["scout-model"]).toEqual({ backend: "opencode", model: "deepseek/deepseek-v4-flash" });
+    expect(definition.models["decider-model"]).toEqual({ backend: "opencode", model: "deepseek/deepseek-v4-flash" });
     expect(definition.agents.classifier).toMatchObject({ model: "classifier-model", maxSteps: 2, tools: { read: false, grep: false, glob: false, bash: false } });
     expect(definition.agents.answer.model).toBe("answer-model");
-    expect(definition.agents.scout).toMatchObject({ model: "scout-model", maxSteps: 8, tools: { edit: false, task: false } });
+    expect(definition.agents.scout).toMatchObject({ model: "scout-model", maxSteps: 16, tools: { edit: false, task: false } });
     expect(definition.agents.decider).toMatchObject({ model: "decider-model", maxSteps: 2, tools: { read: false, bash: false } });
     expect(definition.agents.verifier).toMatchObject({ model: "verifier-model", maxSteps: 12 });
     expect(definition.agents.implementer).toMatchObject({ model: "implementer-model", maxSteps: 32, tools: { task: false } });
@@ -116,7 +118,7 @@ describe("OpenCode child-session runtime", () => {
     expect(calls[1].value).toMatchObject({ body: { agent: "plan", model: { providerID: "p", modelID: "m" }, system: "system", tools: { edit: false, question: false } } });
     expect(messagePolls).toBe(2);
     expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ node: "plan", status: "active", state: {} }),
+      expect.objectContaining({ node: "plan", status: "active", state: {}, prompt: { system: "system", input: "prompt" } }),
       expect.objectContaining({ node: "plan", status: "completed", text: "actual answer", state: {} }),
     ]));
   });
@@ -279,6 +281,8 @@ describe("progressive planning reducer", () => {
 
   it("deduplicates evidence and omits unrelated branch descriptions", () => {
     const current = state();
+    current.profile = { ...current.profile!, planningFrame: "DUPLICATED PLANNING FRAME" };
+    current.plan[0] = { ...current.plan[0], level: "DUPLICATED PLANNING FRAME", description: current.originalTask };
     const first = mergeResearch(current, { summary: "found", evidence: [{ claim: "entry", source: "src/a.ts:1", excerpt: "entry", kind: "repository", confidence: 1 }], constraints: [], unresolved: [] });
     const second = mergeResearch({ ...current, ...first }, { summary: "again", evidence: [{ claim: "entry", source: "src/a.ts:1", excerpt: "entry", kind: "repository", confidence: 1 }], constraints: [], unresolved: [] });
     expect(second.evidence).toHaveLength(1);
@@ -287,6 +291,7 @@ describe("progressive planning reducer", () => {
     const projection = JSON.stringify(branchProjection(current));
     expect(projection).toContain("active description");
     expect(projection).toContain('"title":"root"');
+    expect(projection).not.toContain("DUPLICATED PLANNING FRAME");
     expect(projection).not.toContain("UNRELATED FULL DESCRIPTION");
   });
 
@@ -339,6 +344,7 @@ describe("progressive planning graph", () => {
     expect(configured.progress?.(result)).toMatchObject({ phase: "completed", callsUsed: 10 });
     expect(calls.filter((call) => call.node.startsWith("implement:")).map((call) => call.node)).toEqual(["implement:p2", "implement:p3"]);
     expect(calls.filter((call) => call.node === "verify")).toHaveLength(1);
+    expect(calls.every((call) => { try { JSON.parse(call.prompt); return true; } catch { return false; } })).toBe(true);
     expect(calls.find((call) => call.node === "scout:p2")?.session).toEqual({ strategy: "fork", sessionId: "s-scout:p1" });
     expect(calls.find((call) => call.node === "scout:p3")?.prompt).not.toContain("BASE FULL DESCRIPTION");
     expect(configured.result?.(result)).toContain("all leaves verified");
@@ -438,6 +444,25 @@ describe("worktree queue", () => {
       if (prior === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME; else process.env.OPENCODE_LANGGRAPH_STATE_HOME = prior;
     }
   });
+
+  it("immediately recovers a lease whose owner process exited", async () => {
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-langgraph-dead-lock-"));
+    const prior = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    try {
+      const id = createHash("sha256").update(path.resolve("/repo")).digest("hex");
+      const root = path.join(stateHome, "opencode-langgraph", "locks", id);
+      fs.mkdirSync(path.join(root, "queue"), { recursive: true });
+      fs.writeFileSync(path.join(root, "owner"), JSON.stringify({ ticket: "dead", pid: 2_147_483_647 }));
+      const controller = new AbortController();
+      const started = Date.now();
+      const lease = await acquireWorktree("/repo", controller.signal);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      lease.release();
+    } finally {
+      if (prior === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME; else process.env.OPENCODE_LANGGRAPH_STATE_HOME = prior;
+    }
+  });
 });
 
 describe("durable checkpoints", () => {
@@ -500,10 +525,11 @@ describe("OpenCode automatic graph routing", () => {
     } };
     try {
       const hooks = await server({ client, directory: project, worktree: project } as never);
-      const config = {} as { command?: Record<string, unknown> };
+      const config = {} as { command?: Record<string, unknown>; agent?: Record<string, { tools?: Record<string, boolean>; maxSteps?: number }> };
       await hooks.config?.(config as never);
-      expect(Object.keys(config.command ?? {})).toEqual(["run-graph", "graph-cancel"]);
-      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_run", "langgraph_resume"]);
+      expect(Object.keys(config.command ?? {})).toEqual(["run-graph", "graph-resume", "graph-cancel"]);
+      expect(config.agent?.["langgraph-presenter"]).toMatchObject({ maxSteps: 1, tools: { read: false, bash: false, edit: false, task: false } });
+      expect(hooks.tool).toBeUndefined();
       const output = {
         message: { id: "message-1", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
         parts: [{ id: "part-1", messageID: "message-1", sessionID: "root", type: "text", text: "What is 2+2?" }],
@@ -523,11 +549,12 @@ describe("OpenCode automatic graph routing", () => {
       await hooks["chat.message"]?.({ sessionID: "root", messageID: "message-1" }, output as never);
       expect(output.parts.at(-1)).toMatchObject({ type: "text", synthetic: true });
       expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
+      expect(output.message.agent).toBe("langgraph-presenter");
       deadline = Date.now() + 2_000;
       while ((child < 4 || posted.length < 6) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
       expect(child).toBe(4);
       expect(posted).toHaveLength(6);
-      expect(posted.at(-1)).toMatchObject({ body: { agent: "build" } });
+      expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter", tools: { read: false, bash: false, edit: false, task: false } } });
       const events = readPluginEvents("root");
       expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "answer", "__end__"]));
       expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
@@ -597,6 +624,8 @@ describe("OpenCode graph viewer", () => {
     expect(graphHelpText()).toContain(".opencode/langgraph.ts");
     expect(graphHelpText()).toContain("defineGraph({ graph, initial, result, progress? })");
     expect(graphHelpText()).toContain("G run graph");
+    expect(graphHelpText()).toContain("4 prompt");
+    expect(effectivePrompt({ prompt: { system: "ROLE", input: '{"task":"x"}', schemaInstruction: "SCHEMA" } } as never)).toBe('SYSTEM\nROLE\n\nINPUT\n{"task":"x"}\n\nOUTPUT CONTRACT\nSCHEMA');
   });
 
   it("ships the TUI framework as runtime dependencies", () => {
@@ -626,7 +655,7 @@ describe("OpenCode graph viewer", () => {
 
     for (const [key, expected] of [
       ["q", "back"], ["tab", "cycle"], ["1", "graph"], ["2", "nodes"], ["o", "output"],
-      ["t", "state"], ["return", "inspect"], ["up", "up"], ["j", "down"], ["left", "left"],
+      ["4", "prompt"], ["t", "state"], ["return", "inspect"], ["up", "up"], ["j", "down"], ["left", "left"],
       ["d", "right"], ["pageup", "pageUp"], ["pagedown", "pageDown"], ["home", "home"], ["end", "end"],
     ] as const) {
       const binding = layer.bindings.find((candidate) => candidate.key === key);

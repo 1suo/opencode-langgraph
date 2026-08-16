@@ -10,11 +10,11 @@
 
 ## Connection
 
-The OpenCode root agent calls `langgraph_run` only when graph orchestration adds value. An agent-backed node creates, continues, or forks an OpenCode child session as explicitly requested by the graph. Typed graph state—not a replayed transcript—is the cross-role contract. The production preset keeps scouting branch-local, makes each detail decision in a fresh tool-free session, isolates implementation leaves, and continues a leaf session only for bounded repair.
+The connector starts a graph from `graph:on` messages or `/run-graph`; the root model has no orchestration tools. An agent-backed node creates, continues, or forks an OpenCode child session as explicitly requested by the graph. Typed graph state—not a replayed transcript—is the cross-role contract. One production role registry owns role prompts, models, tools, and defaults; the graph supplies typed payloads only. The production preset keeps scouting branch-local, makes each detail decision in a fresh tool-free session, isolates implementation leaves, and continues a leaf session only for bounded repair.
 
 External CLIs use the command model backend: prompt on stdin, answer on stdout, logs on stderr, graph worktree as cwd, and abort propagation.
 
-LangGraph `interrupt()` pauses the graph in an atomic per-thread durable checkpointer. The next root user message resumes the same run; `langgraph_resume` also permits explicit `Command.resume` control.
+LangGraph `interrupt()` pauses the graph in an atomic per-thread durable checkpointer. The next root user message or `/graph-resume` resumes the same run through `Command.resume`. The connector resolves the session's current run internally; models never inspect persistence files or supply storage paths.
 
 ## Configuration
 

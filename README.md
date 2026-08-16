@@ -16,7 +16,7 @@ For local development:
 
 ```sh
 npm pack
-opencode plugin ./opencode-langgraph-0.6.3.tgz --force
+opencode plugin ./opencode-langgraph-0.6.4.tgz --force
 ```
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
@@ -28,16 +28,16 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `/graph-select` opens a searchable TUI selector for the graph used by the current session.
 - `F7` toggles graph execution on or off for the current or next session.
 - `/run-graph <task>` runs one task explicitly even while `graph:off`.
+- `/graph-resume <answer>` explicitly resumes this session's paused run; an ordinary next message does the same automatically.
 - `/graph-cancel` cancels the active or queued graph run.
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
-- `langgraph_run` and `langgraph_resume` provide explicit model-tool control.
 
 Every agent-backed graph node runs in an OpenCode child session. The production graph continues scout context down a refinement chain, forks it at a split, uses a fresh tool-free decider for each decision, and isolates every implementation leaf. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
 
 ## Configure
 
-Without configuration, the connector uses `preset: "progressive-lod"`. It classifies the message, scouts only the active concern, makes a tool-free detail decision, implements one cohesive leaf per session, and verifies all leaves once. A blocked leaf reopens planning instead of entering a blind repair loop. Classifier, scout, and direct-answer roles use `deepseek/deepseek-v4-flash`; the decider, verifier, implementer, and repair roles inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "progressive-lod"`. It classifies the message, scouts only the active concern, makes a tool-free detail decision, implements one cohesive leaf per session, and verifies all leaves once. A blocked leaf reopens planning instead of entering a blind repair loop. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and turn default; graph nodes pass JSON payloads without repeating behavioral prose. Classifier, scout, decider, and direct-answer roles use `deepseek/deepseek-v4-flash`; verifier, implementer, and repair inherit the parent OpenCode model. Planning levels are derived from the task—none are hardcoded. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
@@ -53,7 +53,7 @@ export default defineOpenCodeLangGraph({
 })
 ```
 
-All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` caps a call by turns, fresh input, cache reads, live context, or cost; `budgets` caps the complete run by classified scope. Reaching a cap pauses for `continue`, `narrow: …`, or `stop` instead of silently granting another long loop.
+All overrides are optional. `models` accepts `inherit` or `provider/model` per role. `roleLimits` caps a call by turns, fresh input, cache reads, live context, or cost; `budgets` caps the complete run by classified scope. The default scout allowance is 16 turns and 96,000 live-context tokens. Reaching a cap pauses for `continue`, `narrow: …`, or `stop` instead of silently granting another long loop.
 
 ### Connect an arbitrary graph
 
@@ -124,15 +124,17 @@ Users design graphs directly in `.opencode/langgraph.ts`:
 3. Use `agentNode(...)` for text output or `structuredAgentNode(...)` with a Zod schema for decisions that mutate graph state. The referenced entry in `agents` selects its model, OpenCode agent, system prompt, and tools.
 4. Compile with a checkpointer. This is required for interrupts and resume.
 5. Wrap the compiled graph with `defineGraph({ graph, initial, result })`. `initial` maps an OpenCode message into graph state; `result` maps final state back into the root chat.
-6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`; `langgraph_run` can also specify a graph explicitly.
+6. Register one or more named graphs and choose `defaultGraph`. Use `/graph-select` to choose a graph per OpenCode session. `/run-graph` and `graph:on` use that selection, falling back to `defaultGraph`.
 
 Ordinary LangGraph nodes remain ordinary code. Agent nodes are connector boundaries: each creates an isolated OpenCode child session. Structured nodes give OpenCode and command models a JSON Schema output contract, parse native structured values or JSON text, and validate with Zod before state mutation. Graph state is shared only within that execution; separate OpenCode messages create separate graph runs.
 
 For optional anti-overengineering guidance, add `@dietrichgebert/ponytail` once to the global OpenCode plugin list and start with its `lite` mode. Do not also add the checkout-relative Ponytail path unless running from that checkout.
 
-Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer.
+Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer. Checkpoints and run metadata are plugin-private persistence: the connector resolves the current session's run internally, and agents must never read those files.
 
-The F8 viewer opens on the semantic plan tree. Press `G` for the focused execution-state graph, `2` for node executions, `3` for output, and `T` for raw state. Long execution traces collapse independently before and after the selected execution. Navigation hints live in panel headers.
+The F8 viewer opens on the semantic plan tree. Press `G` for the focused execution-state graph, `2` for node executions, `3` for output, `4` for that execution's fully composed system/input/schema prompt, and `T` for raw state. Long execution traces collapse independently before and after the selected execution. Navigation hints live in panel headers.
+
+Graph-owned start, resume, result, and failure messages use a hidden one-step presenter with every tool disabled. The normal root build agent never executes those lifecycle messages.
 
 Run `opencode-langgraph validate` after edits and `opencode-langgraph graph` to preview the compiled topology. Restart OpenCode after changing plugin code or configuration.
 

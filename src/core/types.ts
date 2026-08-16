@@ -35,6 +35,12 @@ export interface AgentUsage {
   cost: number;
 }
 
+export interface AgentPromptTrace {
+  system: string;
+  input: string;
+  schemaInstruction?: string;
+}
+
 export interface AgentCallLimits {
   maxTurns?: number;
   maxInputTokens?: number;

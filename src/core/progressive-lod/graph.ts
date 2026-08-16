@@ -97,8 +97,8 @@ export function branchProjection(state: ProgressiveLodState): Record<string, unk
   const dependencyIds = new Set(active?.dependencies ?? []);
   const evidenceIds = new Set(state.plan.filter((node) => ids.has(node.id) || dependencyIds.has(node.id)).flatMap((node) => node.evidenceIds));
   return {
-    task: state.originalTask, profile: state.profile, humanAnswer: state.humanAnswer || undefined,
-    branch: state.plan.filter((node) => ids.has(node.id)).map(({ scoutSessionId: _session, scoutSessionMode: _mode, scoutTurns: _turns, ...node }) => node),
+    task: state.originalTask, profile: state.profile ? { scope: state.profile.scope, risks: state.profile.risks } : undefined, humanAnswer: state.humanAnswer || undefined,
+    branch: state.plan.filter((node) => ids.has(node.id)).map(({ scoutSessionId: _session, scoutSessionMode: _mode, scoutTurns: _turns, ...node }) => ({ ...node, description: node.description === state.originalTask ? undefined : node.description, level: node.depth === 0 ? undefined : node.level })),
     evidence: state.evidence.filter((item) => evidenceIds.has(item.id)), constraints: state.constraints,
     decisions: Object.fromEntries(Object.entries(state.decisions).filter(([id]) => ids.has(id))),
     dependencies: state.plan.filter((node) => dependencyIds.has(node.id)).map(({ id, title, status, evidenceIds: nodeEvidenceIds }) => ({ id, title, status, evidenceIds: nodeEvidenceIds, result: state.implementationResults[id]?.summary })),
@@ -118,7 +118,7 @@ function leafPayload(state: ProgressiveLodState, node: PlanNode): Record<string,
 }
 
 function sessionDirective(sessionId: string | undefined, strategy: AgentSessionDirective["strategy"] | undefined, turns = 0): AgentSessionDirective {
-  if (!sessionId || turns >= 16) return { strategy: "fresh" };
+  if (!sessionId || turns >= 32) return { strategy: "fresh" };
   return { strategy: strategy ?? "continue", sessionId };
 }
 
@@ -162,12 +162,12 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
 
   const builder = new StateGraph(ProgressiveState)
     .addNode("classify", async (state: ProgressiveLodState, config?: RunnableConfig) => {
-      const result = await runtime(config).call({ agent: classifier, node: "classify", state, limits: state.roleLimits.classifier, schema: z.toJSONSchema(ClassificationSchema) as Record<string, unknown>, prompt: `Task type: routing classification only. Do not solve, inspect, or plan. route=answer only for a read-only response; route=change when files or external state must change. Return the task-specific planning frame.\n\n${state.originalTask}` });
+      const result = await runtime(config).call({ agent: classifier, node: "classify", state, limits: state.roleLimits.classifier, schema: z.toJSONSchema(ClassificationSchema) as Record<string, unknown>, prompt: JSON.stringify({ task: state.originalTask }) });
       if (result.budgetStop) throw new Error(`Classifier exceeded ${result.budgetStop.metric} budget`);
       const profile = structured(result, ClassificationSchema, "classify");
       return { profile, budget: budgets[profile.scope], phase: "classified", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result.usage) };
     })
-    .addNode("answer", agentNode<ProgressiveLodState>({ node: "answer", agent: answer, prompt: (state) => `Task type: direct read-only answer. Answer accurately and do not mutate state.\n\n${state.originalTask}`, output: (text, state, result) => ({ result: text, phase: "completed", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result.usage) }) }))
+    .addNode("answer", agentNode<ProgressiveLodState>({ node: "answer", agent: answer, prompt: (state) => JSON.stringify({ task: state.originalTask }), output: (text, state, result) => ({ result: text, phase: "completed", callsUsed: state.callsUsed + 1, usage: addUsage(state.usage, result.usage) }) }))
     .addNode("acquire", async (_state: ProgressiveLodState, config?: RunnableConfig) => { const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined; if (acquire) await acquire(); return {}; })
     .addNode("initialize", (state: ProgressiveLodState) => ({
       phase: "scouting", activeNodeId: "p1", nextId: 2, resumeRole: "scout" as const,
@@ -181,7 +181,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
         session: state.resumeFromAbortedSession
           ? resumableSession(active.scoutSessionId, true)
           : sessionDirective(active.scoutSessionId, active.scoutSessionMode, active.scoutTurns), schema: z.toJSONSchema(ResearchSchema) as Record<string, unknown>,
-        prompt: `Task type: branch-scoped repository scouting. Inspect only facts still missing for this active concern. Do not design the solution, decompose other branches, edit files, or run tests. Return at most 12 cited facts and short excerpts.\n\n${JSON.stringify(branchProjection(state))}`,
+        prompt: JSON.stringify(branchProjection(state)),
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       const plan = state.plan.map((node) => node.id === active.id ? { ...node, scoutSessionId: result.sessionId, scoutSessionMode: "continue" as const, scoutTurns: (node.scoutTurns ?? 0) + (result.usage?.turns ?? 0) } : node);
@@ -194,7 +194,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       const result = await runtime(config).call({
         agent: options.deciderAgent, node: `decide:${active.id}`, state, limits: state.roleLimits.decider,
         session: resumableSession(state.deciderSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(DetailDecisionSchema) as Record<string, unknown>,
-        prompt: `Task type: one tool-free LOD decision. Use only the supplied typed evidence. Choose exactly one disposition. split creates pending concerns only; it cannot create implementation leaves. ready applies only to the active concern and requires bounded targets, acceptance criteria, and verification. Alternatives are short decision summaries, never duplicate plans.\n\n${JSON.stringify({ projection: branchProjection(state), research: state.research })}`,
+        prompt: JSON.stringify({ projection: branchProjection(state), research: state.research }),
       });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       if (result.budgetStop) return { usage, callsUsed, deciderSessionId: result.sessionId, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "decider" as const, nodeId: active.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "decider" as const, phase: "budget-paused" };
@@ -228,7 +228,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("implement", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Implementation requires one grounded leaf");
       const existing = state.implementationSessions[leaf.id];
-      const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: state.roleLimits.implementer, session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: `Task type: one cohesive implementation leaf. Implement only this leaf, preserve unrelated work, run its checks, and return structured changed-file/check artifacts. If prerequisites are omitted, return status=blocked and name the missing scope; do not redesign it.\n\n${JSON.stringify(leafPayload(state, leaf))}` });
+      const result = await runtime(config).call({ agent: options.implementerAgent, node: `implement:${leaf.id}`, state, limits: state.roleLimits.implementer, session: resumableSession(existing, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify(leafPayload(state, leaf)) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1; const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? existing };
       if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "implementer" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "implementer" as const, phase: "budget-paused" };
       const output = structured(result, ImplementationResultSchema, "implement");
@@ -239,7 +239,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
       return { plan: reopened.plan, activeNodeId: reopened.activeNodeId, activeLeafId: undefined, resumeRole: reopened.activeNodeId ? "scout" as const : undefined, phase: reopened.activeNodeId ? "scouting" : "failed", research: undefined, decision: undefined };
     })
     .addNode("verify", async (state: ProgressiveLodState, config?: RunnableConfig) => {
-      const result = await runtime(config).call({ agent: verifier, node: "verify", state, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, prompt: `Task type: one aggregate independent verification. Inspect the actual worktree and diff. Check every implemented leaf against its contract and artifacts. Do not edit files. failedNodeIds must be exact plan IDs.\n\n${JSON.stringify({ task: state.originalTask, constraints: state.constraints, leaves: state.plan.filter((node) => node.leaf).map((node) => ({ node, result: state.implementationResults[node.id] })) })}` });
+      const result = await runtime(config).call({ agent: verifier, node: "verify", state, limits: state.roleLimits.verifier, session: resumableSession(state.verifierSessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(VerificationSchema) as Record<string, unknown>, prompt: JSON.stringify({ task: state.originalTask, constraints: state.constraints, leaves: state.plan.filter((node) => node.leaf).map((node) => ({ node, result: state.implementationResults[node.id] })) }) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       if (result.budgetStop) return { usage, callsUsed, verifierSessionId: result.sessionId, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "verifier" as const, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "verifier" as const, phase: "budget-paused" };
       const verification = structured(result, VerificationSchema, "verify");
@@ -253,7 +253,7 @@ export function progressiveLodGraph(options: ProgressiveLodOptions): ConnectorGr
     .addNode("repair", async (state: ProgressiveLodState, config?: RunnableConfig) => {
       const leaf = state.plan.find((node) => node.id === state.activeLeafId); if (!leaf?.leaf) throw new Error("Repair requires one failed leaf");
       const sessionId = state.implementationSessions[leaf.id]; if (!sessionId) throw new Error(`Repair has no implementation session for ${leaf.id}`);
-      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: `Task type: bounded repair of the same cohesive leaf. Address only the verifier findings for this leaf and rerun focused checks. Return structured artifacts.\n\n${JSON.stringify({ leaf: leafPayload(state, leaf), prior: state.implementationResults[leaf.id], verification: state.verification })}` });
+      const result = await runtime(config).call({ agent: repairAgent, node: `repair:${leaf.id}`, state, limits: state.roleLimits.repair, session: resumableSession(sessionId, state.resumeFromAbortedSession), schema: z.toJSONSchema(ImplementationResultSchema) as Record<string, unknown>, prompt: JSON.stringify({ leaf: leafPayload(state, leaf), prior: state.implementationResults[leaf.id], verification: state.verification }) });
       const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
       const sessions = { ...state.implementationSessions, [leaf.id]: result.sessionId ?? sessionId };
       if (result.budgetStop) return { usage, callsUsed, implementationSessions: sessions, resumeFromAbortedSession: false, pendingBudget: { scope: "call" as const, role: "repair" as const, nodeId: leaf.id, stop: result.budgetStop, sessionId: result.sessionId }, resumeRole: "repair" as const, phase: "budget-paused" };

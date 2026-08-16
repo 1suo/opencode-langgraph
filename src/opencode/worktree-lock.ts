@@ -11,8 +11,23 @@ function lockRoot(worktree: string): string {
   return path.join(stateBase, "opencode-langgraph", "locks", id);
 }
 
+function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function alive(file: string): boolean {
-  try { return Date.now() - fs.statSync(file).mtimeMs < STALE_MS; } catch { return false; }
+  try {
+    const record = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number };
+    return processAlive(record.pid ?? 0) && Date.now() - fs.statSync(file).mtimeMs < STALE_MS;
+  } catch {
+    return false;
+  }
 }
 
 export interface WorktreeLease { release(): void }

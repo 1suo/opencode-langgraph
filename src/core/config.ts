@@ -5,6 +5,7 @@ import { createJiti } from "jiti";
 import { progressiveLodGraph } from "./progressive-lod/graph.js";
 import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, OpenCodeModel, ProgressiveLodPresetOptions, ProgressivePresetRole } from "./types.js";
 import { DEFAULT_ROLE_LIMITS } from "./progressive-lod/types.js";
+import { PROGRESSIVE_ROLE_CONTRACTS } from "./progressive-lod/roles.js";
 
 export const typedConfigFile = path.join(".opencode", "langgraph.ts");
 
@@ -39,25 +40,18 @@ function presetDefinition(preset: ConnectorPresetConfig["preset"], options?: Pro
 }
 
 function progressiveLodPresetDefinition(options: ProgressiveLodPresetOptions = {}): ConnectorDefinition {
-  const defaults: Record<ProgressivePresetRole, "inherit" | `${string}/${string}`> = {
-    classifier: "deepseek/deepseek-v4-flash", scout: "deepseek/deepseek-v4-flash", decider: "inherit", answer: "deepseek/deepseek-v4-flash",
-    implementer: "inherit", verifier: "inherit", repair: "inherit",
-  };
   const modelName = (role: ProgressivePresetRole) => `${role}-model`;
-  const models = Object.fromEntries((Object.keys(defaults) as ProgressivePresetRole[]).map((role) => [modelName(role), opencodeModel({ model: options.models?.[role] ?? defaults[role] })]));
+  const roles = Object.keys(PROGRESSIVE_ROLE_CONTRACTS) as ProgressivePresetRole[];
+  const models = Object.fromEntries(roles.map((role) => [modelName(role), opencodeModel({ model: options.models?.[role] ?? PROGRESSIVE_ROLE_CONTRACTS[role].defaultModel })]));
   const turns = (role: Exclude<ProgressivePresetRole, "answer">) => options.roleLimits?.[role]?.maxTurns ?? DEFAULT_ROLE_LIMITS[role].maxTurns;
+  const agent = (role: ProgressivePresetRole): AgentDefinition => {
+    const contract = PROGRESSIVE_ROLE_CONTRACTS[role];
+    return { model: modelName(role), opencodeAgent: contract.agent, systemPrompt: contract.systemPrompt, tools: contract.tools, maxSteps: role === "answer" ? contract.maxSteps : turns(role) };
+  };
   return {
     version: 1,
     models,
-    agents: {
-      classifier: { model: modelName("classifier"), opencodeAgent: "plan", systemPrompt: "Classify the supplied request directly. Do not inspect the repository or call tools. Produce exact structured output.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: turns("classifier") },
-      scout: { model: modelName("scout"), opencodeAgent: "plan", systemPrompt: "Inspect only the active branch and return concise repository evidence. Do not design, decompose, or edit.", tools: { read: true, grep: true, glob: true, bash: true, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: turns("scout") },
-      decider: { model: modelName("decider"), opencodeAgent: "plan", systemPrompt: "Make one planning disposition from supplied typed evidence. Do not inspect the repository or call tools.", tools: { read: false, grep: false, glob: false, bash: false, edit: false, write: false, question: false, task: false, webfetch: false, websearch: false }, maxSteps: turns("decider") },
-      answer: { model: modelName("answer"), opencodeAgent: "plan", systemPrompt: "Answer accurately from the request and repository evidence when needed.", tools: { read: true, grep: true, glob: true, edit: false, write: false, question: false }, maxSteps: 24 },
-      verifier: { model: modelName("verifier"), opencodeAgent: "plan", systemPrompt: "Verify the actual worktree once against all implemented leaf contracts. Do not edit files. Produce exact structured output.", tools: { read: true, grep: true, glob: true, bash: true, edit: false, write: false, question: false, task: false }, maxSteps: turns("verifier") },
-      implementer: { model: modelName("implementer"), opencodeAgent: "build", systemPrompt: "Implement exactly one cohesive leaf and verify its focused acceptance criteria. Preserve unrelated user work.", tools: { question: false, task: false }, maxSteps: turns("implementer") },
-      repair: { model: modelName("repair"), opencodeAgent: "build", systemPrompt: "Repair exactly one previously implemented leaf from verifier findings and rerun its focused checks.", tools: { question: false, task: false }, maxSteps: turns("repair") },
-    },
+    agents: Object.fromEntries(roles.map((role) => [role, agent(role)])),
     graphs: { "progressive-lod": progressiveLodGraph({ classifierAgent: "classifier", scoutAgent: "scout", deciderAgent: "decider", answerAgent: "answer", verifierAgent: "verifier", implementerAgent: "implementer", repairAgent: "repair", roleLimits: options.roleLimits, budgets: options.budgets }) },
     defaultGraph: "progressive-lod",
   };

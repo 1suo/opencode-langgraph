@@ -29,10 +29,12 @@ The graph is a controller, not another general agent. It gives each role one tas
 |---|---|---|---|---|
 | classifier | DeepSeek V4 Flash | none | fresh | route and task profile |
 | scout | DeepSeek V4 Flash | read-only repository tools | fresh root; continue refinement; fork split | cited facts only |
-| decider | inherited | none | fresh per decision; continue only after a budget pause | one disposition |
+| decider | DeepSeek V4 Flash | none | fresh per decision; continue only after a budget pause | one disposition |
 | implementer | inherited | build tools, no subagents | fresh per leaf | files and focused checks |
 | verifier | inherited | read-only repository tools | one fresh aggregate pass | leaf-specific verdicts |
 | repair | inherited | build tools, no subagents | continue failed leaf | bounded repair artifacts |
+
+All built-in agent and root-system contracts live together in the production role registry. Graph nodes supply typed JSON payloads only; the runtime appends the stable structured-output instruction. Each call records those three effective prompt layers for F8 inspection.
 
 The scout receives the active node, its ancestry, global constraints, relevant evidence, concise decisions, and compact dependency results. Unrelated nodes are title/status indexes only. A dependency never imports an unrelated sibling's full description or transcript.
 
@@ -113,7 +115,7 @@ One implementation leaf contains tightly coupled production code, focused tests,
 | subsystem | 24 | 12 | 3 | 2 | 2 | 48 | 250k | 3m | $0.08 |
 | architectural/unknown | 40 | 16 | 3 | 2 | 2 | 80 | 500k | 6m | $0.15 |
 
-Every role also has per-call caps for turns, fresh input, cache reads, and live context. The default implementer cap is 32 turns; scout 8; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a cap reached on its final turn. A cap reached while still busy aborts that child call and interrupts the graph with exact usage plus `continue`, `narrow: …`, and `stop` choices.
+Every role also has per-call caps for turns, fresh input, cache reads, and live context. The default implementer cap is 32 turns; scout 16 with a 96,000-token live-context cap; verifier and repair 12; classifier and decider 2. An idle completed answer wins over a cap reached on its final turn. A cap reached while still busy aborts that child call and interrupts the graph with exact usage plus `continue`, `narrow: …`, and `stop` choices.
 
 The 0.5 failure baseline for the same corrective task was about 86 model turns, 200k fresh input, 10.18m cache-read tokens, and $0.209 without a verified completion. The 0.6 controller must stop or request approval before reaching that envelope. Optimization is accepted only when task quality and core flow remain intact; token reduction alone is not success.
 
@@ -142,9 +144,9 @@ All options are optional. Model values are `inherit` or `provider/model`. Role l
 
 ## Persistence and UI
 
-Checkpoints live below `$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints/`, or `~/.local/state` by default. Run metadata links every execution to its root session and originating user message. The next root message resumes only an interrupted run; otherwise it creates a new run.
+Checkpoints live below `$OPENCODE_LANGGRAPH_STATE_HOME/opencode-langgraph/checkpoints/`, or `~/.local/state` by default. Run metadata links every execution to its root session and originating user message. This storage is private to the connector: the connector resolves the current session's run internally, and no model receives a state-file path or needs filesystem permission. The next root message resumes only an interrupted run; otherwise it creates a new run. Root lifecycle/result rendering uses a dedicated tool-free presenter, never the normal build agent.
 
-The prompt legend is `[F7] graph:off|{actual graph name} · [F8] view · [F9] help`. F8 opens the semantic plan tree. Status glyphs distinguish expanded (`◇`), ready (`◆`), active (`▶`), implemented (`■`), verified (`✓`), failed (`×`), and removed (`·`). Navigation hints remain in panel headers.
+The prompt legend is `[F7] graph:off|{actual graph name} · [F8] view · [F9] help`. F8 opens the semantic plan tree; the selected execution exposes output, effective prompt, and raw state. Status glyphs distinguish expanded (`◇`), ready (`◆`), active (`▶`), implemented (`■`), verified (`✓`), failed (`×`), and removed (`·`). Navigation hints remain in panel headers.
 
 ## Release acceptance
 
