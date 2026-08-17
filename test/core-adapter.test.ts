@@ -483,6 +483,21 @@ describe("solution LOD reducer", () => {
     expect(second.network.activations).toHaveLength(2);
   });
 
+  it("reschedules a failed implement activation instead of dead-ending", () => {
+    const network = initialNetwork("change");
+    network.activations[0].status = "completed";
+    network.regions[0].status = "actionable";
+    network.regions[0].delivery = "change";
+    network.regions[0].candidateIds = ["r1:direct"];
+    network.regions[0].selectedCandidateIds = ["r1:direct"];
+    network.regions[0].acceptanceCriteria = ["works"];
+    network.candidates.push({ id: "r1:direct", regionId: "r1", key: "direct", proposition: "implement it", status: "selected", evidenceIds: [], eliminationReasons: [], nextLod: [] });
+    network.activations.push({ id: "a2", capability: "implement", regionId: "r1", request: "implement", expectedDelta: `implement:r1:${network.revision}`, contextRefs: ["r1"], status: "failed", basisRevision: network.revision });
+    const scheduled = ensureRunnableWork(network);
+    expect(scheduled.done).toBe(false);
+    expect(scheduled.network.activations.at(-1)).toMatchObject({ capability: "implement", status: "queued" });
+  });
+
   it("collapses an equivalent surviving set as one implementer-local choice", () => {
     const current = state();
     const network = mergeSolutionDelta(current, "a1", {

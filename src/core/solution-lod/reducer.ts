@@ -3,6 +3,7 @@ import type { Activation, Capability, ConditionalRegionDefinition, Implementatio
 
 const normalize = (value: string) => value.trim().replace(/\s+/g, " ");
 const slug = (value: string) => normalize(value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || "candidate";
+const MAX_ACTIVATION_RETRIES = 3;
 
 export function initialNetwork(task: string): SolutionNetwork {
   return {
@@ -36,9 +37,11 @@ function knownRef(network: SolutionNetwork, ref: string): boolean {
 
 function addActivation(network: SolutionNetwork, input: Omit<Activation, "id" | "status" | "basisRevision">): Activation | undefined {
   const signature = `${input.capability}\0${input.regionId}\0${normalize(input.expectedDelta)}`;
-  const duplicate = network.activations.some((item) => `${item.capability}\0${item.regionId}\0${normalize(item.expectedDelta)}` === signature);
+  const matches = network.activations.filter((item) => `${item.capability}\0${item.regionId}\0${normalize(item.expectedDelta)}` === signature);
+  const duplicate = matches.some((item) => item.status !== "failed");
+  const failedAttempts = matches.filter((item) => item.status === "failed").length;
   const region = network.regions.find((item) => item.id === input.regionId);
-  if (duplicate || !region || input.contextRefs.some((ref) => !knownRef(network, ref))) return undefined;
+  if (duplicate || failedAttempts >= MAX_ACTIVATION_RETRIES || !region || input.contextRefs.some((ref) => !knownRef(network, ref))) return undefined;
   if (input.capability === "implement" && region.status !== "actionable" || input.capability === "verify" && region.status !== "implemented" || input.capability === "present" && (region.status !== "actionable" || region.delivery !== "answer")) return undefined;
   const contextRefs = [...new Set([input.regionId, ...input.contextRefs])];
   const activation: Activation = { ...input, id: `a${network.nextActivationId++}`, contextRefs, status: input.wakeCondition && input.wakeCondition.revisionAfter >= network.revision ? "waiting" : "queued", basisRevision: network.revision };
