@@ -476,9 +476,9 @@ describe("solution LOD reducer", () => {
     expect(projection).toMatchObject({
       currentTask: "change",
       successCriteria: ["target behavior works"],
-      decisionsAlreadyMade: ["Extend the existing implementation"],
       selectedApproach: ["Extend the existing implementation"],
     });
+    expect(projection).not.toHaveProperty("decisionsAlreadyMade");
     expect(projection).not.toHaveProperty("region");
     expect(projection).not.toHaveProperty("collapsedAncestry");
     expect(projection).not.toHaveProperty("domain");
@@ -941,9 +941,11 @@ describe("OpenCode automatic graph routing", () => {
       expect(inspected.storedStatus).toBe("failed");
       expect(inspected.phase).toBe("blocked");
 
-      const pruneOutput = await (hooks.tool?.langgraph_prune.execute as (args: { runId?: string; regionId: string; reason?: string }, ctx: never) => Promise<string>)({ regionId: "r1", reason: "insufficient balance during inspection" }, toolContext);
+      const pruneOutput = await (hooks.tool?.langgraph_prune.execute as (args: { runId?: string; regionId: string; reason?: string; objective?: string }, ctx: never) => Promise<string>)({ regionId: "r1", reason: "insufficient balance during inspection", objective: "Update target with a different approach" }, toolContext);
       expect(JSON.parse(pruneOutput).phase).toBe("pruned");
       expect(readStoredRun(runId).status).toBe("pruned");
+      const prunedState = await configured.graph.getState({ configurable: { thread_id: runId } });
+      expect((prunedState.values as { network: { regions: Array<{ id: string; objective: string }> } }).network.regions.find((item) => item.id === "r1")?.objective).toBe("Update target with a different approach");
 
       const resumeOutput = await (hooks.tool?.langgraph_resume.execute as (args: { runId?: string; answer?: string }, ctx: never) => Promise<string>)({}, toolContext);
       const resumed = JSON.parse(resumeOutput);
@@ -951,6 +953,30 @@ describe("OpenCode automatic graph routing", () => {
       expect(resumed.interrupted).toBe(false);
       expect(readStoredRun(runId).status).toBe("completed");
       expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("after");
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
+  it("inspects a queued run without a checkpoint and refuses to prune an active one", async () => {
+    const state = temp("opencode-langgraph-tool-state-");
+    const directory = temp("opencode-langgraph-tool-project-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = state;
+    try {
+      const hooks = await server({ client: { session: { get: async () => ({ data: { id: "root", parentID: undefined } }) } }, directory, worktree: directory } as never);
+      const runId = "fresh-run";
+      writeStoredRun({ checkpointVersion: 3, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
+      const toolContext = { sessionID: "root", directory, worktree: directory, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
+
+      const inspectOutput = await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext);
+      const inspected = JSON.parse(inspectOutput);
+      expect(inspected.storedStatus).toBe("queued");
+      expect(inspected.phase).toBe("no-checkpoint-yet");
+
+      await expect((hooks.tool?.langgraph_prune.execute as (args: { runId?: string; regionId: string }, ctx: never) => Promise<string>)({ regionId: "r1" }, toolContext)).rejects.toThrow(/Cannot prune queued run/);
+      await expect((hooks.tool?.langgraph_resume.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext)).rejects.toThrow(/cannot be resumed/);
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;

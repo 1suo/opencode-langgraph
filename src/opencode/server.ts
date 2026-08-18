@@ -82,9 +82,9 @@ export const server: Plugin = async (plugin) => {
         execute: async (args: { runId?: string }, context) => inspectRun(context.sessionID, args.runId),
       }),
       langgraph_prune: tool({
-        description: "Reopen a solution region and drop its subtree so the graph can resynthesize it, then resume the run from its checkpoint. Writes the pruned network back to the run's checkpoint and marks it resumable.",
-        args: { runId: tool.schema.string().optional(), regionId: tool.schema.string(), reason: tool.schema.string().optional() },
-        execute: async (args: { runId?: string; regionId: string; reason?: string }, context) => pruneRun(context.sessionID, args.runId, args.regionId, args.reason),
+        description: "Reopen a solution region and drop its subtree so the graph can resynthesize it, then resume the run from its checkpoint. Optionally override the region's objective, allowed variables, or acceptance criteria so the resynthesized region follows the new scope. Writes the pruned network back to the run's checkpoint and marks it resumable.",
+        args: { runId: tool.schema.string().optional(), regionId: tool.schema.string(), reason: tool.schema.string().optional(), objective: tool.schema.string().optional(), allowedVariables: tool.schema.array(tool.schema.string()).optional(), acceptanceCriteria: tool.schema.array(tool.schema.string()).optional() },
+        execute: async (args: { runId?: string; regionId: string; reason?: string; objective?: string; allowedVariables?: string[]; acceptanceCriteria?: string[] }, context) => pruneRun(context.sessionID, args.runId, args.regionId, args.reason, { objective: args.objective, allowedVariables: args.allowedVariables, acceptanceCriteria: args.acceptanceCriteria }),
       }),
       langgraph_resume: tool({
         description: "Resume a LangGraph run from its saved checkpoint. For an interrupted run awaiting human input, pass the answer. For a pruned run, continues from the checkpoint so the graph can make progress again.",
@@ -253,27 +253,50 @@ async function inspectRun(sessionID: string, runId?: string): Promise<string> {
   const saved = await resolveStoredRun(sessionID, runId);
   const { configured } = await loadGraphForRun(saved);
   const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
-  return runSummary(saved, snapshot.values, configured.progress?.(snapshot.values as never));
+  const values = snapshot.values as Record<string, unknown> | undefined;
+  if (!values || Object.keys(values).length === 0) {
+    return JSON.stringify({ runId: saved.runId, graph: saved.graph, storedStatus: saved.status, phase: "no-checkpoint-yet", note: "This run has not reached its first checkpoint yet (queued or still acquiring the worktree). There is nothing to inspect or prune until it does." }, null, 2);
+  }
+  return runSummary(saved, values, configured.progress?.(values as never));
 }
 
-async function pruneRun(sessionID: string, runId: string | undefined, regionId: string, reason?: string): Promise<string> {
+type PruneOverrides = { objective?: string; allowedVariables?: string[]; acceptanceCriteria?: string[] };
+
+function applyPruneOverrides(network: Parameters<typeof reopenRegion>[0], regionId: string, overrides: PruneOverrides): Parameters<typeof reopenRegion>[0] {
+  if (!overrides.objective && !overrides.allowedVariables && !overrides.acceptanceCriteria) return network;
+  const regions = network.regions.map((item) => {
+    if (item.id !== regionId) return item;
+    return {
+      ...item,
+      ...(overrides.objective ? { objective: overrides.objective } : {}),
+      ...(overrides.allowedVariables ? { allowedVariables: [...overrides.allowedVariables] } : {}),
+      ...(overrides.acceptanceCriteria ? { acceptanceCriteria: [...overrides.acceptanceCriteria] } : {}),
+    };
+  });
+  return { ...network, regions };
+}
+
+async function pruneRun(sessionID: string, runId: string | undefined, regionId: string, reason?: string, overrides: PruneOverrides = {}): Promise<string> {
   const saved = await resolveStoredRun(sessionID, runId);
   if (saved.graph !== "solution-lod") throw new Error("langgraph_prune only supports the solution-lod graph.");
+  if (saved.status === "running" || saved.status === "queued") throw new Error(`Cannot prune ${saved.status} run ${saved.runId}; wait for it to finish or fail first.`);
   const { configured } = await loadGraphForRun(saved);
   const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
   const values = snapshot.values as { network: Parameters<typeof reopenRegion>[0]; activeActivationId?: string; result: string; phase: string; [key: string]: unknown };
-  const region = values.network.regions.find((item: { id: string }) => item.id === regionId);
+  const network0 = values.network;
+  const region = network0.regions.find((item: { id: string }) => item.id === regionId);
   if (!region) throw new Error(`Region ${regionId} not found in the run's solution network. Use langgraph_inspect to list regions.`);
-  const networkInput = reopenRegion(values.network, regionId, reason ?? `Reopened by agent: region ${regionId}`);
+  const reopened = reopenRegion(network0, regionId, reason ?? `Reopened by agent: region ${regionId}`);
+  const overridden = applyPruneOverrides(reopened, regionId, overrides);
   const network = {
-    ...networkInput,
-    activations: networkInput.activations.filter((item: { regionId: string; status: string }) => item.regionId !== regionId || item.status === "completed"),
-    regions: networkInput.regions.map((item: { id: string; activationIds: string[] }) => item.id === regionId ? { ...item, activationIds: [] } : item),
+    ...overridden,
+    activations: overridden.activations.filter((item: { regionId: string; status: string }) => item.regionId !== regionId || item.status === "completed"),
+    regions: overridden.regions.map((item: { id: string; activationIds: string[] }) => item.id === regionId ? { ...item, activationIds: [] } : item),
   };
   const updated = { ...values, network, activeActivationId: undefined, result: "", phase: "pruned" };
   await configured.graph.updateState({ configurable: { thread_id: saved.runId } }, updated, "__start__");
   writeStoredRun({ ...saved, status: "pruned" });
-  appendPluginEvent({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, userMessageId: saved.userMessageId, graph: saved.graph, node: `__prune__:${regionId}`, status: "pruned", agent: "connector", model: "connector", text: `Pruned region ${regionId}: ${reason ?? "reopened for resynthesis"}`, state: updated });
+  appendPluginEvent({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, userMessageId: saved.userMessageId, graph: saved.graph, node: `__prune__:${regionId}`, status: "pruned", agent: "connector", model: "connector", text: `Pruned region ${regionId}: ${reason ?? "reopened for resynthesis"}${overrides.objective ? ` · overrode objective: ${overrides.objective}` : ""}`, state: updated });
   const fresh = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
   return runSummary(saved, fresh.values, configured.progress?.(fresh.values as never));
 }

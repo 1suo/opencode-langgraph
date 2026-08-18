@@ -24,6 +24,10 @@ LangGraph `interrupt()` pauses the graph in an atomic per-thread durable checkpo
 
 LangGraph compilation remains authoritative for graph structure. The connector adds reference validation, command resolution, required checkpointer presence, and a reverse-reachability check proving every declared node has a possible path to `END`.
 
+## Node contracts and recovery
+
+The graph is an engine loop: `schedule` (pure) → `acquire` (lease, only before mutating work) → `activate` (the only model call) → `schedule`. Every node's output is a checkpointed state delta, so any intermediate point is a valid restart. Recovery is tool-driven and stateless-aware: `langgraph_inspect` reads the checkpoint, `langgraph_prune` reopens a region subtree (dropping only that subtree and stale retry counters), and `langgraph_resume` continues a pruned or interrupted run from the same durable thread. Prompts are projected per-activation from checkpointed state, so changing a role's `systemPrompt` or a region's scope affects only subsequent activations. Full contracts and the measured context behavior live in `SPEC-graph.md`.
+
 ## UI
 
 The TUI plugin uses OpenCode's public slot, route, command-palette, theme, renderer, and scrollbox APIs. The sidebar shows current semantic state. `/graph` opens the solution LOD tree and selected region domain. `G` shows the separate activation network; node output, prompt, and raw state remain diagnostic.

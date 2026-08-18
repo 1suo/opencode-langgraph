@@ -72,7 +72,6 @@ export function projectActivationContext(state: SolutionLodState, activation: Ac
     assignment: activation.request,
     currentTask: region.objective,
     successCriteria: region.acceptanceCriteria,
-    decisionsAlreadyMade,
     facts,
     rules,
     filesAndChecks,
@@ -82,11 +81,11 @@ export function projectActivationContext(state: SolutionLodState, activation: Ac
     referenceId: id, approach: proposition, status: plainStatus[status], reasonsRejected: eliminationReasons, supportingFactIds: evidenceIds,
     decisionsNeededAfterChoosing: nextLod.map((item) => ({ decision: item.objective, decideOnlyAbout: item.allowedVariables, successCriteria: item.acceptanceCriteria, independentlyDeliverable: item.edge === "partOf" })),
   }));
-  if (activation.capability === "inspect") return { ...common, questionToInvestigate: activation.request, doNotDecideTheApproach: region.delivery === "change" };
-  if (activation.capability === "synthesize") return { ...common, decisionToMake: region.objective, decideOnlyAbout: region.allowedVariables, approachesAlreadyConsidered, helpAvailable: { inspect: "request one named missing repository fact" } };
+  if (activation.capability === "inspect") return { ...common, decisionsAlreadyMade, questionToInvestigate: activation.request, doNotDecideTheApproach: region.delivery === "change" };
+  if (activation.capability === "synthesize") return { ...common, decisionsAlreadyMade, decisionToMake: region.objective, decideOnlyAbout: region.allowedVariables, approachesAlreadyConsidered, helpAvailable: { inspect: "request one named missing repository fact" } };
   if (activation.capability === "implement") return { ...common, selectedApproach: decisionsAlreadyMade, ifBlocked: { inspect: "request one missing repository fact", synthesize: "request reconsideration only if a supplied decision is contradicted" } };
-  if (activation.capability === "verify") return { ...common, changeToVerify: region.objective };
-  return { ...common, answerToProduce: region.objective };
+  if (activation.capability === "verify") return { ...common, decisionsAlreadyMade, changeToVerify: region.objective };
+  return { ...common, decisionsAlreadyMade, answerToProduce: region.objective };
 }
 
 function statusPaths(worktree: string): Map<string, string> {
