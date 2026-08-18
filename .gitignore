@@ -5,3 +5,4 @@ dist/
 opencode-langgraph-*.tgz
 coverage/
 *.tgz
+.opencode/
