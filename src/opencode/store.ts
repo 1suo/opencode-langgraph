@@ -169,6 +169,43 @@ export function readLatestStoredRun(rootSessionId: string): StoredRun | undefine
   return latest?.run;
 }
 
+export function listProjectRuns(worktree: string, stateHome?: string): StoredRun[] {
+  const directory = path.join(root(stateHome), "runs");
+  if (!fs.existsSync(directory)) return [];
+  const runs: Array<{ modified: number; run: StoredRun }> = [];
+  for (const name of fs.readdirSync(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(directory, name);
+    try {
+      const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
+      if (path.resolve(run.worktree) !== path.resolve(worktree)) continue;
+      runs.push({ modified: fs.statSync(file).mtimeMs, run });
+    } catch {
+      // Ignore an incomplete or externally edited run file.
+    }
+  }
+  return runs.sort((a, b) => b.modified - a.modified).map((item) => item.run);
+}
+
+export function readLatestProjectRun(worktree: string, stateHome?: string): StoredRun | undefined {
+  const directory = path.join(root(stateHome), "runs");
+  if (!fs.existsSync(directory)) return;
+  let latest: { modified: number; run: StoredRun } | undefined;
+  for (const name of fs.readdirSync(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(directory, name);
+    try {
+      const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
+      if (path.resolve(run.worktree) !== path.resolve(worktree)) continue;
+      const modified = fs.statSync(file).mtimeMs;
+      if (!latest || modified > latest.modified) latest = { modified, run };
+    } catch {
+      // Ignore an incomplete or externally edited run file.
+    }
+  }
+  return latest?.run;
+}
+
 export function readLatestProjectEvents(worktree: string, stateHome?: string): PluginRunEvent[] {
   const directory = path.join(root(stateHome), "runs");
   if (!fs.existsSync(directory)) return [];

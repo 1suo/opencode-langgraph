@@ -7,7 +7,7 @@ import { loadConnectorDefinition, withSolutionRoleModelAssignments } from "../co
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
-import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestProjectRun, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
 import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
 import { reopenRegion } from "../core/solution-lod/reducer.js";
@@ -77,9 +77,9 @@ export const server: Plugin = async (plugin) => {
     event: ({ event }) => forwardPermissionEvent(event),
     tool: {
       langgraph_inspect: tool({
-        description: "Inspect the current LangGraph run: stored status, graph phase, checkpointed solution network, usage, and result. Read-only; use this before pruning or resuming a failed or blocked run.",
-        args: { runId: tool.schema.string().optional() },
-        execute: async (args: { runId?: string }, context) => inspectRun(context.sessionID, args.runId),
+        description: "Inspect a LangGraph run: stored status, graph phase, checkpointed solution network, usage, and result. Read-only; use this before pruning or resuming a failed or blocked run. By default inspects the latest run for the calling session; pass runId or rootSessionId, or set projectScope to inspect the latest run for the whole project (e.g. a graph the agent ran in another session).",
+        args: { runId: tool.schema.string().optional(), rootSessionId: tool.schema.string().optional(), projectScope: tool.schema.boolean().optional() },
+        execute: async (args: { runId?: string; rootSessionId?: string; projectScope?: boolean }, context) => inspectRun(context.sessionID, args.runId, { rootSessionId: args.rootSessionId, worktree: args.projectScope ? context.worktree : undefined }),
       }),
       langgraph_prune: tool({
         description: "Reopen a solution region and drop its subtree so the graph can resynthesize it, then resume the run from its checkpoint. Optionally override the region's objective, allowed variables, or acceptance criteria so the resynthesized region follows the new scope. Writes the pruned network back to the run's checkpoint and marks it resumable.",
@@ -234,9 +234,12 @@ async function loadGraphForRun(saved: StoredRun): Promise<LoadedGraph> {
   return { configured };
 }
 
-async function resolveStoredRun(sessionID: string, runId?: string): Promise<StoredRun> {
-  const run = runId ? readStoredRun(runId) : readLatestStoredRun(sessionID);
-  if (!run) throw new Error(runId ? `No LangGraph run found for runId ${runId}.` : "No LangGraph run found for this session. Start a graph run first.");
+async function resolveStoredRun(sessionID: string, runId?: string, options?: { rootSessionId?: string; worktree?: string }): Promise<StoredRun> {
+  const run = runId ? readStoredRun(runId)
+    : options?.rootSessionId ? readLatestStoredRun(options.rootSessionId)
+      : options?.worktree ? readLatestProjectRun(options.worktree)
+        : readLatestStoredRun(sessionID);
+  if (!run) throw new Error(runId ? `No LangGraph run found for runId ${runId}.` : options?.worktree ? "No LangGraph run found for this project. Start a graph run first." : "No LangGraph run found for this session. Start a graph run first.");
   return run;
 }
 
@@ -249,13 +252,13 @@ function runSummary(saved: StoredRun, state: unknown, progress?: GraphProgressSn
   }, null, 2);
 }
 
-async function inspectRun(sessionID: string, runId?: string): Promise<string> {
-  const saved = await resolveStoredRun(sessionID, runId);
+async function inspectRun(sessionID: string, runId?: string, options?: { rootSessionId?: string; worktree?: string }): Promise<string> {
+  const saved = await resolveStoredRun(sessionID, runId, options);
   const { configured } = await loadGraphForRun(saved);
   const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
   const values = snapshot.values as Record<string, unknown> | undefined;
   if (!values || Object.keys(values).length === 0) {
-    return JSON.stringify({ runId: saved.runId, graph: saved.graph, storedStatus: saved.status, phase: "no-checkpoint-yet", note: "This run has not reached its first checkpoint yet (queued or still acquiring the worktree). There is nothing to inspect or prune until it does." }, null, 2);
+    return JSON.stringify({ runId: saved.runId, graph: saved.graph, rootSessionId: saved.rootSessionId, storedStatus: saved.status, phase: "no-checkpoint-yet", note: "This run has not reached its first checkpoint yet (queued or still acquiring the worktree). There is nothing to inspect or prune until it does." }, null, 2);
   }
   return runSummary(saved, values, configured.progress?.(values as never));
 }

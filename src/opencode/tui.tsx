@@ -6,16 +6,16 @@ import path from "node:path";
 import { accessSync, constants } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import type { ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot } from "../core/types.js";
-import { adoptHomeGraphState, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
+import { adoptHomeGraphState, listProjectRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
   const value = api.route.current.name === "session" && "params" in api.route.current ? api.route.current.params?.sessionID : undefined;
   return typeof value === "string" ? value : undefined;
 }
 
-function openGraph(api: TuiPluginApi, fallbackSessionId?: string, userMessageId?: string): void {
+function openGraph(api: TuiPluginApi, fallbackSessionId?: string, userMessageId?: string, runId?: string): void {
   const id = sessionId(api) ?? fallbackSessionId;
-  api.route.navigate("langgraph.graph", id ? { sessionID: id, ...(userMessageId ? { messageID: userMessageId } : {}) } : undefined);
+  api.route.navigate("langgraph.graph", id || runId ? { sessionID: id, ...(userMessageId ? { messageID: userMessageId } : {}), ...(runId ? { runID: runId } : {}) } : undefined);
 }
 
 export function openMessageGraph(api: TuiPluginApi, rootSessionId: string, userMessageId: string): void {
@@ -261,6 +261,37 @@ function printable(value: unknown): string {
   catch { return String(value); }
 }
 
+export function renderStructuredEvent(event: PluginRunEvent): string {
+  const lines = [
+    `${event.node.replaceAll("_", " ").toUpperCase()}  [${event.status.toUpperCase()}]  ${shortAgent(event.agent)}  ${event.model}`,
+  ];
+  if (event.text) {
+    const text = event.text.replace(/\s+/g, " ").trim();
+    lines.push("", "OUTPUT", text.slice(0, 4_000));
+  }
+  if (event.progress) {
+    const snapshot = event.progress;
+    const semantic = snapshot.semantic;
+    lines.push("", `PROGRESS  ${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}`);
+    if (semantic && semantic.regions.length) {
+      for (const region of semantic.regions) {
+        const viable = region.viable !== undefined ? `${region.viable}/${region.total} viable` : "";
+        lines.push(`  ${planGlyph(region.status)} ${region.id}  [${region.status}]  ${region.objective ?? ""}${viable ? `  · ${viable}` : ""}`);
+      }
+    }
+    if (semantic && semantic.activations.length) {
+      lines.push("", "ACTIVATIONS");
+      for (const activation of semantic.activations) {
+        lines.push(`  ${planGlyph(activation.status)} ${activation.id}:${activation.capability}  [${activation.status}]  ${activation.regionId}  ${activation.expectedDelta ?? ""}${activation.error ? `  ! ${activation.error}` : ""}`);
+      }
+    }
+  }
+  if (event.usage) {
+    lines.push("", `USAGE  ${event.usage.turns}t · ${compactNumber(event.usage.input)}in · ${compactNumber(event.usage.cacheRead)}cache${event.usage.cost ? ` · $${event.usage.cost.toFixed(3)}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
 function compactNumber(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
   if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
@@ -319,35 +350,14 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
 function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme; selectedRegionId?: string; onSelect?: (id: string) => void }) {
   const snapshot = createMemo(() => progressSnapshot(props.events));
   const rows = createMemo(() => snapshot() ? planRows(snapshot()!) : []);
-  const calls = createMemo(() => {
-    const value = snapshot();
-    return value?.callsUsed !== undefined && value.callBudget ? Math.min(1, value.callsUsed / value.callBudget) : undefined;
-  });
-  const callBar = createMemo(() => calls() === undefined ? "·".repeat(10) : `${"█".repeat(Math.round(calls()! * 10))}${"░".repeat(10 - Math.round(calls()! * 10))}`);
   return (
-    <Show when={snapshot()}>{(value) => (
-      <box flexDirection="column" gap={1}>
-        <box flexDirection="row" gap={1}>
-          <text fg={statusTone(value().phase, props.theme)}><b>[{value().phase.toUpperCase()}]</b></text>
-          <Show when={value().scope}><text fg={props.theme.secondary}>[{value().scope!.toUpperCase()}]</text></Show>
-          <text fg={props.theme.textMuted}>SOLUTION LOD TREE</text>
-        </box>
-        <box flexDirection="row" gap={2}>
-          <text fg={props.theme.info}>ACTIVATIONS {value().callsUsed ?? 0}</text>
-          <Show when={value().usage}>{(usage) => <text fg={props.theme.textMuted}>TURN:{usage().turns} IN:{compactNumber(usage().input)} CACHE:{compactNumber(usage().cacheRead)}</text>}</Show>
-          <Show when={value().usage}>{(usage) => (
-            <Show when={value().costBudget !== undefined}><text fg={props.theme.warning}>COST ${usage().cost.toFixed(3)}/${value().costBudget!.toFixed(2)}</text></Show>
-          )}</Show>
-        </box>
+    <Show when={snapshot()}>
+      <box flexDirection="column" gap={1} paddingX={1}>
         <For each={rows()}>{({ node, branch, continuation }) => (
           <box flexDirection="column" onMouseUp={() => props.onSelect?.(node.id)}>
             <box flexDirection="row" gap={1}>
               <text fg={statusTone(node.status, props.theme)}>{props.selectedRegionId === node.id ? "›" : " "}{branch} {planGlyph(node.status)} <b>{node.id}</b></text>
               <text fg={props.selectedRegionId === node.id ? props.theme.primary : props.theme.text}><b>{node.title}</b></text>
-            </box>
-            <box flexDirection="row" gap={1}>
-              <text fg={props.theme.borderSubtle}>{continuation}   ├─</text>
-              <text fg={props.theme.textMuted}>{node.level}</text>
             </box>
             <box flexDirection="row" gap={1}>
               <text fg={props.theme.borderSubtle}>{continuation}   └─</text>
@@ -359,9 +369,9 @@ function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme; selectedR
             </box>
           </box>
         )}</For>
-        <Show when={value().summary}><text fg={props.theme.textMuted}>// {value().summary}</text></Show>
+        <Show when={snapshot()!.summary}><text fg={props.theme.textMuted}>// {snapshot()!.summary}</text></Show>
       </box>
-    )}</Show>
+    </Show>
   );
 }
 
@@ -438,13 +448,14 @@ function eventsForMessage(events: PluginRunEvent[], userMessageId?: string): Plu
   return runId ? events.filter((event) => event.runId === runId) : [];
 }
 
-export function readVisibleEvents(rootSessionId: string | undefined, worktree: string, stateHome: string, userMessageId?: string): PluginRunEvent[] {
-  if (rootSessionId) return eventsForMessage(readPluginEvents(rootSessionId, stateHome), userMessageId);
-  return eventsForMessage(readLatestProjectEvents(worktree, stateHome), userMessageId);
+export function readVisibleEvents(rootSessionId: string | undefined, worktree: string, stateHome: string, userMessageId?: string, runId?: string): PluginRunEvent[] {
+  const all = rootSessionId ? readPluginEvents(rootSessionId, stateHome) : readLatestProjectEvents(worktree, stateHome);
+  if (runId) return all.filter((event) => event.runId === runId);
+  return eventsForMessage(all, userMessageId);
 }
 
-function useEvents(rootSessionId: () => string | undefined, worktree: () => string, stateHome: () => string, userMessageId: () => string | undefined = () => undefined) {
-  const read = () => readVisibleEvents(rootSessionId(), worktree(), stateHome(), userMessageId());
+function useEvents(rootSessionId: () => string | undefined, worktree: () => string, stateHome: () => string, userMessageId: () => string | undefined = () => undefined, runId: () => string | undefined = () => undefined) {
+  const read = () => readVisibleEvents(rootSessionId(), worktree(), stateHome(), userMessageId(), runId());
   const initial = read();
   let signature = JSON.stringify(initial);
   const [events, setEvents] = createSignal<PluginRunEvent[]>(initial);
@@ -609,11 +620,32 @@ async function showGraphSelector(api: TuiPluginApi, sessionID: string | undefine
   }
 }
 
+function runStatusLabel(run: { status: string; graph?: string; task?: string }): string {
+  return [run.status.toUpperCase(), run.graph, run.task ? run.task.slice(0, 80) : ""].filter(Boolean).join(" · ");
+}
+
+function showRunSelector(api: TuiPluginApi): void {
+  const runs = listProjectRuns(projectPath(api), stateHome(api));
+  if (!runs.length) {
+    api.ui.dialog.replace(() => api.ui.DialogAlert({ title: "OpenCode LangGraph", message: "No LangGraph runs found for this project yet.", onConfirm: () => api.ui.dialog.clear() }));
+    return;
+  }
+  api.ui.dialog.replace(() => api.ui.DialogSelect({
+    title: "Inspect a LangGraph run",
+    placeholder: "Search runs",
+    options: runs.map((run) => ({ title: `${run.graph} · ${run.status}`, value: run.runId, description: runStatusLabel(run) })),
+    onSelect(option) {
+      api.ui.dialog.clear();
+      openGraph(api, undefined, undefined, option.value);
+    },
+  }));
+}
+
 export function graphHelpText(): string {
   return `[F7] toggle · [F8] view · [F9] help
 
 USE
-/graph-select choose · /graph-models assign roles · /graph-toggle auto
+/graph-open inspect past run · /graph-select choose · /graph-models assign roles · /graph-toggle auto
 /run-graph <task> once · /graph-resume <answer> · /graph-cancel stop
 
 VIEW · panels
@@ -673,9 +705,10 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
   );
 }
 
-function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMessageId?: string }) {
+function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMessageId?: string; runID?: string }) {
   const [rootSessionId] = createSignal(props.rootSessionId);
-  const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId);
+  const [runID] = createSignal(props.runID);
+  const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId, () => runID());
   const spinner = useSpinner(events, props.api);
   const nodes = createMemo(() => executions(events()));
   const currentRun = createMemo(() => latest(events()));
@@ -803,16 +836,17 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" flexDirection="column" padding={1}>
       <box flexDirection="row" gap={2} flexShrink={0}>
-        <text fg={theme().primary}><b>LANGGRAPH//OPS</b></text>
+        <text fg={theme().primary}><b>LANGGRAPH</b></text>
         <text fg={liveColor()}><b>[{liveStatus()}]</b></text>
         <text fg={theme().secondary}>[{(currentRun().at(-1)?.graph ?? "no-graph").toUpperCase()}]</text>
-        <text fg={theme().textMuted}>RUN::{middleEllipsis(currentRun().at(-1)?.runId ?? "idle", 18)}</text>
-        <text fg={theme().textMuted}>FOCUS::{focus().toUpperCase()}</text>
-      </box>
-      <box flexDirection="row" gap={2} flexShrink={0}>
         <text fg={statusTone(semantic()?.phase ?? "idle", theme())}>[{(semantic()?.phase ?? "idle").toUpperCase()}]</text>
         <Show when={activePlan()}>{(node) => <text fg={theme().text}>{planGlyph(node().status)} {node().id} {node().title}</text>}</Show>
+        <box flexGrow={1} />
         <Show when={semantic()?.usage}>{(usage) => <text fg={theme().textMuted}>{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
+      </box>
+      <box flexDirection="row" gap={2} flexShrink={0}>
+        <text fg={theme().textMuted}>RUN::{currentRun().at(-1)?.runId ? middleEllipsis(currentRun().at(-1)!.runId!, 12) : "idle"}</text>
+        <text fg={theme().textMuted}>[graph-open] inspect another run</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
         <box onMouseUp={() => setFocusPanel("plan")} width="55%" flexShrink={0} border={true} borderColor={borderFor("plan")} title={` SOLUTION LOD [1] / ACTIVATION NETWORK [G] :: SELECT [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
@@ -836,18 +870,17 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
             <Show when={selectedEvent()} fallback={<text fg={theme().textMuted} padding={1}>Select an execution first.</text>}>
               {(item) => <>
                 <box flexDirection="row" gap={2} flexShrink={0} paddingX={1}>
-                  <text onMouseUp={() => { setDetail("output"); requestRender(); }} fg={detail() === "output" ? theme().primary : theme().textMuted}><b>Output [O]</b></text>
+                  <text onMouseUp={() => { setDetail("output"); requestRender(); }} fg={detail() === "output" ? theme().primary : theme().textMuted}><b>Summary [O]</b></text>
                   <text onMouseUp={() => { setDetail("prompt"); requestRender(); }} fg={detail() === "prompt" ? theme().primary : theme().textMuted}>Prompt [P]</text>
-                  <text onMouseUp={() => { setDetail("state"); requestRender(); }} fg={detail() === "state" ? theme().primary : theme().textMuted}>State [T]</text>
+                  <text onMouseUp={() => { setDetail("state"); requestRender(); }} fg={detail() === "state" ? theme().primary : theme().textMuted}>Raw state [T]</text>
                 </box>
                 <box flexDirection="row" gap={1} flexShrink={0} paddingX={1}>
                   <text fg={statusColor(item(), theme())}><b>{status(item(), spinner())} {item().node}</b></text>
                   <text fg={statusTone(item().status, theme())}>[{item().status.toUpperCase()}]</text>
                   <text fg={roleColor(item().agent, theme())}>[{shortAgent(item().agent)}]</text>
-                  <text fg={theme().textMuted}>{item().model}</text>
                   <Show when={item().usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
                 </box>
-                <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><text fg={theme().text}>{detail() === "output" ? item().text || (item().status === "active" ? `${spinner()} Model is running…` : "No output captured.") : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text></scrollbox>
+                <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><text fg={theme().text}>{detail() === "output" ? renderStructuredEvent(item()) : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text></scrollbox>
               </>}
             </Show>
           </box>
@@ -885,11 +918,12 @@ export const tui: TuiPlugin = async (api) => {
       session_prompt_right(_context, props) { activeSessionId = props.session_id; return <GraphToggle api={api} session_id={props.session_id} graph={graphToggle} />; },
     },
   });
-  const renderGraph = ({ params }: { params?: Record<string, unknown> }) => <GraphRoute api={api} rootSessionId={typeof params?.sessionID === "string" ? params.sessionID : activeSessionId} userMessageId={typeof params?.messageID === "string" ? params.messageID : undefined} />;
+  const renderGraph = ({ params }: { params?: Record<string, unknown> }) => <GraphRoute api={api} rootSessionId={typeof params?.sessionID === "string" ? params.sessionID : activeSessionId} userMessageId={typeof params?.messageID === "string" ? params.messageID : undefined} runID={typeof params?.runID === "string" ? params.runID : undefined} />;
   api.route.register([{ name: "langgraph.graph", render: renderGraph }]);
   api.keymap.registerLayer({
     commands: [
       { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() { openGraph(api, activeSessionId); } },
+      { name: "langgraph.graph.runs", title: "Inspect a past LangGraph run", slashName: "graph-open", category: "LangGraph", namespace: "palette", run() { showRunSelector(api); } },
       { name: "langgraph.graph.toggle", title: "Toggle LangGraph for this session", slashName: "graph-toggle", category: "LangGraph", namespace: "palette", run() { graphToggle.toggle(api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId); } },
       { name: "langgraph.graph.select", title: "Select LangGraph for this session", slashName: "graph-select", category: "LangGraph", namespace: "palette", async run() { await showGraphSelector(api, api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId, graphToggle); } },
       { name: "langgraph.graph.models", title: "Assign LangGraph role models", slashName: "graph-models", category: "LangGraph", namespace: "palette", run() { showModelAssignments(api, api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId, graphToggle); } },

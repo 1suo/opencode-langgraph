@@ -6,8 +6,8 @@ import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, is
 import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
-import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
-import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
+import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, type GraphControls } from "../src/opencode/tui.js";
+import { appendPluginEvent, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
@@ -1178,6 +1178,47 @@ describe("OpenCode graph viewer", () => {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
     }
+  });
+
+  it("lists project runs newest-first and filters visible events by a specific runId", async () => {
+    const stateHome = temp("opencode-langgraph-state-");
+    const project = temp("opencode-langgraph-project-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    try {
+      for (const [runId, task, status] of [["run-old", "oldest task", "completed"], ["run-new", "newest task", "running"]] as const) {
+        writeStoredRun({ runId, rootSessionId: "root-a", userMessageId: `message-${runId}`, graph: "solution-lod", task, directory: project, worktree: project, status });
+        appendPluginEvent({ at: new Date().toISOString(), runId, rootSessionId: "root-a", graph: "solution-lod", node: "__start__", status: "active", agent: "langgraph", model: "langgraph" });
+        appendPluginEvent({ at: new Date().toISOString(), runId, rootSessionId: "root-a", graph: "solution-lod", node: "answer", status: status === "completed" ? "completed" : "active", agent: "planner", model: "test/model", text: `${runId} output` });
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const runs = listProjectRuns(project, stateHome);
+      expect(runs.map((run) => run.runId)).toEqual(["run-new", "run-old"]);
+      expect(readVisibleEvents(undefined, project, stateHome, undefined, "run-old")).toHaveLength(2);
+      expect(readVisibleEvents(undefined, project, stateHome, undefined, "run-old").every((event) => event.runId === "run-old")).toBe(true);
+      expect(readVisibleEvents(undefined, project, stateHome, undefined, "missing-run")).toEqual([]);
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
+  it("renders a structured event summary instead of raw blobs", () => {
+    const event = {
+      runId: "run", rootSessionId: "root", graph: "solution-lod", node: "implement:r2", status: "failed", agent: "langgraph-implement", model: "inherit",
+      text: "Implement the selected behavior",
+      progress: { phase: "implement:r2", callsUsed: 3, activeNodeId: "r2", semantic: { kind: "solution-lod-v1" as const, revision: 1, candidates: [], constraints: [], evidence: [], activations: [{ id: "a14", capability: "implement", regionId: "r2", request: "", expectedDelta: "implement:r2:18", senderActivationId: undefined, status: "failed", error: "budget" }], artifacts: [], regions: [{ id: "r2", key: "r2", edge: "refines" as const, lod: 1, objective: "Settle emptiness", status: "actionable", viable: 1, total: 2, selectedCandidateIds: [], candidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] }] }, nodes: [] },
+      state: { phase: "blocked", callsUsed: 3, network: { regions: [{ id: "r2", status: "actionable" }], candidates: [], activations: [{ id: "a14", capability: "implement", regionId: "r2", status: "failed", error: "budget" }] } },
+      usage: { turns: 12, input: 1000, output: 200, reasoning: 0, cacheRead: 500, cacheWrite: 0, cost: 0.01 },
+    } as never;
+    const structured = renderStructuredEvent(event);
+    expect(structured).toContain("IMPLEMENT:R2  [FAILED]  IMPLEMENT");
+    expect(structured).toContain("OUTPUT");
+    expect(structured).toContain("Implement the selected behavior");
+    expect(structured).toContain("r2  [actionable]");
+    expect(structured).toContain("a14:implement  [failed]  r2");
+    expect(structured).toContain("budget");
+    expect(structured).not.toContain("\"phase\"");
   });
 
   it("opens the project graph when no chat session exists yet", async () => {
