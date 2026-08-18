@@ -3,9 +3,10 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import path from "node:path";
+import { accessSync, constants } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
-import type { SolutionSemanticSnapshot } from "../core/types.js";
-import { adoptHomeGraphState, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, type PluginRunEvent } from "./store.js";
+import type { ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot } from "../core/types.js";
+import { adoptHomeGraphState, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
   const value = api.route.current.name === "session" && "params" in api.route.current ? api.route.current.params?.sessionID : undefined;
@@ -216,7 +217,7 @@ function useSpinner(events: () => PluginRunEvent[], api: TuiPluginApi): () => st
 
 function statusColor(event: PluginRunEvent, theme: TuiPluginApi["theme"]["current"]) {
   if (event.status === "failed") return theme.error;
-  if (event.status === "active" || event.status === "interrupted") return theme.warning;
+  if (event.status === "active" || event.status === "interrupted" || event.status === "pruned") return theme.warning;
   if (event.status === "completed") return theme.success;
   return theme.textMuted;
 }
@@ -227,7 +228,7 @@ type ProgressNode = ProgressSnapshot["nodes"][number];
 
 function statusTone(value: string, theme: Theme) {
   if (value === "failed" || value === "blocked" || value === "contradiction") return theme.error;
-  if (value === "active" || value === "implementing" || value === "interrupted" || value === "superposed") return theme.warning;
+  if (value === "active" || value === "implementing" || value === "interrupted" || value === "pruned" || value === "superposed") return theme.warning;
   if (value === "verified" || value === "completed") return theme.success;
   if (value === "ready" || value === "implemented") return theme.info;
   if (value === "expanded") return theme.secondary;
@@ -468,6 +469,8 @@ interface GraphToggleController {
   defaultGraph(): string | undefined;
   toggle(sessionId?: string): boolean;
   select(sessionId: string | undefined, graph: string): void;
+  modelAssignments(sessionId?: string): SolutionRoleModelAssignments;
+  assignModel(sessionId: string | undefined, role: SolutionPresetRole, model: ModelDefinition | undefined): void;
   adopt(sessionId: string): void;
 }
 
@@ -500,12 +503,72 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
       setRevision((value) => value + 1);
       api.renderer.requestRender();
     },
+    modelAssignments(id) {
+      revision();
+      return id ? readSessionGraphState(id, stateHome(api))?.modelAssignments ?? {} : home()?.modelAssignments ?? {};
+    },
+    assignModel(id, role, model) {
+      const modelAssignments = { ...(id ? readSessionGraphState(id, stateHome(api))?.modelAssignments ?? {} : home()?.modelAssignments ?? {}), ...(model ? { [role]: model } : {}) };
+      if (!model) delete modelAssignments[role];
+      if (id) writeSessionGraphModelAssignments(id, modelAssignments, stateHome(api));
+      else writeHomeGraphState(projectPath(api), { enabled: home()?.enabled === true, graph: home()?.graph, modelAssignments }, stateHome(api));
+      setRevision((value) => value + 1);
+      api.renderer.requestRender();
+    },
     adopt(id) {
       if (!adoptHomeGraphState(id, projectPath(api), stateHome(api))) return;
       setRevision((value) => value + 1);
       api.renderer.requestRender();
     },
   };
+}
+
+const solutionRoles: SolutionPresetRole[] = ["inspect", "synthesize", "implement", "verify", "present"];
+
+function commandAvailable(command: string): boolean {
+  return (process.env.PATH ?? "").split(path.delimiter).some((directory) => {
+    try { accessSync(path.join(directory, command), constants.X_OK); return true; } catch { return false; }
+  });
+}
+
+function modelAssignmentLabel(model: ModelDefinition | undefined): string {
+  if (!model || (model.backend === "opencode" && model.model === "inherit")) return "Current OpenCode model";
+  if (model.backend === "opencode") return model.model;
+  return `${model.command} CLI`;
+}
+
+async function showRoleModelSelector(api: TuiPluginApi, sessionID: string | undefined, controller: GraphToggleController, role: SolutionPresetRole): Promise<void> {
+  try {
+    const listed = await api.client.v2.model.list({ location: { directory: projectPath(api) } });
+    const models = (listed.data?.data ?? []).filter((model) => model.enabled);
+    const options: Array<{ title: string; value: ModelDefinition | undefined; description?: string }> = [
+      { title: "Current OpenCode model", value: undefined, description: "Follow the model selected for this chat" },
+      ...models.map((model) => ({ title: `${model.providerID}/${model.id}`, value: { backend: "opencode" as const, model: `${model.providerID}/${model.id}` as `${string}/${string}` }, description: model.name })),
+      ...(commandAvailable("codex") ? [{ title: "Codex CLI", value: { backend: "command" as const, command: "codex", args: ["exec", "--skip-git-repo-check"] }, description: "Run Codex locally with the graph prompt on stdin" }] : []),
+    ];
+    api.ui.dialog.replace(() => api.ui.DialogSelect({
+      title: `Model for ${role}`,
+      placeholder: "Search available models",
+      current: controller.modelAssignments(sessionID)[role],
+      options,
+      onSelect(option) {
+        controller.assignModel(sessionID, role, option.value);
+        api.ui.dialog.clear();
+        api.ui.toast({ variant: "success", message: `${role}: ${modelAssignmentLabel(option.value)}` });
+      },
+    }));
+  } catch (error) {
+    api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function showModelAssignments(api: TuiPluginApi, sessionID: string | undefined, controller: GraphToggleController): void {
+  api.ui.dialog.replace(() => api.ui.DialogSelect({
+    title: "Assign LangGraph role models",
+    placeholder: "Choose a role",
+    options: solutionRoles.map((role) => ({ title: role, value: role, description: modelAssignmentLabel(controller.modelAssignments(sessionID)[role]) })),
+    onSelect(role) { void showRoleModelSelector(api, sessionID, controller, role.value); },
+  }));
 }
 
 export function graphToggleLabel(enabled: boolean, graph?: string): string {
@@ -550,7 +613,7 @@ export function graphHelpText(): string {
   return `[F7] toggle · [F8] view · [F9] help
 
 USE
-/graph-select choose · /graph-toggle auto
+/graph-select choose · /graph-models assign roles · /graph-toggle auto
 /run-graph <task> once · /graph-resume <answer> · /graph-cancel stop
 
 VIEW · panels
@@ -829,6 +892,7 @@ export const tui: TuiPlugin = async (api) => {
       { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() { openGraph(api, activeSessionId); } },
       { name: "langgraph.graph.toggle", title: "Toggle LangGraph for this session", slashName: "graph-toggle", category: "LangGraph", namespace: "palette", run() { graphToggle.toggle(api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId); } },
       { name: "langgraph.graph.select", title: "Select LangGraph for this session", slashName: "graph-select", category: "LangGraph", namespace: "palette", async run() { await showGraphSelector(api, api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId, graphToggle); } },
+      { name: "langgraph.graph.models", title: "Assign LangGraph role models", slashName: "graph-models", category: "LangGraph", namespace: "palette", run() { showModelAssignments(api, api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId, graphToggle); } },
       { name: "langgraph.graph.help", title: "Open LangGraph help", slashName: "graph-help", category: "LangGraph", namespace: "palette", run() { showGraphHelp(api); } },
     ],
     bindings: [

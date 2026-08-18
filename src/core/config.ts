@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { solutionLodGraph } from "./solution-lod/graph.js";
-import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, OpenCodeModel, SolutionLodPresetOptions, SolutionPresetRole } from "./types.js";
+import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, ModelDefinition, OpenCodeModel, SolutionLodPresetOptions, SolutionPresetModel, SolutionPresetRole, SolutionRoleModelAssignments } from "./types.js";
 import { DEFAULT_SOLUTION_ROLE_LIMITS } from "./solution-lod/types.js";
 import { SOLUTION_ROLE_CONTRACTS } from "./solution-lod/roles.js";
 
@@ -42,7 +42,7 @@ function presetDefinition(preset: ConnectorPresetConfig["preset"], options?: Sol
 function solutionLodPresetDefinition(options: SolutionLodPresetOptions = {}): ConnectorDefinition {
   const modelName = (role: SolutionPresetRole) => `${role}-model`;
   const roles = Object.keys(SOLUTION_ROLE_CONTRACTS) as SolutionPresetRole[];
-  const models = Object.fromEntries(roles.map((role) => [modelName(role), opencodeModel({ model: options.models?.[role] ?? SOLUTION_ROLE_CONTRACTS[role].defaultModel })]));
+  const models = Object.fromEntries(roles.map((role) => [modelName(role), presetModel(options.models?.[role] ?? SOLUTION_ROLE_CONTRACTS[role].defaultModel)]));
   const agent = (role: SolutionPresetRole): AgentDefinition => {
     const contract = SOLUTION_ROLE_CONTRACTS[role];
     return { model: modelName(role), opencodeAgent: contract.agent, systemPrompt: contract.systemPrompt, tools: contract.tools, maxSteps: options.roleLimits?.[role]?.maxTurns ?? DEFAULT_SOLUTION_ROLE_LIMITS[role].maxTurns ?? contract.maxSteps };
@@ -54,6 +54,20 @@ function solutionLodPresetDefinition(options: SolutionLodPresetOptions = {}): Co
     graphs: { "solution-lod": solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, roleLimits: options.roleLimits }) },
     defaultGraph: "solution-lod",
   };
+}
+
+function presetModel(model: SolutionPresetModel): ModelDefinition {
+  return typeof model === "string" ? opencodeModel({ model }) : model;
+}
+
+/** Apply the per-session model proxy to the built-in role model entries. */
+export function withSolutionRoleModelAssignments(definition: ConnectorDefinition, assignments: SolutionRoleModelAssignments | undefined): ConnectorDefinition {
+  if (!assignments || !Object.keys(assignments).length) return definition;
+  const models = { ...definition.models };
+  for (const [role, model] of Object.entries(assignments) as Array<[SolutionPresetRole, ModelDefinition | undefined]>) {
+    if (model) models[`${role}-model`] = model;
+  }
+  return { ...definition, models };
 }
 
 export function writeConnectorConfig(repo: string): string {

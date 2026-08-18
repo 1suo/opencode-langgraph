@@ -8,7 +8,7 @@ import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
 import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, tui, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
-import { loadConnectorDefinition, typedConfigFile, writeConnectorConfig } from "../src/core/config.js";
+import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
 import { completeVerification, ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, reopenRegion } from "../src/core/solution-lod/reducer.js";
@@ -84,8 +84,9 @@ describe("typed graph validation", () => {
     const project = temp("opencode-langgraph-config-");
     const definition = await loadConnectorDefinition(project);
     expect(definition.defaultGraph).toBe("solution-lod");
-    expect(definition.models["inspect-model"]).toEqual({ backend: "opencode", model: "deepseek/deepseek-v4-flash" });
-    expect(definition.models["synthesize-model"]).toEqual({ backend: "opencode", model: "deepseek/deepseek-v4-flash" });
+    for (const role of ["inspect", "synthesize", "implement", "verify", "present"]) {
+      expect(definition.models[`${role}-model`]).toEqual({ backend: "opencode", model: "inherit" });
+    }
     expect(definition.agents.inspect).toMatchObject({ model: "inspect-model", maxSteps: 32, tools: { read: true, bash: false, edit: false, task: false } });
     expect(definition.agents.synthesize).toMatchObject({ model: "synthesize-model", maxSteps: 8, tools: { read: false, bash: false } });
     expect(definition.agents.verify).toMatchObject({ model: "verify-model", maxSteps: 16, tools: { bash: true, edit: false } });
@@ -106,6 +107,18 @@ describe("typed graph validation", () => {
     expect(definition.agents.inspect.maxSteps).toBe(3);
     const initial = definition.graphs["solution-lod"].initial({ task: "x", directory: project, worktree: project, runId: "x" }) as SolutionLodState;
     expect(initial.stateVersion).toBe(3);
+  });
+
+  it("applies per-session role assignments without changing the configured definition", async () => {
+    const project = temp("solution-lod-model-proxy-");
+    const definition = await loadConnectorDefinition(project);
+    const assigned = withSolutionRoleModelAssignments(definition, {
+      inspect: { backend: "opencode", model: "provider/fast" },
+      implement: commandModel({ command: "codex", args: ["exec"] }),
+    });
+    expect(assigned.models["inspect-model"]).toEqual({ backend: "opencode", model: "provider/fast" });
+    expect(assigned.models["implement-model"]).toEqual({ backend: "command", command: "codex", args: ["exec"] });
+    expect(definition.models["inspect-model"]).toEqual({ backend: "opencode", model: "inherit" });
   });
 });
 
@@ -820,11 +833,11 @@ describe("OpenCode automatic graph routing", () => {
       const config = {} as { command?: Record<string, unknown>; agent?: Record<string, { tools?: Record<string, boolean>; maxSteps?: number; permission?: Record<string, unknown> }> };
       await hooks.config?.(config as never);
       expect(Object.keys(config.command ?? {})).toEqual(["run-graph", "graph-resume", "graph-cancel"]);
-      expect(config.agent?.["langgraph-presenter"]).toMatchObject({ maxSteps: 1, tools: { read: false, bash: false, edit: false, task: false, skill: false } });
+      expect(config.agent?.["langgraph-presenter"]).toMatchObject({ maxSteps: 8, tools: { read: false, bash: false, edit: false, task: false, skill: false } });
       expect(config.agent?.["langgraph-inspector"]).toMatchObject({ maxSteps: 32, tools: { read: true, bash: false, skill: false }, permission: { bash: "deny", external_directory: "deny" } });
       expect(config.agent?.["langgraph-synthesizer"]).toMatchObject({ maxSteps: 8, tools: { read: false, bash: false, skill: false }, permission: { bash: "deny", external_directory: "deny" } });
       expect(config.agent?.["langgraph-verifier"]).toMatchObject({ tools: { bash: true, edit: false, skill: false }, permission: { bash: "allow", edit: "deny", external_directory: "deny" } });
-      expect(hooks.tool).toBeUndefined();
+      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_inspect", "langgraph_prune", "langgraph_resume"]);
       const output = {
         message: { id: "message-1", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
         parts: [{ id: "part-1", messageID: "message-1", sessionID: "root", type: "text", text: "What is 2+2?" }],
@@ -849,7 +862,8 @@ describe("OpenCode automatic graph routing", () => {
       while ((child < 4 || posted.length < 6) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
       expect(child).toBe(4);
       expect(posted).toHaveLength(6);
-      expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter", tools: { read: false, bash: false, edit: false, task: false } } });
+      expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter" } });
+      expect((posted.at(-1) as { body: Record<string, unknown> }).body.tools).toBeUndefined();
       const events = readPluginEvents("root");
       expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "present:r1", "__end__"]));
       expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
@@ -857,6 +871,86 @@ describe("OpenCode automatic graph routing", () => {
         originalTask: "What is 2+2?",
         conversationContext: "ASSISTANT: The answer is 4.\nASSISTANT: The answer is 4.",
       });
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
+  it("prunes a blocked run via the langgraph_prune tool and resumes it from the checkpoint", async () => {
+    const state = temp("opencode-langgraph-tool-state-");
+    const directory = temp("opencode-langgraph-tool-project-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = state;
+    try {
+      fs.writeFileSync(path.join(directory, "target.txt"), "base");
+      let child = 0;
+      const posted: unknown[] = [];
+      const parents = new Map<string, string | undefined>([["root", undefined]]);
+      const titles = new Map<string, string>();
+      const client = { session: {
+        get: async ({ path: requestPath }: { path: { id: string } }) => ({ data: { id: requestPath.id, parentID: parents.get(requestPath.id) } }),
+        create: async ({ body }: { body: { parentID: string; title: string } }) => {
+          const id = `child-${++child}`;
+          parents.set(id, body.parentID);
+          titles.set(id, body.title);
+          return { data: { id } };
+        },
+        promptAsync: async (input: unknown) => { posted.push(input); return { data: undefined }; },
+        status: async () => ({ data: {} }),
+        messages: async ({ path: requestPath }: { path: { id: string } }) => {
+          if (requestPath.id === "root") return { data: [{ info: { role: "user", model: { providerID: "test", modelID: "model" } }, parts: [{ type: "text", text: "task" }] }] };
+          const title = titles.get(requestPath.id) ?? "";
+          let structured: unknown;
+          if (title.includes("inspect:r1")) {
+            structured = { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] };
+          } else if (title.includes("synthesize:r1")) {
+            structured = { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["direct"], actionable: true, activations: [] };
+          } else if (title.includes("implement:r1")) {
+            fs.writeFileSync(path.join(directory, "target.txt"), "after");
+            structured = { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] };
+          } else if (title.includes("verify:r1")) {
+            structured = { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] };
+          }
+          return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: JSON.stringify(structured ?? {}) }] }] };
+        },
+        abort: async () => ({ data: true }),
+      } };
+      const hooks = await server({ client, directory, worktree: directory } as never);
+      const runId = "tool-run";
+      writeStoredRun({ checkpointVersion: 3, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
+
+      const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, checkpointer: new DurableFileSaver(path.join(state, "opencode-langgraph", "checkpoints")) });
+      let recovering = false;
+      const runtime = { call: async (input: { node: string }) => {
+        if (!recovering) throw new Error("insufficient balance");
+        if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] } };
+        if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["direct"], actionable: true, activations: [] } };
+        if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [], activations: [] } }; }
+        if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] } };
+        throw new Error(`unexpected node ${input.node}`);
+      } };
+      const failed = await configured.graph.invoke(configured.initial({ task: "task", directory, worktree: directory, runId }), { recursionLimit: 64, configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => {} } });
+      expect(configured.progress?.(failed)?.phase).toBe("blocked");
+      recovering = true;
+
+      const toolContext = { sessionID: "root", directory, worktree: directory, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
+
+      const inspectOutput = await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext);
+      const inspected = JSON.parse(inspectOutput);
+      expect(inspected.storedStatus).toBe("failed");
+      expect(inspected.phase).toBe("blocked");
+
+      const pruneOutput = await (hooks.tool?.langgraph_prune.execute as (args: { runId?: string; regionId: string; reason?: string }, ctx: never) => Promise<string>)({ regionId: "r1", reason: "insufficient balance during inspection" }, toolContext);
+      expect(JSON.parse(pruneOutput).phase).toBe("pruned");
+      expect(readStoredRun(runId).status).toBe("pruned");
+
+      const resumeOutput = await (hooks.tool?.langgraph_resume.execute as (args: { runId?: string; answer?: string }, ctx: never) => Promise<string>)({}, toolContext);
+      const resumed = JSON.parse(resumeOutput);
+      expect(resumed.failed).toBe(false);
+      expect(resumed.interrupted).toBe(false);
+      expect(readStoredRun(runId).status).toBe("completed");
+      expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("after");
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
-import type { AgentPromptTrace, AgentUsage, GraphProgressSnapshot } from "../core/types.js";
+import type { AgentPromptTrace, AgentUsage, GraphProgressSnapshot, SolutionRoleModelAssignments } from "../core/types.js";
 
 export interface PluginRunEvent {
   at: string;
@@ -33,12 +33,14 @@ export interface StoredRun {
   task: string;
   directory: string;
   worktree: string;
-  status: "queued" | "running" | "interrupted" | "completed" | "failed" | "cancelled";
+  modelAssignments?: SolutionRoleModelAssignments;
+  status: "queued" | "running" | "interrupted" | "completed" | "failed" | "cancelled" | "pruned";
 }
 
 export interface SessionGraphState {
   enabled: boolean;
   graph?: string;
+  modelAssignments?: SolutionRoleModelAssignments;
 }
 
 function stateBase(stateHome?: string): string {
@@ -92,6 +94,10 @@ export function writeSessionGraphEnabled(sessionId: string, enabled: boolean, st
 
 export function writeSessionGraphName(sessionId: string, graph: string, stateHome?: string): void {
   writeSessionGraphState(sessionId, { enabled: false, ...readSessionGraphState(sessionId, stateHome), graph }, stateHome);
+}
+
+export function writeSessionGraphModelAssignments(sessionId: string, modelAssignments: SolutionRoleModelAssignments, stateHome?: string): void {
+  writeSessionGraphState(sessionId, { enabled: false, ...readSessionGraphState(sessionId, stateHome), modelAssignments }, stateHome);
 }
 
 export function writeSessionGraphState(sessionId: string, state: SessionGraphState, stateHome?: string): void {

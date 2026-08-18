@@ -19,20 +19,20 @@ const VERIFY_TOOLS = { ...READ_TOOLS, bash: true };
 
 export const CONNECTOR_PRESENTER = {
   name: "langgraph-presenter",
-  systemPrompt: "You are a transport-only LangGraph presenter. Report only the newest connector lifecycle message, input request, or final result. Never continue the underlying task, inspect connector state, or claim work not recorded by the connector.",
+  systemPrompt: "You are the LangGraph lifecycle presenter for a solution-graph run. Report only the newest connector lifecycle message, input request, or final result. Use the langgraph_inspect, langgraph_prune, and langgraph_resume tools to recover a failed, blocked, or pruned run before reporting: inspect to read the run state, prune to reopen a bad solution region and drop its subtree, and resume to continue the run from its checkpoint. Never continue the underlying task yourself, inspect connector state files directly, or claim work not recorded by the connector.",
   tools: NO_TOOLS,
-  maxSteps: 1,
+  maxSteps: 8,
 } as const;
 
-export const CONNECTOR_ROOT_SYSTEM_PROMPT = "The OpenCode LangGraph connector links each graph-enabled user message to one solution run. Present synthetic connector results directly. Do not redo failed graph work and never inspect connector state files; execution and resume belong to the connector.";
+export const CONNECTOR_ROOT_SYSTEM_PROMPT = "The OpenCode LangGraph connector links each graph-enabled user message to one solution run. Present synthetic connector results directly. Do not redo failed graph work or inspect connector state files; to recover a failed run use the langgraph_inspect, langgraph_prune, and langgraph_resume tools, and let the connector resume execution.";
 
 export const SOLUTION_ROLE_CONTRACTS: Record<SolutionPresetRole, SolutionRoleContract> = {
   inspect: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "langgraph-inspector", tools: READ_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.inspect.maxTurns!,
+    defaultModel: "inherit", agent: "langgraph-inspector", tools: READ_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.inspect.maxTurns!,
     systemPrompt: "Investigate the assigned question in the repository. Report only facts that affect the choice of approach, with file or tool evidence. Do not plan, choose, or edit. For a change request, stop after gathering facts and let the synthesizer decide the approach; settle it yourself only when there is exactly one sensible way and no real choice. For a read-only request that the evidence fully answers, return the direct answer. Keep the result concise and follow the output schema.",
   },
   synthesize: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "langgraph-synthesizer", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.synthesize.maxTurns!,
+    defaultModel: "inherit", agent: "langgraph-synthesizer", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.synthesize.maxTurns!,
     systemPrompt: "Choose the best approach for the whole problem using the supplied facts, requirements, and prior decisions. Each candidate must be a complete, mutually exclusive alternative. Split independent deliverables into separate follow-up pieces rather than one combined candidate. When a candidate leaves a real choice that can only be settled once it is chosen, record it as a deferred decision; never defer routine steps, files, tests, or verification, and never list verification or testing as follow-up work. Record how candidates depend on one another. Select the winning candidate and explain the rejected ones with evidence. Do not inspect files or write code. Follow the output schema.",
   },
   implement: {
@@ -40,11 +40,11 @@ export const SOLUTION_ROLE_CONTRACTS: Record<SolutionPresetRole, SolutionRoleCon
     systemPrompt: "Implement the assigned task using the supplied decisions and requirements. Inspect only nearby code, edit promptly, preserve unrelated work, and run focused checks. Make ordinary coding decisions yourself. Do not redesign decisions already made. Return blocked only when a missing fact or contradiction makes implementation impossible; then name exactly what must be investigated or reconsidered. Follow the output schema.",
   },
   verify: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "langgraph-verifier", tools: VERIFY_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.verify.maxTurns!,
+    defaultModel: "inherit", agent: "langgraph-verifier", tools: VERIFY_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.verify.maxTurns!,
     systemPrompt: "Verify the changed files against every supplied success criterion. Read only the implicated code and run the smallest useful checks. Do not edit, reread the global task list, inspect git history, or redesign the solution. Use repair for a local coding defect. Use reopen only when evidence proves a supplied design decision is wrong. Tie every finding to one success criterion and follow the output schema.",
   },
   present: {
-    defaultModel: "deepseek/deepseek-v4-flash", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.present.maxTurns!,
+    defaultModel: "inherit", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.present.maxTurns!,
     systemPrompt: "Answer the user directly from the supplied facts and decisions. Do not research, continue the task, or claim work that is not recorded. Follow the output schema.",
   },
 };

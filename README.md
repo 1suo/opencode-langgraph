@@ -37,7 +37,7 @@ Every agent activation runs in an OpenCode child session. The production graph s
 
 ## Configure
 
-Without configuration, the connector uses `preset: "solution-lod"`. Its solution regions carry candidate domains, constraints, evidence, acceptance criteria, and conditional next-LOD definitions. Regions can be resolved at different depths; implementation starts when a required region is actionable. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and scheduling quantum. Inspect, synthesize, verify, and present use `deepseek/deepseek-v4-flash`; implement inherits the parent OpenCode model. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
+Without configuration, the connector uses `preset: "solution-lod"`. Its solution regions carry candidate domains, constraints, evidence, acceptance criteria, and conditional next-LOD definitions. Regions can be resolved at different depths; implementation starts when a required region is actionable. The production role registry is the single source for every built-in prompt, model default, OpenCode agent, tool policy, and scheduling quantum. Every built-in role inherits the model selected for the current OpenCode chat by default—no provider is hardcoded. Run `/graph-models` to assign a different enabled OpenCode model to any role for this session (or before the first session on the home prompt). If `codex` is on `PATH`, that picker also offers Codex CLI. Assignments are stored in connector state, not in the repository, and a running graph snapshots them for resume. Run `opencode-langgraph init` only when you want an optional `.opencode/langgraph.ts`:
 
 ```ts
 import { defineOpenCodeLangGraph } from "opencode-langgraph"
@@ -52,7 +52,7 @@ export default defineOpenCodeLangGraph({
 })
 ```
 
-All overrides are optional. `models` accepts `inherit` or `provider/model` per capability. `roleLimits` define one activation's scheduling quantum. Usage is telemetry and scheduling pressure, not a user-facing budget gate or a reason to discard state. Human interrupts are reserved for indispensable engineering decisions.
+All overrides are optional. `models` accepts `inherit`, `provider/model`, or a full model definition such as `commandModel({ command: "codex", args: ["exec", "--skip-git-repo-check"] })` per capability. `roleLimits` define one activation's scheduling quantum. Usage is telemetry and scheduling pressure, not a user-facing budget gate or a reason to discard state. Human interrupts are reserved for indispensable engineering decisions.
 
 Inspect has repository read/search tools but no shell. Synthesize is tool-free. Implementation receives the collapsed ancestry, actionable region, relevant constraints/evidence, and artifacts. Verification maps failures to exact regions. Malformed output fails only its activation; actual workspace changes are reconciled and retained.
 

@@ -91,8 +91,10 @@ export interface ConnectorPresetConfig {
 }
 
 export type SolutionPresetRole = "inspect" | "synthesize" | "implement" | "verify" | "present";
+export type SolutionPresetModel = OpenCodeModel["model"] | ModelDefinition;
+export type SolutionRoleModelAssignments = Partial<Record<SolutionPresetRole, ModelDefinition>>;
 export interface SolutionLodPresetOptions {
-  models?: Partial<Record<SolutionPresetRole, "inherit" | `${string}/${string}`>>;
+  models?: Partial<Record<SolutionPresetRole, SolutionPresetModel>>;
   roleLimits?: Partial<Record<SolutionPresetRole, AgentCallLimits>>;
 }
 

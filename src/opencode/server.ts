@@ -2,13 +2,16 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Command, isInterrupted } from "@langchain/langgraph";
 import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
-import { loadConnectorDefinition } from "../core/config.js";
+import { tool } from "@opencode-ai/plugin";
+import { loadConnectorDefinition, withSolutionRoleModelAssignments } from "../core/config.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
 import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
 import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
+import { reopenRegion } from "../core/solution-lod/reducer.js";
+import type { GraphProgressSnapshot } from "../core/types.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "./verifier-workspace.js";
 
 const PRESENTER_AGENT = CONNECTOR_PRESENTER.name;
@@ -72,9 +75,26 @@ export const server: Plugin = async (plugin) => {
   };
   return {
     event: ({ event }) => forwardPermissionEvent(event),
+    tool: {
+      langgraph_inspect: tool({
+        description: "Inspect the current LangGraph run: stored status, graph phase, checkpointed solution network, usage, and result. Read-only; use this before pruning or resuming a failed or blocked run.",
+        args: { runId: tool.schema.string().optional() },
+        execute: async (args: { runId?: string }, context) => inspectRun(context.sessionID, args.runId),
+      }),
+      langgraph_prune: tool({
+        description: "Reopen a solution region and drop its subtree so the graph can resynthesize it, then resume the run from its checkpoint. Writes the pruned network back to the run's checkpoint and marks it resumable.",
+        args: { runId: tool.schema.string().optional(), regionId: tool.schema.string(), reason: tool.schema.string().optional() },
+        execute: async (args: { runId?: string; regionId: string; reason?: string }, context) => pruneRun(context.sessionID, args.runId, args.regionId, args.reason),
+      }),
+      langgraph_resume: tool({
+        description: "Resume a LangGraph run from its saved checkpoint. For an interrupted run awaiting human input, pass the answer. For a pruned run, continues from the checkpoint so the graph can make progress again.",
+        args: { runId: tool.schema.string().optional(), answer: tool.schema.string().optional() },
+        execute: async (args: { runId?: string; answer?: string }, context) => resumeRun(plugin, context.sessionID, args.runId, args.answer),
+      }),
+    },
     config: async (config) => {
       config.agent ??= {};
-      config.agent[PRESENTER_AGENT] = { description: "Tool-free LangGraph lifecycle presenter", mode: "primary", hidden: true, prompt: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, maxSteps: CONNECTOR_PRESENTER.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
+      config.agent[PRESENTER_AGENT] = { description: "LangGraph lifecycle presenter and graph recovery", mode: "primary", hidden: true, prompt: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, maxSteps: CONNECTOR_PRESENTER.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
       for (const [role, contract] of Object.entries(SOLUTION_ROLE_CONTRACTS)) {
         if (contract.agent === "build" || contract.agent === "plan") continue;
         config.agent[contract.agent] = { description: `LangGraph ${role} capability`, mode: "subagent", hidden: true, prompt: contract.systemPrompt, tools: contract.tools, maxSteps: contract.maxSteps, permission: { edit: "deny", bash: role === "verify" ? "allow" : "deny", webfetch: "deny", external_directory: "deny" } };
@@ -145,7 +165,7 @@ export const server: Plugin = async (plugin) => {
       void executeGraph(plugin, {
         task, conversationContext, rootSessionId: input.sessionID, userMessageId: rootMessageID,
         directory: plugin.directory, worktree: executionWorktree(plugin.directory, plugin.worktree), parentModel,
-        graph: graphState?.graph, signal: controller.signal,
+        graph: graphState?.graph, modelAssignments: graphState?.modelAssignments, signal: controller.signal,
       })
         .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
         .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error))
@@ -181,7 +201,7 @@ async function postRootMessage(
   try {
     await plugin.client.session.promptAsync({
       path: { id: sessionID }, query: { directory: plugin.directory }, throwOnError: true,
-      body: { messageID, model, agent: PRESENTER_AGENT, system: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, parts: [{ type: "text", text }] },
+      body: { messageID, model, agent: PRESENTER_AGENT, system: CONNECTOR_PRESENTER.systemPrompt, parts: [{ type: "text", text }] },
     });
   } catch (error) {
     internalMessages.delete(messageID);
@@ -193,7 +213,7 @@ async function postGraphResult(plugin: PluginInput, internalMessages: Set<string
   const text = result.interrupted
     ? `LangGraph ${result.graph} paused for human input. Ask the user this question and nothing else:\n${result.output}`
     : result.failed
-      ? `LangGraph ${result.graph} ended without verified success. Report this result directly; do not claim completion or rerun it:\n${result.output}`
+      ? `LangGraph ${result.graph} ended without verified success. You may inspect it with langgraph_inspect and, if a solution region caused the failure, recover it with langgraph_prune and langgraph_resume. Otherwise report this result directly; do not claim completion:\n${result.output}`
       : `LangGraph ${result.graph} completed. Present this result directly; do not repeat its edits or rerun it:\n${result.output}`;
   await postRootMessage(plugin, internalMessages, sessionID, parentMessageID, model, text);
 }
@@ -201,6 +221,91 @@ async function postGraphResult(plugin: PluginInput, internalMessages: Set<string
 async function postGraphFailure(plugin: PluginInput, internalMessages: Set<string>, sessionID: string, parentMessageID: string, model: { providerID: string; modelID: string } | undefined, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   await postRootMessage(plugin, internalMessages, sessionID, parentMessageID, model, `LangGraph failed: ${message}. Report this failure clearly and suggest /graph for node details. Do not claim the task completed.`);
+}
+
+type LoadedGraph = { configured: NonNullable<Awaited<ReturnType<typeof loadConnectorDefinition>>["graphs"][string]> };
+
+async function loadGraphForRun(saved: StoredRun): Promise<LoadedGraph> {
+  const loaded = await loadConnectorDefinition(saved.worktree);
+  const definition = saved.graph === "solution-lod" ? withSolutionRoleModelAssignments(loaded, saved.modelAssignments) : loaded;
+  assertValidConnector(await validateConnector(definition));
+  const configured = definition.graphs[saved.graph];
+  if (!configured) throw new Error(`Configured graph no longer exists: ${saved.graph}`);
+  return { configured };
+}
+
+async function resolveStoredRun(sessionID: string, runId?: string): Promise<StoredRun> {
+  const run = runId ? readStoredRun(runId) : readLatestStoredRun(sessionID);
+  if (!run) throw new Error(runId ? `No LangGraph run found for runId ${runId}.` : "No LangGraph run found for this session. Start a graph run first.");
+  return run;
+}
+
+function runSummary(saved: StoredRun, state: unknown, progress?: GraphProgressSnapshot): string {
+  const values = state as Record<string, unknown> | undefined;
+  return JSON.stringify({
+    runId: saved.runId, graph: saved.graph, storedStatus: saved.status, phase: values?.phase,
+    result: values?.result, callsUsed: values?.callsUsed, usage: values?.usage,
+    progress,
+  }, null, 2);
+}
+
+async function inspectRun(sessionID: string, runId?: string): Promise<string> {
+  const saved = await resolveStoredRun(sessionID, runId);
+  const { configured } = await loadGraphForRun(saved);
+  const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
+  return runSummary(saved, snapshot.values, configured.progress?.(snapshot.values as never));
+}
+
+async function pruneRun(sessionID: string, runId: string | undefined, regionId: string, reason?: string): Promise<string> {
+  const saved = await resolveStoredRun(sessionID, runId);
+  if (saved.graph !== "solution-lod") throw new Error("langgraph_prune only supports the solution-lod graph.");
+  const { configured } = await loadGraphForRun(saved);
+  const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
+  const values = snapshot.values as { network: Parameters<typeof reopenRegion>[0]; activeActivationId?: string; result: string; phase: string; [key: string]: unknown };
+  const region = values.network.regions.find((item: { id: string }) => item.id === regionId);
+  if (!region) throw new Error(`Region ${regionId} not found in the run's solution network. Use langgraph_inspect to list regions.`);
+  const networkInput = reopenRegion(values.network, regionId, reason ?? `Reopened by agent: region ${regionId}`);
+  const network = {
+    ...networkInput,
+    activations: networkInput.activations.filter((item: { regionId: string; status: string }) => item.regionId !== regionId || item.status === "completed"),
+    regions: networkInput.regions.map((item: { id: string; activationIds: string[] }) => item.id === regionId ? { ...item, activationIds: [] } : item),
+  };
+  const updated = { ...values, network, activeActivationId: undefined, result: "", phase: "pruned" };
+  await configured.graph.updateState({ configurable: { thread_id: saved.runId } }, updated, "__start__");
+  writeStoredRun({ ...saved, status: "pruned" });
+  appendPluginEvent({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, userMessageId: saved.userMessageId, graph: saved.graph, node: `__prune__:${regionId}`, status: "pruned", agent: "connector", model: "connector", text: `Pruned region ${regionId}: ${reason ?? "reopened for resynthesis"}`, state: updated });
+  const fresh = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
+  return runSummary(saved, fresh.values, configured.progress?.(fresh.values as never));
+}
+
+async function resumeRun(plugin: PluginInput, sessionID: string, runId: string | undefined, answer?: string): Promise<string> {
+  const saved = await resolveStoredRun(sessionID, runId);
+  if (saved.status === "interrupted") {
+    const parentModel = await rootSessionModel(plugin, saved.rootSessionId);
+    const result = await resumeFromCheckpoint(plugin, saved, new Command({ resume: answer }), { parentModel });
+    return JSON.stringify({
+      runId: result.runId, graph: result.graph, interrupted: result.interrupted, failed: result.failed,
+      output: result.output.slice(0, 8_000),
+    }, null, 2);
+  }
+  if (saved.status === "pruned") {
+    const parentModel = await rootSessionModel(plugin, saved.rootSessionId);
+    const result = await resumeFromCheckpoint(plugin, saved, null, { parentModel });
+    return JSON.stringify({
+      runId: result.runId, graph: result.graph, interrupted: result.interrupted, failed: result.failed,
+      output: result.output.slice(0, 8_000),
+    }, null, 2);
+  }
+  throw new Error(`LangGraph run ${saved.runId} is ${saved.status} and cannot be resumed. Prune a region first with langgraph_prune, then resume.`);
+}
+
+async function rootSessionModel(plugin: PluginInput, sessionID: string): Promise<{ providerID: string; modelID: string } | undefined> {
+  try {
+    const messages = await plugin.client.session.messages({ path: { id: sessionID }, query: { directory: plugin.directory }, throwOnError: true });
+    return messageModel(messages.data.at(-1)?.info ?? { role: "user" });
+  } catch {
+    return undefined;
+  }
 }
 
 interface GraphExecution {
@@ -220,6 +325,7 @@ interface ExecuteGraphInput {
   worktree: string;
   parentModel?: { providerID: string; modelID: string };
   graph?: string;
+  modelAssignments?: import("../core/types.js").SolutionRoleModelAssignments;
   signal?: AbortSignal;
   ask?: (input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) => Promise<void>;
   metadata?: (input: { title?: string; metadata?: Record<string, unknown> }) => void;
@@ -240,9 +346,10 @@ function watchCancellation(runId: string, upstream?: AbortSignal) {
 }
 
 async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Promise<GraphExecution> {
-  const definition = await loadConnectorDefinition(input.worktree);
+  const loaded = await loadConnectorDefinition(input.worktree);
+  const graphName = input.graph ?? loaded.defaultGraph;
+  const definition = graphName === "solution-lod" ? withSolutionRoleModelAssignments(loaded, input.modelAssignments) : loaded;
   assertValidConnector(await validateConnector(definition));
-  const graphName = input.graph ?? definition.defaultGraph;
   const configured = definition.graphs[graphName];
   if (!configured) throw new Error(`Unknown LangGraph: ${graphName}`);
   const runId = randomUUID();
@@ -260,7 +367,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
       input.metadata?.({ title: `LangGraph · ${event.node}`, metadata: { runId, graph: graphName, ...event } });
     },
   });
-  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 3 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, status: "running" };
+  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 3 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, modelAssignments: input.modelAssignments, status: "running" };
   writeStoredRun(saved);
   let lease: WorktreeLease | undefined;
   const acquire = async () => {
@@ -309,11 +416,28 @@ async function executeResume(
   signal = new AbortController().signal,
   ask?: ExecuteGraphInput["ask"],
 ): Promise<GraphExecution> {
+  return resumeFromCheckpoint(plugin, saved, new Command({ resume: answer }), { parentModel, signal, ask });
+}
+
+interface CheckpointResumeOptions {
+  parentModel?: { providerID: string; modelID: string };
+  signal?: AbortSignal;
+  ask?: ExecuteGraphInput["ask"];
+}
+
+async function resumeFromCheckpoint(
+  plugin: PluginInput,
+  saved: StoredRun,
+  input: null | InstanceType<typeof Command>,
+  options: CheckpointResumeOptions = {},
+): Promise<GraphExecution> {
   if (saved.graph === "solution-lod" && saved.checkpointVersion !== 3) throw new Error("This interrupted solution-lod run uses an incompatible checkpoint schema. Start a new message to create a clean state-v3 run.");
-  const definition = await loadConnectorDefinition(saved.worktree);
+  const loaded = await loadConnectorDefinition(saved.worktree);
+  const definition = saved.graph === "solution-lod" ? withSolutionRoleModelAssignments(loaded, saved.modelAssignments) : loaded;
   assertValidConnector(await validateConnector(definition));
   const configured = definition.graphs[saved.graph];
   if (!configured) throw new Error(`Configured graph no longer exists: ${saved.graph}`);
+  let signal = options.signal ?? new AbortController().signal;
   const cancellation = watchCancellation(saved.runId, signal);
   signal = cancellation.signal;
   const emit = (event: PluginRunEvent) => {
@@ -321,15 +445,17 @@ async function executeResume(
     appendPluginEvent(linked);
   };
   const runtime = new OpenCodeAgentRuntime({
-    plugin, definition, parentSessionId: saved.rootSessionId, parentModel,
-    directory: saved.directory, worktree: saved.worktree, signal, ask,
-    onEvent: (event) => emit({ ...event, at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, progress: event.state ? configured.progress?.(event.state) : undefined }),
+    plugin, definition, parentSessionId: saved.rootSessionId, parentModel: options.parentModel,
+    directory: saved.directory, worktree: saved.worktree, signal, ask: options.ask,
+    onEvent: (event) => {
+      emit({ ...event, at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, progress: event.state ? configured.progress?.(event.state) : undefined });
+    },
   });
   let lease: WorktreeLease | undefined;
   const acquire = async () => { if (!lease) lease = await acquireWorktree(saved.worktree, signal); };
   writeStoredRun({ ...saved, status: "running" });
   try {
-    const result = await configured.graph.invoke(new Command({ resume: answer }), { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });
+    const result = await configured.graph.invoke(input, { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const output = JSON.stringify(result.__interrupt__.map((item) => item.value), null, 2);
