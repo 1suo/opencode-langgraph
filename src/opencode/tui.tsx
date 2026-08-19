@@ -6,7 +6,7 @@ import path from "node:path";
 import { accessSync, constants } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import type { ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot } from "../core/types.js";
-import { adoptHomeGraphState, listProjectRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
+import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
   const value = api.route.current.name === "session" && "params" in api.route.current ? api.route.current.params?.sessionID : undefined;
@@ -449,8 +449,17 @@ function eventsForMessage(events: PluginRunEvent[], userMessageId?: string): Plu
 }
 
 export function readVisibleEvents(rootSessionId: string | undefined, worktree: string, stateHome: string, userMessageId?: string, runId?: string): PluginRunEvent[] {
+  if (runId) {
+    // A run's events live in the launching session's event file, which is not
+    // necessarily the active session (e.g. graphs launched by agents).
+    try {
+      const run = readStoredRun(runId, stateHome);
+      return readPluginEvents(run.rootSessionId, stateHome).filter((event) => event.runId === runId);
+    } catch {
+      return [];
+    }
+  }
   const all = rootSessionId ? readPluginEvents(rootSessionId, stateHome) : readLatestProjectEvents(worktree, stateHome);
-  if (runId) return all.filter((event) => event.runId === runId);
   return eventsForMessage(all, userMessageId);
 }
 
@@ -625,15 +634,23 @@ function runStatusLabel(run: { status: string; graph?: string; task?: string }):
 }
 
 function showRunSelector(api: TuiPluginApi): void {
-  const runs = listProjectRuns(projectPath(api), stateHome(api));
+  const project = projectPath(api);
+  const runs = listAllRuns(stateHome(api));
   if (!runs.length) {
-    api.ui.dialog.replace(() => api.ui.DialogAlert({ title: "OpenCode LangGraph", message: "No LangGraph runs found for this project yet.", onConfirm: () => api.ui.dialog.clear() }));
+    api.ui.dialog.replace(() => api.ui.DialogAlert({ title: "OpenCode LangGraph", message: "No LangGraph runs found yet.", onConfirm: () => api.ui.dialog.clear() }));
     return;
   }
+  const own = (run: (typeof runs)[number]) => path.resolve(run.worktree) === path.resolve(project);
+  const foreign = new Set(runs.filter((run) => !own(run)).map((run) => run.runId));
+  const ordered = [...runs.filter(own), ...runs.filter((run) => foreign.has(run.runId))];
   api.ui.dialog.replace(() => api.ui.DialogSelect({
     title: "Inspect a LangGraph run",
     placeholder: "Search runs",
-    options: runs.map((run) => ({ title: `${run.graph} · ${run.status}`, value: run.runId, description: runStatusLabel(run) })),
+    options: ordered.map((run) => ({
+      title: `${run.graph} · ${run.status}`,
+      value: run.runId,
+      description: runStatusLabel(run) + (foreign.has(run.runId) ? ` · ${run.worktree}` : ""),
+    })),
     onSelect(option) {
       api.ui.dialog.clear();
       openGraph(api, undefined, undefined, option.value);
@@ -922,7 +939,11 @@ export const tui: TuiPlugin = async (api) => {
   api.route.register([{ name: "langgraph.graph", render: renderGraph }]);
   api.keymap.registerLayer({
     commands: [
-      { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() { openGraph(api, activeSessionId); } },
+      { name: "langgraph.graph.open", title: "Open latest LangGraph execution", slashName: "graph", category: "LangGraph", namespace: "palette", run() {
+        const id = sessionId(api) ?? activeSessionId;
+        if (readVisibleEvents(id, projectPath(api), stateHome(api)).length) openGraph(api, activeSessionId);
+        else showRunSelector(api);
+      } },
       { name: "langgraph.graph.runs", title: "Inspect a past LangGraph run", slashName: "graph-open", category: "LangGraph", namespace: "palette", run() { showRunSelector(api); } },
       { name: "langgraph.graph.toggle", title: "Toggle LangGraph for this session", slashName: "graph-toggle", category: "LangGraph", namespace: "palette", run() { graphToggle.toggle(api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId); } },
       { name: "langgraph.graph.select", title: "Select LangGraph for this session", slashName: "graph-select", category: "LangGraph", namespace: "palette", async run() { await showGraphSelector(api, api.route.current.name === "home" ? undefined : sessionId(api) ?? activeSessionId, graphToggle); } },

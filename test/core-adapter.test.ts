@@ -7,11 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
 import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, type GraphControls } from "../src/opencode/tui.js";
-import { appendPluginEvent, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
+import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
-import { completeVerification, ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, reopenRegion } from "../src/core/solution-lod/reducer.js";
+import { completeVerification, ensureRunnableWork, initialNetwork, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
 import type { SolutionLodState } from "../src/core/solution-lod/types.js";
@@ -401,6 +401,120 @@ describe("solution LOD reducer", () => {
     expect(merged.candidates.find((candidate) => candidate.key === "rewrite")?.status).toBe("eliminated");
     expect(merged.candidates.find((candidate) => candidate.key === "adapter")?.status).toBe("selected");
     expect(merged.regions[0].status).toBe("actionable");
+  });
+
+  it("does not eliminate a refutes target when the refuting candidate is itself rejected", () => {
+    const current = state();
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false,
+      candidates: [
+        { key: "good", proposition: "Good", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "bad-a", proposition: "Bad A", outcome: "eliminated", reasons: ["violates contract"], evidenceRefs: [], nextLod: [] },
+        { key: "bad-b", proposition: "Bad B", outcome: "eliminated", reasons: ["legacy path"], evidenceRefs: [], nextLod: [] },
+      ], constraints: [
+        { kind: "refutes", subject: "bad-a", target: "good", reason: "bad-a disagrees" },
+        { kind: "refutes", subject: "bad-b", target: "good", reason: "bad-b disagrees" },
+      ], select: [],
+    });
+    expect(merged.candidates.find((candidate) => candidate.key === "good")?.status).toBe("selected");
+    expect(merged.regions[0].status).toBe("actionable");
+  });
+
+  it("still fires a refutes constraint from a non-candidate subject like task or evidence", () => {
+    const current = state();
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false,
+      candidates: [
+        { key: "kept", proposition: "Kept", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "ruled-out", proposition: "Ruled out", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+      ], constraints: [{ kind: "refutes", subject: "task", target: "ruled-out", reason: "the request itself rules this out" }], select: [],
+    });
+    expect(merged.candidates.find((candidate) => candidate.key === "ruled-out")?.status).toBe("eliminated");
+    expect(merged.candidates.find((candidate) => candidate.key === "kept")?.status).toBe("selected");
+  });
+
+  it("demotes previously selected candidates when a resolved answer lands", () => {
+    const current = state();
+    current.network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: true,
+      candidates: [{ key: "inspect-then-split", proposition: "Inspect then split", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }],
+      constraints: [], select: ["inspect-then-split"],
+    });
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { delivery: "answer" }, evidence: [{ text: "Already covered", source: "src/x.spec.ts:1", kind: "repository" }],
+      candidates: [], constraints: [], select: [], activations: [],
+      resolvedAnswer: { answer: "Already covered.", acceptanceCriteria: ["confirmed"], evidenceRefs: ["src/x.spec.ts:1"] },
+    });
+    const region = merged.regions[0];
+    const selected = merged.candidates.filter((candidate) => candidate.regionId === region.id && candidate.status === "selected");
+    expect(selected.map((candidate) => candidate.key)).toEqual(["resolved-answer"]);
+    expect(merged.candidates.find((candidate) => candidate.key === "inspect-then-split")?.status).not.toBe("selected");
+    expect(region.status).toBe("verified");
+  });
+
+  it("rejects a delta that eliminates every candidate without a selection", () => {
+    const current = state();
+    current.network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false,
+      candidates: [
+        { key: "alpha", proposition: "Alpha", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "beta", proposition: "Beta", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+      ], constraints: [], select: [],
+    });
+    expect(() => validateSolutionDelta(current, current.network.regions[0].id, {
+      evidence: [], constraints: [], activations: [], select: [],
+      candidates: [
+        { key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["supporting evidence misread as defeater"], evidenceRefs: [], nextLod: [] },
+        { key: "beta", proposition: "Beta", outcome: "eliminated", reasons: ["supporting evidence misread as defeater"], evidenceRefs: [], nextLod: [] },
+      ],
+    })).toThrow(/every candidate/);
+    expect(() => validateSolutionDelta(current, current.network.regions[0].id, {
+      evidence: [], constraints: [], activations: [], select: ["alpha"],
+      candidates: [
+        { key: "alpha", proposition: "Alpha", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "beta", proposition: "Beta", outcome: "eliminated", reasons: ["genuine defeater"], evidenceRefs: [], nextLod: [] },
+      ],
+    })).not.toThrow();
+  });
+
+  it("rejects an all-eliminating delta even when it selects an unknown candidate key", () => {
+    const current = state();
+    current.network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false, constraints: [], select: [],
+      candidates: [{ key: "alpha", proposition: "Alpha", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] }],
+    });
+    expect(() => validateSolutionDelta(current, "r1", {
+      evidence: [], constraints: [], activations: [], select: ["ghost"],
+      candidates: [{ key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["misread defeater"], evidenceRefs: [], nextLod: [] }],
+    })).toThrow(/every candidate/);
+    expect(() => validateSolutionDelta(current, "r1", {
+      evidence: [], constraints: [], activations: [], select: ["alpha"],
+      candidates: [{ key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["misread defeater"], evidenceRefs: [], nextLod: [] }],
+    })).not.toThrow();
+  });
+
+  it("resynthesizes a pruned region even when its completed synthesis activation survives", () => {
+    const current = state();
+    current.network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], constraints: [], activations: [], actionable: false, select: [],
+      candidates: [
+        { key: "alpha", proposition: "Alpha", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+        { key: "beta", proposition: "Beta", outcome: "possible", reasons: [], evidenceRefs: [], nextLod: [] },
+      ],
+    });
+    // Legacy end-state: the region's synthesis completed, then every candidate was eliminated.
+    current.network.activations.push({ id: "a9", capability: "synthesize", regionId: "r1", request: "form domain", expectedDelta: "synthesis:r1", contextRefs: ["r1"], status: "completed", basisRevision: current.network.revision });
+    for (const candidate of current.network.candidates) candidate.status = "eliminated";
+    // Simulate pruneRun: reopen the region, keep only its completed activations, clear its activation list.
+    const reopened = reopenRegion(current.network, "r1", "pruned for resynthesis");
+    const pruned = {
+      ...reopened,
+      activations: reopened.activations.filter((item) => item.regionId !== "r1" || item.status === "completed"),
+      regions: reopened.regions.map((item) => item.id === "r1" ? { ...item, activationIds: [] } : item),
+    };
+    const scheduled = ensureRunnableWork(pruned);
+    expect(scheduled.blocked).toBeUndefined();
+    expect(nextQueuedActivation(scheduled.network)).toMatchObject({ capability: "synthesize", regionId: "r1" });
   });
 
   it("canonicalizes region-prefixed candidate keys and drops dangling constraints", () => {
@@ -1203,6 +1317,96 @@ describe("OpenCode graph viewer", () => {
     }
   });
 
+  it("resolves run events by runId even when the run belongs to another session or project", () => {
+    const stateHome = temp("opencode-langgraph-state-");
+    const project = temp("opencode-langgraph-project-");
+    const otherProject = temp("opencode-langgraph-other-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    try {
+      writeStoredRun({
+        runId: "agent-run", rootSessionId: "agent-session", userMessageId: "message", graph: "solution-lod", task: "agent task",
+        directory: project, worktree: project, status: "failed",
+      });
+      appendPluginEvent({
+        at: new Date().toISOString(), runId: "agent-run", rootSessionId: "agent-session", graph: "solution-lod",
+        node: "__end__", status: "failed", agent: "langgraph", model: "langgraph", text: "contradiction",
+      });
+      writeStoredRun({
+        runId: "foreign-run", rootSessionId: "foreign-session", userMessageId: "message", graph: "default", task: "elsewhere",
+        directory: otherProject, worktree: otherProject, status: "completed",
+      });
+
+      // The active session has no events of its own, yet the run is inspectable by runId.
+      expect(readVisibleEvents("current-session", project, stateHome)).toEqual([]);
+      const events = readVisibleEvents("current-session", project, stateHome, undefined, "agent-run");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ runId: "agent-run", node: "__end__", text: "contradiction" });
+
+      // The run selector sees runs from every session and worktree.
+      expect(listAllRuns(stateHome).map((run) => run.runId).sort()).toEqual(["agent-run", "foreign-run"]);
+      expect(listProjectRuns(project, stateHome).map((run) => run.runId)).toEqual(["agent-run"]);
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
+  it("offers the run picker when the active session has no graph events", async () => {
+    const project = temp("opencode-langgraph-project-");
+    const stateHome = temp("opencode-langgraph-state-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    let commands: Array<{ name: string; run: () => void }> = [];
+    const events = new Map<string, (event: { properties: { sessionID: string } }) => void>();
+    const navigations: Array<{ name: string; params?: Record<string, unknown> }> = [];
+    let selector: { title: string; options: Array<{ title: string; value: string; description?: string }>; onSelect: (option: { value: string }) => void } | undefined;
+    const api = {
+      route: {
+        current: { name: "home" },
+        register: () => () => undefined,
+        navigate: (name: string, params?: Record<string, unknown>) => navigations.push({ name, params }),
+      },
+      state: { path: { worktree: project, directory: project, config: path.join(project, "config") } },
+      event: { on: (type: string, handler: (event: { properties: { sessionID: string } }) => void) => { events.set(type, handler); return () => undefined; } },
+      slots: { register: () => "opencode-langgraph" },
+      renderer: { requestRender: () => undefined },
+      keymap: {
+        registerLayer: (layer: { commands: typeof commands }) => { commands.push(...layer.commands); return () => undefined; },
+        createKeyMatcher: () => () => false,
+        intercept: () => () => undefined,
+      },
+      ui: {
+        dialog: { replace: (render: () => unknown) => { render(); }, clear: () => undefined },
+        toast: () => undefined,
+        DialogAlert: () => "alert",
+        DialogSelect: (props: never) => { selector = props; return "select"; },
+      },
+      mode: { current: () => "base" },
+    };
+    try {
+      writeStoredRun({
+        runId: "agent-run", rootSessionId: "agent-session", userMessageId: "message", graph: "solution-lod", task: "launched by an agent",
+        directory: project, worktree: project, status: "failed",
+      });
+      appendPluginEvent({
+        at: new Date().toISOString(), runId: "agent-run", rootSessionId: "agent-session", graph: "solution-lod",
+        node: "__end__", status: "failed", agent: "langgraph", model: "langgraph",
+      });
+      await tui(api as never, undefined, {} as never);
+      events.get("tui.session.select")?.({ properties: { sessionID: "current-session" } });
+      commands.find((command) => command.name === "langgraph.graph.open")?.run();
+      expect(navigations).toEqual([]);
+      expect(selector?.title).toBe("Inspect a LangGraph run");
+      expect(selector?.options.map((option) => option.value)).toEqual(["agent-run"]);
+      selector?.onSelect({ value: "agent-run" });
+      expect(navigations.at(-1)).toEqual({ name: "langgraph.graph", params: { sessionID: undefined, runID: "agent-run" } });
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
   it("renders a structured event summary instead of raw blobs", () => {
     const event = {
       runId: "run", rootSessionId: "root", graph: "solution-lod", node: "implement:r2", status: "failed", agent: "langgraph-implement", model: "inherit",
@@ -1230,6 +1434,7 @@ describe("OpenCode graph viewer", () => {
     const bindings: Array<{ key: string; cmd: string }> = [];
     const events = new Map<string, (event: { properties: { sessionID: string } }) => void>();
     const navigations: Array<{ name: string; params?: Record<string, unknown> }> = [];
+    const dialogs: string[] = [];
     let renders = 0;
     const api = {
       route: {
@@ -1246,6 +1451,12 @@ describe("OpenCode graph viewer", () => {
         createKeyMatcher: () => () => false,
         intercept: () => () => undefined,
       },
+      ui: {
+        dialog: { replace: (render: () => unknown) => { dialogs.push(String(render())); }, clear: () => undefined },
+        toast: () => undefined,
+        DialogAlert: (props: { title: string }) => props.title,
+        DialogSelect: (props: { title: string }) => props.title,
+      },
       mode: { current: () => "base" },
     };
     try {
@@ -1257,7 +1468,16 @@ describe("OpenCode graph viewer", () => {
       expect(readSessionGraphEnabled("root-session", stateHome)).toBe(true);
       expect(readHomeGraphState(project, stateHome)).toBeUndefined();
       commands.find((command) => command.name === "langgraph.graph.open")?.run();
-      expect(navigations).toEqual([{ name: "langgraph.graph", params: undefined }]);
+      expect(navigations).toEqual([]);
+      expect(dialogs).toEqual(["OpenCode LangGraph"]);
+      writeStoredRun({
+        runId: "run-root", rootSessionId: "root-session", userMessageId: "message", graph: "default", task: "test",
+        directory: project, worktree: project, status: "completed",
+      });
+      appendPluginEvent({
+        at: new Date().toISOString(), runId: "run-root", rootSessionId: "root-session", graph: "default",
+        node: "answer", status: "completed", agent: "planner", model: "test/model",
+      });
       events.get("tui.session.select")?.({ properties: { sessionID: "root-session" } });
       commands.find((command) => command.name === "langgraph.graph.open")?.run();
       expect(navigations.at(-1)).toEqual({ name: "langgraph.graph", params: { sessionID: "root-session" } });

@@ -104,8 +104,10 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
       candidate.status = "eliminated"; candidate.eliminationReasons = [...new Set([...candidate.eliminationReasons, reason])]; changed = anyChange = true;
     };
     for (const constraint of network.constraints) {
-      const subjectSelected = network.candidates.find((item) => item.id === constraint.subject)?.status === "selected" || network.regions.some((item) => item.id === constraint.subject);
-      if (constraint.kind === "refutes" || constraint.kind === "excludes" && subjectSelected) eliminate(constraint.target, constraint.reason || constraint.kind);
+      const subjectCandidate = network.candidates.find((item) => item.id === constraint.subject);
+      const subjectSelected = subjectCandidate?.status === "selected" || network.regions.some((item) => item.id === constraint.subject);
+      const subjectActive = subjectCandidate ? subjectCandidate.status === "selected" : true;
+      if ((constraint.kind === "refutes" || constraint.kind === "excludes") && (constraint.kind === "refutes" ? subjectActive : subjectSelected)) eliminate(constraint.target, constraint.reason || constraint.kind);
       if (constraint.kind === "supports") {
         const candidate = network.candidates.find((item) => item.id === constraint.target);
         if (candidate && network.evidence.some((item) => item.id === constraint.subject) && !candidate.evidenceIds.includes(constraint.subject)) { candidate.evidenceIds.push(constraint.subject); changed = anyChange = true; }
@@ -148,6 +150,20 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
   for (const activation of network.activations) if (activation.status === "waiting" && activation.wakeCondition && activation.wakeCondition.revisionAfter < network.revision) activation.status = "queued";
   if (anyChange) network.revision++;
   return network;
+}
+
+export function validateSolutionDelta(state: SolutionLodState, regionId: string, delta: SolutionDelta): void {
+  if (delta.resolvedAnswer) return;
+  const region = state.network.regions.find((item) => item.id === regionId);
+  if (!region) return;
+  const statuses = new Map<string, string>();
+  for (const candidate of state.network.candidates.filter((item) => item.regionId === regionId)) statuses.set(candidate.id, candidate.status);
+  for (const item of delta.candidates) statuses.set(candidateId(regionId, item.key), item.outcome);
+  // Mirror mergeSolutionDelta: a select only lands on a candidate that exists after the outcomes are applied.
+  for (const key of delta.select) { const id = candidateRef(state.network, regionId, key); if (statuses.has(id)) statuses.set(id, "selected"); }
+  const domain = [...statuses.values()];
+  if (domain.length && domain.every((status) => status === "eliminated"))
+    throw new Error(`Delta leaves every candidate in region ${regionId} eliminated with none selected. Provide at least one viable candidate (outcome "possible" or "selected"), or select one via "select". Elimination reasons must be genuine defeaters; supporting evidence is not a reason to eliminate a candidate.`);
 }
 
 export function mergeSolutionDelta(state: SolutionLodState, activationId: string, delta: SolutionDelta): SolutionNetwork {
@@ -210,6 +226,7 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
       candidate.evidenceIds = [...new Set([...candidate.evidenceIds, ...evidenceIds])];
       candidate.nextLod = [];
     }
+    for (const other of network.candidates.filter((item) => item.regionId === region.id && item.id !== id && item.status === "selected")) other.status = "possible";
     region.selectedCandidateIds = [id];
     region.status = "verified";
     changed = true;
@@ -287,7 +304,7 @@ export function completePresentation(networkInput: SolutionNetwork, activationId
 export function reopenRegion(networkInput: SolutionNetwork, regionId: string, reason: string): SolutionNetwork {
   const network = cloneNetwork(networkInput); const region = network.regions.find((item) => item.id === regionId); if (!region) return network;
   region.status = "superposed"; region.contradiction = reason; region.selectedCandidateIds = [];
-  for (const candidate of network.candidates.filter((item) => item.regionId === regionId && item.status !== "eliminated")) candidate.status = "possible";
+  for (const candidate of network.candidates.filter((item) => item.regionId === regionId)) candidate.status = "possible";
   const descendants = new Set<string>(); let expanded = true;
   while (expanded) { expanded = false; for (const item of network.regions) if (item.parentId && (item.parentId === regionId || descendants.has(item.parentId)) && !descendants.has(item.id)) { descendants.add(item.id); expanded = true; } }
   network.regions = network.regions.filter((item) => !descendants.has(item.id));
@@ -322,14 +339,14 @@ export function ensureRunnableWork(input: SolutionNetwork): { network: SolutionN
   }
   const contradiction = required.find((region) => region.status === "contradiction");
   if (contradiction) {
-    network = queueActivation(network, "synthesize", contradiction.id, `Resolve the contradiction without discarding unrelated solution regions: ${contradiction.contradiction ?? "all candidates were eliminated"}`, `contradiction:${contradiction.id}`, [...contradiction.constraintIds, ...contradiction.evidenceIds]);
+    network = queueActivation(network, "synthesize", contradiction.id, `Resolve the contradiction without discarding unrelated solution regions: ${contradiction.contradiction ?? "all candidates were eliminated"}`, `contradiction:${contradiction.id}:${network.revision}`, [...contradiction.constraintIds, ...contradiction.evidenceIds]);
     return nextQueuedActivation(network) ? { network, done: false } : { network, done: false, blocked: `Contradiction in ${contradiction.id} could not be resolved.` };
   }
   const unresolved = required.filter((region) => region.status === "unformed" || region.status === "superposed").sort((left, right) => left.candidateIds.length - right.candidateIds.length || left.lod - right.lod)[0];
   if (unresolved) {
     network = queueActivation(network, "synthesize", unresolved.id, unresolved.candidateIds.length
       ? "Collapse this region from its existing candidates and evidence. Request inspection only for one named fact that genuinely prevents selection."
-      : "Form and collapse the candidate domain at exactly this LOD, including only conditional next-LOD definitions.", `synthesis:${unresolved.id}`, [...unresolved.evidenceIds, ...unresolved.constraintIds]);
+      : "Form and collapse the candidate domain at exactly this LOD, including only conditional next-LOD definitions.", `synthesis:${unresolved.id}:${network.revision}`, [...unresolved.evidenceIds, ...unresolved.constraintIds]);
     if (nextQueuedActivation(network)) return { network, done: false };
     return { network, done: false, blocked: `No activation can make a novel state delta for ${unresolved.id}.` };
   }

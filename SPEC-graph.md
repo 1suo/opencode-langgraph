@@ -91,7 +91,7 @@ The static graph is an engine loop, not a pipeline of model calls. Each node has
   - a throw (schema/validation/timeout) → the activation is marked failed, `{ network, callsUsed, activeActivationId: undefined, phase: "activation-failed" }`.
 - `finish` (pure controller): returns `{ result }` from the final state. It never calls a model.
 
-`mergeSolutionDelta` and the WFC propagation run inside `activate`/`schedule` respectively; models never mutate controller bookkeeping directly. Every intermediate `{ network, phase, ... }` is checkpointed, so any of these outputs is a valid restart point for the inspect/prune/resume workflow below.
+`mergeSolutionDelta` and the WFC propagation run inside `activate`/`schedule` respectively; models never mutate controller bookkeeping directly. A synthesis delta that would leave every candidate in a region eliminated with none selected is rejected at validation (`validateSolutionDelta`) and retried with guidance — elimination requires genuine defeaters, and a truly dead region is recovered by reopening the parent, not by an empty domain. Recovery deltas (`synthesis:*`, `contradiction:*`, `implement:*`, `verification:*`) carry the network revision, so a changed basis always reschedules while an unchanged one dedupes. Every intermediate `{ network, phase, ... }` is checkpointed, so any of these outputs is a valid restart point for the inspect/prune/resume workflow below.
 
 ## Inspect and relaunch workflow
 

@@ -9,8 +9,8 @@ import type { RunnableConfig } from "@langchain/core/runnables";
 import { z, type ZodType } from "zod";
 import { DurableFileSaver } from "../durable-checkpointer.js";
 import type { AgentCallResult, AgentRuntime, AgentUsage, ConnectorGraph, GraphProgressSnapshot, SolutionSemanticSnapshot } from "../types.js";
-import { completeImplementation, completePresentation, completeVerification, ensureRunnableWork, initialNetwork, markActivation, mergeSolutionDelta, nextQueuedActivation, setRegionStatus } from "./reducer.js";
-import { DEFAULT_SOLUTION_ROLE_LIMITS, ImplementationOutputSchema, PresentationOutputSchema, SolutionDeltaSchema, VerificationOutputSchema, type Activation, type Capability, type SolutionLodState, type SolutionNetwork, type SolutionRoleLimits } from "./types.js";
+import { completeImplementation, completePresentation, completeVerification, ensureRunnableWork, initialNetwork, markActivation, mergeSolutionDelta, nextQueuedActivation, setRegionStatus, validateSolutionDelta } from "./reducer.js";
+import { DEFAULT_SOLUTION_ROLE_LIMITS, ImplementationOutputSchema, PresentationOutputSchema, SolutionDeltaSchema, VerificationOutputSchema, type Activation, type Capability, type SolutionDelta, type SolutionLodState, type SolutionNetwork, type SolutionRoleLimits } from "./types.js";
 
 const SolutionState = Annotation.Root({
   stateVersion: Annotation<3>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
@@ -158,7 +158,7 @@ export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<So
       const before = activation.capability === "implement" ? snapshot(state.worktree) : undefined;
       try {
         const schema = activation.capability === "implement" ? ImplementationOutputSchema : activation.capability === "verify" ? VerificationOutputSchema : activation.capability === "present" ? PresentationOutputSchema : SolutionDeltaSchema;
-        const result = await runtime(config).call({ agent: options.agents[activation.capability], node: `${activation.capability}:${activation.regionId}`, state, limits: limits[activation.capability], schema: z.toJSONSchema(schema) as Record<string, unknown>, validateStructured: (value) => schema.parse(value), prompt: JSON.stringify(projectActivationContext(state, activation)) });
+        const result = await runtime(config).call({ agent: options.agents[activation.capability], node: `${activation.capability}:${activation.regionId}`, state, limits: limits[activation.capability], schema: z.toJSONSchema(schema) as Record<string, unknown>, validateStructured: (value) => { const parsed = schema.parse(value); if (schema === SolutionDeltaSchema) validateSolutionDelta(state, activation.regionId, parsed as SolutionDelta); return parsed; }, prompt: JSON.stringify(projectActivationContext(state, activation)) });
         const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
         if (result.budgetStop) {
           const error = `Agent scheduling quantum reached: ${result.budgetStop.metric}`;

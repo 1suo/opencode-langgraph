@@ -146,8 +146,8 @@ export function writeStoredRun(run: StoredRun): void {
   fs.writeFileSync(path.join(root(), "runs", `${run.runId}.json`), JSON.stringify(run, null, 2));
 }
 
-export function readStoredRun(runId: string): StoredRun {
-  return JSON.parse(fs.readFileSync(path.join(root(), "runs", `${runId}.json`), "utf8")) as StoredRun;
+export function readStoredRun(runId: string, stateHome?: string): StoredRun {
+  return JSON.parse(fs.readFileSync(path.join(root(stateHome), "runs", `${runId}.json`), "utf8")) as StoredRun;
 }
 
 export function readLatestStoredRun(rootSessionId: string): StoredRun | undefined {
@@ -167,6 +167,23 @@ export function readLatestStoredRun(rootSessionId: string): StoredRun | undefine
     }
   }
   return latest?.run;
+}
+
+export function listAllRuns(stateHome?: string): StoredRun[] {
+  const directory = path.join(root(stateHome), "runs");
+  if (!fs.existsSync(directory)) return [];
+  const runs: Array<{ modified: number; run: StoredRun }> = [];
+  for (const name of fs.readdirSync(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(directory, name);
+    try {
+      const run = JSON.parse(fs.readFileSync(file, "utf8")) as StoredRun;
+      runs.push({ modified: fs.statSync(file).mtimeMs, run });
+    } catch {
+      // Ignore an incomplete or externally edited run file.
+    }
+  }
+  return runs.sort((a, b) => b.modified - a.modified).map((item) => item.run);
 }
 
 export function listProjectRuns(worktree: string, stateHome?: string): StoredRun[] {
