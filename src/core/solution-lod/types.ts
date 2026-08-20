@@ -123,34 +123,52 @@ export const DEFAULT_SOLUTION_ROLE_LIMITS: SolutionRoleLimits = {
 };
 
 const ConditionalRegionSchema = z.object({
-  key: z.string().min(1), objective: z.string().min(1), edge: z.enum(["refines", "partOf"]).describe("'refines' for a finer decision about the same candidate; 'partOf' for an independent deliverable piece."),
-  delivery: z.enum(["answer", "change"]).optional(), allowedVariables: z.array(z.string()).default([]), acceptanceCriteria: z.array(z.string()).default([]),
+  key: z.string().min(1).describe("A short stable name for this child."),
+  objective: z.string().min(1).describe("What this child must decide or deliver."),
+  edge: z.enum(["refines", "partOf"]).describe("Use 'refines' for a choice that becomes meaningful only after choosing the parent. Use 'partOf' for an independent required deliverable."),
+  delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when this child must answer a question without changing files. Otherwise use 'change'."),
+  allowedVariables: z.array(z.string()).default([]).describe("The only aspects this child may choose."),
+  acceptanceCriteria: z.array(z.string()).default([]).describe("Observable conditions that prove this child is complete."),
 });
 
 export const SolutionDeltaSchema = z.object({
   region: z.object({
-    objective: z.string().optional(), delivery: z.enum(["answer", "change"]).optional(),
-    allowedVariables: z.array(z.string()).optional(), acceptanceCriteria: z.array(z.string()).optional(),
-  }).optional(),
-  evidence: z.array(z.object({ text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference") })).default([]),
+    objective: z.string().optional().describe("The goal to decide or deliver."),
+    delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when the user needs an answer without file changes. Otherwise use 'change'."),
+    allowedVariables: z.array(z.string()).optional().describe("The only aspects that may be chosen here."),
+    acceptanceCriteria: z.array(z.string()).optional().describe("Observable conditions that prove the goal is complete."),
+  }).optional().describe("Use only to clarify the current goal or its success criteria."),
+  evidence: z.array(z.object({ text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference") })).default([]).describe("Facts used in this result. State each fact plainly and identify where it came from."),
   candidates: z.array(z.object({
-    key: z.string().min(1), proposition: z.string().min(1), outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible"),
-    reasons: z.array(z.string()).default([]), evidenceRefs: z.array(z.string()).default([]), nextLod: z.array(ConditionalRegionSchema).default([]).describe("Follow-up work this candidate still needs: 'refines' for a decision that can only be made once it is chosen, 'partOf' for an independent deliverable piece. Never list routine steps, files, tests, or verification — those run automatically after the work is implemented."),
-  })).default([]).describe("Mutually exclusive alternatives to the same goal — exactly one is chosen. Coexisting deliverables that all must be built are NOT candidates; attach them as 'partOf' follow-up pieces to the winning candidate."),
-  constraints: z.array(z.object({ kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]), subject: z.string().min(1), target: z.string().min(1), reason: z.string().default("") })).default([]).describe("Dependencies between candidates: 'requires' (one needs another), 'excludes' (mutually incompatible), 'supports' (one strengthens another), 'refutes' (one contradicts another), 'equivalent' (interchangeable)."),
-  select: z.array(z.string()).default([]),
-  actionable: z.boolean().optional(),
-  answer: z.string().optional(),
+    key: z.string().min(1).describe("A short stable name for this alternative."),
+    proposition: z.string().min(1).describe("The complete approach this alternative proposes."),
+    outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible").describe("Whether this alternative remains possible, is rejected, is chosen, or is interchangeable with another."),
+    reasons: z.array(z.string()).default([]).describe("For a rejected alternative, explain why it should not be chosen. Do not put supporting facts here."),
+    evidenceRefs: z.array(z.string()).default([]).describe("References to facts that justify the stated outcome."),
+    nextLod: z.array(ConditionalRegionSchema).default([]).describe("Children revealed by choosing this alternative. Add only a later real choice ('refines') or an independent required deliverable ('partOf'). Do not add routine steps, files, tests, or verification. An empty list means the alternative is ready to implement."),
+  })).default([]).describe("Complete alternatives to the same choice. They must not be combined, and exactly one should be chosen. Put independent deliverables under the chosen alternative as 'partOf' children, not as competing alternatives."),
+  constraints: z.array(z.object({
+    kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]),
+    subject: z.string().min(1).describe("Key or reference of the item this statement is about."),
+    target: z.string().min(1).describe("Key or reference of the related item."),
+    reason: z.string().default("").describe("Why this relationship is true, using supplied facts."),
+  })).default([]).describe("Relationships between referenced items: 'requires' means one needs another; 'excludes' means they cannot coexist; 'supports' means one strengthens another; 'refutes' means one contradicts another; 'equivalent' means they are interchangeable."),
+  select: z.array(z.string()).default([]).describe("Keys or references of the chosen alternative. Choose one, except that interchangeable alternatives may be selected together."),
+  actionable: z.boolean().optional().describe("Set true only when the chosen alternative has no children and is ready to carry out."),
+  answer: z.string().optional().describe("Answer text for a goal already marked as answer-only."),
   resolvedAnswer: z.object({
-    answer: z.string().min(1),
-    acceptanceCriteria: z.array(z.string().min(1)).min(1),
-    evidenceRefs: z.array(z.string()).default([]),
-  }).optional(),
+    answer: z.string().min(1).describe("The complete answer to give the user."),
+    acceptanceCriteria: z.array(z.string().min(1)).min(1).describe("Conditions showing that this answer fully satisfies the request."),
+    evidenceRefs: z.array(z.string()).default([]).describe("References to facts that support the answer. Cite at least one existing fact or a fact supplied with this result; an uncited answer is rejected."),
+  }).optional().describe("Use only when the user's request can be fully answered without changing files."),
   activations: z.array(z.object({
-    capability: z.enum(["inspect", "synthesize", "implement", "verify", "present"]), regionId: z.string().optional(),
-    request: z.string().min(1), expectedDelta: z.string().min(1), contextRefs: z.array(z.string()).default([]),
-    wakeCondition: z.object({ ref: z.string(), revisionAfter: z.number().int().nonnegative() }).optional(),
-  })).default([]),
+    capability: z.enum(["inspect", "synthesize", "implement", "verify", "present"]).describe("The kind of help needed."),
+    regionId: z.string().optional().describe("The supplied goal reference. Omit it to use the current goal."),
+    request: z.string().min(1).describe("One specific task for the requested helper."),
+    expectedDelta: z.string().min(1).describe("A short stable name for the expected new information or work. It prevents duplicate requests."),
+    contextRefs: z.array(z.string()).default([]).describe("References the helper needs to see."),
+    wakeCondition: z.object({ ref: z.string(), revisionAfter: z.number().int().nonnegative() }).optional().describe("Use only when this request must wait for a referenced item to change."),
+  })).default([]).describe("Requests for another helper. Leave empty unless one missing fact or proven conflict prevents your assigned work."),
 });
 export type SolutionDelta = z.infer<typeof SolutionDeltaSchema>;
 

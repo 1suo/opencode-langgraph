@@ -61,31 +61,31 @@ export function projectActivationContext(state: SolutionLodState, activation: Ac
   if (!region) throw new Error(`Activation ${activation.id} references missing region ${activation.regionId}`);
   const refs = new Set([...activation.contextRefs, ...region.evidenceIds, ...region.constraintIds, ...region.artifactIds]);
   const facts = state.network.evidence.filter((item) => refs.has(item.id)).map(({ id, text, source }) => ({ referenceId: id, fact: text, source }));
-  const rules = state.network.constraints
+  const relationships = state.network.constraints
     .filter((item) => refs.has(item.id) || item.subject === region.id || region.candidateIds.includes(item.subject) || region.candidateIds.includes(item.target))
     .map(({ id, kind, subject, target, reason }) => ({ referenceId: id, relationship: kind, from: subject, to: target, explanation: reason }));
-  const filesAndChecks = state.network.artifacts.filter((item) => refs.has(item.id)).map(({ id, kind, path, summary, passed }) => ({ referenceId: id, kind, path, summary, passed }));
-  const decisionsAlreadyMade = lineage(state.network, region.id);
+  const outputs = state.network.artifacts.filter((item) => refs.has(item.id)).map(({ id, kind, path, summary, passed }) => ({ referenceId: id, kind, path, summary, passed }));
+  const earlierChoices = lineage(state.network, region.id);
   const common = {
     userRequest: state.originalTask,
-    relevantConversation: state.conversationContext || undefined,
-    assignment: activation.request,
-    currentTask: region.objective,
+    conversation: state.conversationContext || undefined,
+    yourAssignment: activation.request,
+    goal: region.objective,
     successCriteria: region.acceptanceCriteria,
     facts,
-    rules,
-    filesAndChecks,
+    relationships,
+    outputs,
   };
   const plainStatus = { possible: "still possible", eliminated: "rejected", selected: "chosen", equivalent: "interchangeable" } as const;
   const approachesAlreadyConsidered = state.network.candidates.filter((item) => item.regionId === region.id).map(({ id, proposition, status, eliminationReasons, evidenceIds, nextLod }) => ({
     referenceId: id, approach: proposition, status: plainStatus[status], reasonsRejected: eliminationReasons, supportingFactIds: evidenceIds,
-    decisionsNeededAfterChoosing: nextLod.map((item) => ({ decision: item.objective, decideOnlyAbout: item.allowedVariables, successCriteria: item.acceptanceCriteria, independentlyDeliverable: item.edge === "partOf" })),
+    workRevealedByChoosing: nextLod.map((item) => ({ goal: item.objective, chooseOnly: item.allowedVariables, successCriteria: item.acceptanceCriteria, kind: item.edge === "partOf" ? "independent deliverable" : "later choice" })),
   }));
-  if (activation.capability === "inspect") return { ...common, decisionsAlreadyMade, questionToInvestigate: activation.request, doNotDecideTheApproach: region.delivery === "change" };
-  if (activation.capability === "synthesize") return { ...common, decisionsAlreadyMade, decisionToMake: region.objective, decideOnlyAbout: region.allowedVariables, approachesAlreadyConsidered, helpAvailable: { inspect: "request one named missing repository fact" } };
-  if (activation.capability === "implement") return { ...common, selectedApproach: decisionsAlreadyMade, ifBlocked: { inspect: "request one missing repository fact", synthesize: "request reconsideration only if a supplied decision is contradicted" } };
-  if (activation.capability === "verify") return { ...common, decisionsAlreadyMade, changeToVerify: region.objective };
-  return { ...common, decisionsAlreadyMade, answerToProduce: region.objective };
+  if (activation.capability === "inspect") return { ...common, earlierChoices, questionToAnswer: activation.request, mustNotChooseSolution: region.delivery === "change" };
+  if (activation.capability === "synthesize") return { ...common, earlierChoices, choiceToMake: region.objective, chooseOnly: region.allowedVariables, alternativesAlreadyConsidered: approachesAlreadyConsidered, ifFactIsMissing: "request inspection of one named repository fact" };
+  if (activation.capability === "implement") return { ...common, chosenApproach: earlierChoices, ifBlocked: { missingFact: "request inspection of one named repository fact", wrongChoice: "request reconsideration only when evidence contradicts an earlier choice" } };
+  if (activation.capability === "verify") return { ...common, earlierChoices, changeToCheck: region.objective };
+  return { ...common, earlierChoices, answerToWrite: region.objective };
 }
 
 function statusPaths(worktree: string): Map<string, string> {

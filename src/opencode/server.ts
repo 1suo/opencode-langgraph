@@ -77,17 +77,17 @@ export const server: Plugin = async (plugin) => {
     event: ({ event }) => forwardPermissionEvent(event),
     tool: {
       langgraph_inspect: tool({
-        description: "Inspect a LangGraph run: stored status, graph phase, checkpointed solution network, usage, and result. Read-only; use this before pruning or resuming a failed or blocked run. By default inspects the latest run for the calling session; pass runId or rootSessionId, or set projectScope to inspect the latest run for the whole project (e.g. a graph the agent ran in another session).",
+        description: "Read a run's saved status, current work, usage, and result. This changes nothing. Use it before repairing or continuing a failed or stopped run. With no ID it reads this session's latest run. Supply runId or rootSessionId to choose another run, or projectScope for the project's latest run.",
         args: { runId: tool.schema.string().optional(), rootSessionId: tool.schema.string().optional(), projectScope: tool.schema.boolean().optional() },
         execute: async (args: { runId?: string; rootSessionId?: string; projectScope?: boolean }, context) => inspectRun(context.sessionID, args.runId, { rootSessionId: args.rootSessionId, worktree: args.projectScope ? context.worktree : undefined }),
       }),
       langgraph_prune: tool({
-        description: "Reopen a solution region and drop its subtree so the graph can resynthesize it, then resume the run from its checkpoint. Optionally override the region's objective, allowed variables, or acceptance criteria so the resynthesized region follows the new scope. Writes the pruned network back to the run's checkpoint and marks it resumable.",
+        description: "Remove one wrong part of a saved solution and everything derived from it. Use the part's regionId from langgraph_inspect. You may replace its goal, allowed choices, or success criteria. This saves the repair so langgraph_resume can continue from it.",
         args: { runId: tool.schema.string().optional(), regionId: tool.schema.string(), reason: tool.schema.string().optional(), objective: tool.schema.string().optional(), allowedVariables: tool.schema.array(tool.schema.string()).optional(), acceptanceCriteria: tool.schema.array(tool.schema.string()).optional() },
         execute: async (args: { runId?: string; regionId: string; reason?: string; objective?: string; allowedVariables?: string[]; acceptanceCriteria?: string[] }, context) => pruneRun(context.sessionID, args.runId, args.regionId, args.reason, { objective: args.objective, allowedVariables: args.allowedVariables, acceptanceCriteria: args.acceptanceCriteria }),
       }),
       langgraph_resume: tool({
-        description: "Resume a LangGraph run from its saved checkpoint. For an interrupted run awaiting human input, pass the answer. For a pruned run, continues from the checkpoint so the graph can make progress again.",
+        description: "Continue a run from its saved state. Pass answer only when the run stopped to ask the user a question. After langgraph_prune, call this to continue from the repaired solution.",
         args: { runId: tool.schema.string().optional(), answer: tool.schema.string().optional() },
         execute: async (args: { runId?: string; answer?: string }, context) => resumeRun(plugin, context.sessionID, args.runId, args.answer),
       }),

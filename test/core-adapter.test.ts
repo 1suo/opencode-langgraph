@@ -341,7 +341,7 @@ describe("solution LOD reducer", () => {
     expect(merged.regions.some((region) => region.key === "migration")).toBe(false);
   });
 
-  it("collapses a repository-backed read-only answer without synthesis or a child LOD", () => {
+  it("collapses a repository-backed read-only answer without synthesis or a child LOD, then verifies it", () => {
     const current = state();
     const network = mergeSolutionDelta(current, "a1", {
       region: { delivery: "answer" },
@@ -350,15 +350,32 @@ describe("solution LOD reducer", () => {
       resolvedAnswer: { answer: "ready", acceptanceCriteria: ["Report the marker exactly"], evidenceRefs: ["SMOKE.md:1"] },
     });
     expect(network.regions).toHaveLength(1);
-    expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "verified", answer: "ready", selectedCandidateIds: ["r1:resolved-answer"] });
+    expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "implemented", answer: "ready", selectedCandidateIds: ["r1:resolved-answer"] });
     expect(network.candidates[0]).toMatchObject({ status: "selected", evidenceIds: ["e1"], nextLod: [] });
     network.activations[0].status = "completed";
     const scheduled = ensureRunnableWork(network);
-    expect(scheduled.done).toBe(true);
-    expect(scheduled.network.activations).toHaveLength(1);
+    expect(scheduled.done).toBe(false);
+    expect(scheduled.network.activations.at(-1)).toMatchObject({ capability: "verify", status: "queued" });
+    const verified = completeVerification(scheduled.network, scheduled.network.activations.at(-1)!.id, { verdict: "pass", summary: "", findings: [], checks: [], activations: [] });
+    expect(verified.regions[0].status).toBe("verified");
+    expect(ensureRunnableWork(verified).done).toBe(true);
   });
 
-  it("keeps a directly-resolved answer verified even when the delta also claims actionable", () => {
+  it("rejects a resolved answer that cites no real fact", () => {
+    const current = state();
+    expect(() => validateSolutionDelta(current, "r1", {
+      region: { delivery: "answer" },
+      evidence: [], candidates: [], constraints: [], select: [], activations: [],
+      resolvedAnswer: { answer: "Trust me.", acceptanceCriteria: ["answered"], evidenceRefs: [] },
+    })).toThrow(/cite at least one real fact/);
+    expect(() => validateSolutionDelta(current, "r1", {
+      region: { delivery: "answer" },
+      evidence: [{ text: "fact", source: "a.ts:1", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [],
+      resolvedAnswer: { answer: "Grounded.", acceptanceCriteria: ["answered"], evidenceRefs: ["a.ts:1"] },
+    })).not.toThrow();
+  });
+
+  it("queues verification for a directly-resolved answer even when the delta also claims actionable", () => {
     const current = state();
     const network = mergeSolutionDelta(current, "a1", {
       region: { delivery: "answer" },
@@ -366,10 +383,11 @@ describe("solution LOD reducer", () => {
       candidates: [], constraints: [], select: [], actionable: true, activations: [],
       resolvedAnswer: { answer: "Already complete.", acceptanceCriteria: ["confirmed implemented"], evidenceRefs: ["TODO.md:1"] },
     });
-    expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "verified", answer: "Already complete." });
+    expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "implemented", answer: "Already complete." });
     network.activations[0].status = "completed";
     const scheduled = ensureRunnableWork(network);
-    expect(scheduled.done).toBe(true);
+    expect(scheduled.done).toBe(false);
+    expect(scheduled.network.activations.at(-1)).toMatchObject({ capability: "verify", status: "queued" });
   });
 
   it("allows independent regions to remain at different LODs", () => {
@@ -449,7 +467,7 @@ describe("solution LOD reducer", () => {
     const selected = merged.candidates.filter((candidate) => candidate.regionId === region.id && candidate.status === "selected");
     expect(selected.map((candidate) => candidate.key)).toEqual(["resolved-answer"]);
     expect(merged.candidates.find((candidate) => candidate.key === "inspect-then-split")?.status).not.toBe("selected");
-    expect(region.status).toBe("verified");
+    expect(region.status).toBe("implemented");
   });
 
   it("rejects a delta that eliminates every candidate without a selection", () => {
@@ -467,7 +485,7 @@ describe("solution LOD reducer", () => {
         { key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["supporting evidence misread as defeater"], evidenceRefs: [], nextLod: [] },
         { key: "beta", proposition: "Beta", outcome: "eliminated", reasons: ["supporting evidence misread as defeater"], evidenceRefs: [], nextLod: [] },
       ],
-    })).toThrow(/every candidate/);
+    })).toThrow(/Every alternative/);
     expect(() => validateSolutionDelta(current, current.network.regions[0].id, {
       evidence: [], constraints: [], activations: [], select: ["alpha"],
       candidates: [
@@ -486,7 +504,7 @@ describe("solution LOD reducer", () => {
     expect(() => validateSolutionDelta(current, "r1", {
       evidence: [], constraints: [], activations: [], select: ["ghost"],
       candidates: [{ key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["misread defeater"], evidenceRefs: [], nextLod: [] }],
-    })).toThrow(/every candidate/);
+    })).toThrow(/Every alternative/);
     expect(() => validateSolutionDelta(current, "r1", {
       evidence: [], constraints: [], activations: [], select: ["alpha"],
       candidates: [{ key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["misread defeater"], evidenceRefs: [], nextLod: [] }],
@@ -588,9 +606,9 @@ describe("solution LOD reducer", () => {
     const implement = { ...current.network.activations[0], capability: "implement" as const, request: "Implement the selected behavior" };
     const projection = projectActivationContext(current, implement);
     expect(projection).toMatchObject({
-      currentTask: "change",
+      goal: "change",
       successCriteria: ["target behavior works"],
-      selectedApproach: ["Extend the existing implementation"],
+      chosenApproach: ["Extend the existing implementation"],
     });
     expect(projection).not.toHaveProperty("decisionsAlreadyMade");
     expect(projection).not.toHaveProperty("region");
@@ -647,7 +665,7 @@ describe("solution LOD reducer", () => {
       ], select: ["event-shape", "duplicate-policy"],
     });
     expect(invalid.regions[0]).toMatchObject({ status: "contradiction", selectedCandidateIds: [] });
-    expect(invalid.regions[0].contradiction).toContain("multiple non-equivalent alternatives");
+    expect(invalid.regions[0].contradiction).toContain("Multiple incompatible alternatives");
 
     const correcting = { ...current, network: invalid };
     correcting.network.activations.push({ id: "a2", capability: "synthesize", regionId: "r1", request: "correct", expectedDelta: "coherent-domain", contextRefs: ["r1"], status: "running", basisRevision: invalid.revision });
@@ -937,7 +955,8 @@ describe("OpenCode automatic graph routing", () => {
         const title = titles.get(requestPath.id) ?? "";
         const structured = title.includes("inspect:r1")
           ? { region: { delivery: "answer", acceptanceCriteria: ["Answer the question"] }, evidence: [{ text: "2+2 is 4", source: "arithmetic", kind: "inference" }], candidates: [{ key: "answer", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["answer"], actionable: true, activations: [] }
-          : title.includes("present:r1") ? { answer: "The answer is 4." } : undefined;
+          : title.includes("present:r1") ? { answer: "The answer is 4." }
+          : title.includes("verify:r1") ? { verdict: "pass", summary: "Answer matches the facts", findings: [], checks: [], activations: [] } : undefined;
         return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: "The answer is 4." }] }] };
       },
       abort: async () => ({ data: true }),
@@ -973,13 +992,13 @@ describe("OpenCode automatic graph routing", () => {
       expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
       expect(output.message.agent).toBe("langgraph-presenter");
       deadline = Date.now() + 2_000;
-      while ((child < 4 || posted.length < 6) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(child).toBe(4);
-      expect(posted).toHaveLength(6);
+      while ((child < 6 || posted.length < 8) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(child).toBe(6);
+      expect(posted).toHaveLength(8);
       expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter" } });
       expect((posted.at(-1) as { body: Record<string, unknown> }).body.tools).toBeUndefined();
       const events = readPluginEvents("root");
-      expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "present:r1", "__end__"]));
+      expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "present:r1", "verify:r1", "__end__"]));
       expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
       expect(events.find((event) => event.userMessageId === "message-1" && event.node === "__start__")?.state).toMatchObject({
         originalTask: "What is 2+2?",

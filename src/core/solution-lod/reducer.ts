@@ -10,7 +10,7 @@ export function initialNetwork(task: string): SolutionNetwork {
     revision: 0, nextRegionId: 2, nextEvidenceId: 1, nextConstraintId: 1, nextActivationId: 2, nextArtifactId: 1,
     regions: [{ id: "r1", key: "root", edge: "root", lod: 0, objective: task, delivery: "change", allowedVariables: ["solution family"], acceptanceCriteria: [], status: "unformed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: ["a1"], artifactIds: [] }],
     candidates: [], constraints: [], evidence: [], artifacts: [],
-    activations: [{ id: "a1", capability: "inspect", regionId: "r1", request: "Inspect the request and repository context needed to form the coarse solution domain. Do not expose implementation-level variables.", expectedDelta: "coarse-domain:r1", contextRefs: ["r1"], status: "queued", basisRevision: 0 }],
+    activations: [{ id: "a1", capability: "inspect", regionId: "r1", request: "Find repository facts needed to distinguish the broad solution types. Investigate lower-level details when they affect that choice, but do not turn them into choices yet.", expectedDelta: "coarse-domain:r1", contextRefs: ["r1"], status: "queued", basisRevision: 0 }],
   };
 }
 
@@ -131,11 +131,11 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
       if (selected.length) {
         const equivalent = (left: string, right: string) => equivalence.get(left) === equivalence.get(right);
         if (selected.some((candidate, index) => selected.slice(index + 1).some((other) => !equivalent(candidate.id, other.id)))) {
-          const contradiction = "A solution region selected multiple non-equivalent alternatives; synthesize one complete candidate at this LOD.";
+          const contradiction = "Multiple incompatible alternatives were chosen. Choose one complete approach.";
           if (region.status !== "contradiction" || region.contradiction !== contradiction) { region.status = "contradiction"; region.contradiction = contradiction; changed = anyChange = true; }
           continue;
         }
-        for (const candidate of viable) if (!selected.some((item) => item.id === candidate.id) && !selected.every((item) => equivalent(item.id, candidate.id))) eliminate(candidate.id, "another solution family collapsed");
+        for (const candidate of viable) if (!selected.some((item) => item.id === candidate.id) && !selected.every((item) => equivalent(item.id, candidate.id))) eliminate(candidate.id, "a different non-equivalent approach was chosen");
         selected = viable.filter((item) => item.status === "selected" || selected.every((choice) => equivalent(choice.id, item.id)));
         const ids = selected.map((item) => item.id);
         if (region.selectedCandidateIds.join("\0") !== ids.join("\0")) { region.selectedCandidateIds = ids; changed = anyChange = true; }
@@ -153,7 +153,15 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
 }
 
 export function validateSolutionDelta(state: SolutionLodState, regionId: string, delta: SolutionDelta): void {
-  if (delta.resolvedAnswer) return;
+  // Mirror mergeSolutionDelta: an answer is honored only when the delta marks the goal as answer-only.
+  const resolvedAnswer = delta.region?.delivery === "answer" ? delta.resolvedAnswer : undefined;
+  if (resolvedAnswer) {
+    const known = new Set(state.network.evidence.map((item) => item.id));
+    const suppliedSources = new Set(delta.evidence.map((item) => item.source));
+    if (!resolvedAnswer.evidenceRefs.some((ref) => known.has(ref) || suppliedSources.has(ref)))
+      throw new Error("A resolved answer must cite at least one real fact: an existing evidence id or the source of a fact supplied with this result. An answer without evidence is a guess, not a resolution.");
+    return;
+  }
   const region = state.network.regions.find((item) => item.id === regionId);
   if (!region) return;
   const statuses = new Map<string, string>();
@@ -163,7 +171,7 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
   for (const key of delta.select) { const id = candidateRef(state.network, regionId, key); if (statuses.has(id)) statuses.set(id, "selected"); }
   const domain = [...statuses.values()];
   if (domain.length && domain.every((status) => status === "eliminated"))
-    throw new Error(`Delta leaves every candidate in region ${regionId} eliminated with none selected. Provide at least one viable candidate (outcome "possible" or "selected"), or select one via "select". Elimination reasons must be genuine defeaters; supporting evidence is not a reason to eliminate a candidate.`);
+    throw new Error(`Every alternative for ${regionId} was rejected. Leave at least one alternative possible or chosen. Reject an alternative only for a reason that argues against choosing it; supporting evidence is not a rejection reason.`);
 }
 
 export function mergeSolutionDelta(state: SolutionLodState, activationId: string, delta: SolutionDelta): SolutionNetwork {
@@ -228,7 +236,8 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     }
     for (const other of network.candidates.filter((item) => item.regionId === region.id && item.id !== id && item.status === "selected")) other.status = "possible";
     region.selectedCandidateIds = [id];
-    region.status = "verified";
+    addArtifact(network, region, activation.id, { kind: "answer", summary: region.answer });
+    region.status = "implemented";
     changed = true;
   }
   for (const key of resolvedAnswer ? [] : delta.select) {
@@ -298,7 +307,7 @@ export function completeVerification(networkInput: SolutionNetwork, activationId
 export function completePresentation(networkInput: SolutionNetwork, activationId: string, answer: string): SolutionNetwork {
   const network = cloneNetwork(networkInput); const activation = network.activations.find((item) => item.id === activationId); const region = network.regions.find((item) => item.id === activation?.regionId);
   if (!activation || !region) return network;
-  activation.status = "completed"; region.answer = answer; region.status = "verified"; addArtifact(network, region, activationId, { kind: "answer", summary: answer }); network.revision++; return network;
+  activation.status = "completed"; region.answer = answer; region.status = "implemented"; addArtifact(network, region, activationId, { kind: "answer", summary: answer }); network.revision++; return network;
 }
 
 export function reopenRegion(networkInput: SolutionNetwork, regionId: string, reason: string): SolutionNetwork {
@@ -329,24 +338,24 @@ export function ensureRunnableWork(input: SolutionNetwork): { network: SolutionN
   const actionable = required.find((region) => region.status === "actionable");
   if (actionable) {
     const capability = actionable.delivery === "answer" ? "present" : "implement";
-    network = queueActivation(network, capability, actionable.id, capability === "present" ? "Produce the answer supported by this collapsed solution path." : "Implement this collapsed actionable region and satisfy its acceptance criteria.", `${capability}:${actionable.id}:${network.revision}`, [...actionable.evidenceIds, ...actionable.constraintIds]);
+    network = queueActivation(network, capability, actionable.id, capability === "present" ? "Answer the user using the supplied facts and choices." : "Make the required change and meet every success criterion.", `${capability}:${actionable.id}:${network.revision}`, [...actionable.evidenceIds, ...actionable.constraintIds]);
     return nextQueuedActivation(network) ? { network, done: false } : { network, done: false, blocked: `Could not schedule ${capability} for ${actionable.id}.` };
   }
   const implemented = required.find((region) => region.status === "implemented");
   if (implemented) {
-    network = queueActivation(network, "verify", implemented.id, "Verify this region against its acceptance criteria and actual artifacts.", `verification:${implemented.id}:${network.revision}`, [...implemented.artifactIds]);
+    network = queueActivation(network, "verify", implemented.id, "Check the actual output (changed files or the answer) against every success criterion.", `verification:${implemented.id}:${network.revision}`, [...implemented.artifactIds]);
     return nextQueuedActivation(network) ? { network, done: false } : { network, done: false, blocked: `Could not schedule verification for ${implemented.id}.` };
   }
   const contradiction = required.find((region) => region.status === "contradiction");
   if (contradiction) {
-    network = queueActivation(network, "synthesize", contradiction.id, `Resolve the contradiction without discarding unrelated solution regions: ${contradiction.contradiction ?? "all candidates were eliminated"}`, `contradiction:${contradiction.id}:${network.revision}`, [...contradiction.constraintIds, ...contradiction.evidenceIds]);
+    network = queueActivation(network, "synthesize", contradiction.id, `Choose a consistent approach without changing unrelated choices: ${contradiction.contradiction ?? "every alternative was rejected"}`, `contradiction:${contradiction.id}:${network.revision}`, [...contradiction.constraintIds, ...contradiction.evidenceIds]);
     return nextQueuedActivation(network) ? { network, done: false } : { network, done: false, blocked: `Contradiction in ${contradiction.id} could not be resolved.` };
   }
   const unresolved = required.filter((region) => region.status === "unformed" || region.status === "superposed").sort((left, right) => left.candidateIds.length - right.candidateIds.length || left.lod - right.lod)[0];
   if (unresolved) {
     network = queueActivation(network, "synthesize", unresolved.id, unresolved.candidateIds.length
-      ? "Collapse this region from its existing candidates and evidence. Request inspection only for one named fact that genuinely prevents selection."
-      : "Form and collapse the candidate domain at exactly this LOD, including only conditional next-LOD definitions.", `synthesis:${unresolved.id}:${network.revision}`, [...unresolved.evidenceIds, ...unresolved.constraintIds]);
+      ? "Choose among the existing alternatives using the supplied facts. Request one named missing fact only if no sound choice is possible without it."
+      : "Propose complete alternatives for this choice and choose one. Add children only for work revealed by the chosen approach.", `synthesis:${unresolved.id}:${network.revision}`, [...unresolved.evidenceIds, ...unresolved.constraintIds]);
     if (nextQueuedActivation(network)) return { network, done: false };
     return { network, done: false, blocked: `No activation can make a novel state delta for ${unresolved.id}.` };
   }
