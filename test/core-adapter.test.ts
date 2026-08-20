@@ -1175,7 +1175,7 @@ describe("OpenCode graph viewer", () => {
     expect(graphHelpText()).toContain("/graph-select");
     expect(graphHelpText()).toContain(".opencode/langgraph.ts");
     expect(graphHelpText()).toContain("defineGraph({ graph, initial, result, progress? })");
-    expect(graphHelpText()).toContain("G topology");
+    expect(graphHelpText()).toContain("R runs");
     expect(graphHelpText()).toContain("P prompt");
     expect(effectivePrompt({ prompt: { system: "ROLE", input: '{"task":"x"}', schemaInstruction: "SCHEMA" } } as never)).toBe('SYSTEM\nROLE\n\nINPUT\n{"task":"x"}\n\nOUTPUT CONTRACT\nSCHEMA');
   });
@@ -1206,14 +1206,14 @@ describe("OpenCode graph viewer", () => {
     const commandByName = new Map(layer.commands.map((command) => [command.name, command]));
 
     for (const [key, expected] of [
-      ["q", "back"], ["tab", "cycle"], ["1", "graph"], ["2", "nodes"], ["o", "output"],
-      ["4", "prompt"], ["t", "state"], ["return", "inspect"], ["up", "up"], ["j", "down"], ["left", "left"],
+      ["q", "back"], ["tab", "cycle"], ["1", "tree"], ["2", "detail"], ["r", "runs"], ["o", "output"],
+      ["p", "prompt"], ["return", "inspect"], ["up", "up"], ["j", "down"], ["left", "left"],
       ["d", "right"], ["pageup", "pageUp"], ["pagedown", "pageDown"], ["home", "home"], ["end", "end"],
     ] as const) {
       const binding = layer.bindings.find((candidate) => candidate.key === key);
       expect(binding).toBeDefined();
       commandByName.get(binding!.cmd)?.run();
-      expect(calls.pop()).toBe(key === "g" ? "topology" : expected);
+      expect(calls.pop()).toBe(expected);
     }
   });
 
@@ -1415,11 +1415,7 @@ describe("OpenCode graph viewer", () => {
       await tui(api as never, undefined, {} as never);
       events.get("tui.session.select")?.({ properties: { sessionID: "current-session" } });
       commands.find((command) => command.name === "langgraph.graph.open")?.run();
-      expect(navigations).toEqual([]);
-      expect(selector?.title).toBe("Inspect a LangGraph run");
-      expect(selector?.options.map((option) => option.value)).toEqual(["agent-run"]);
-      selector?.onSelect({ value: "agent-run" });
-      expect(navigations.at(-1)).toEqual({ name: "langgraph.graph", params: { sessionID: undefined, runID: "agent-run" } });
+      expect(navigations).toEqual([{ name: "langgraph.graph", params: { runs: true } }]);
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
@@ -1487,8 +1483,8 @@ describe("OpenCode graph viewer", () => {
       expect(readSessionGraphEnabled("root-session", stateHome)).toBe(true);
       expect(readHomeGraphState(project, stateHome)).toBeUndefined();
       commands.find((command) => command.name === "langgraph.graph.open")?.run();
-      expect(navigations).toEqual([]);
-      expect(dialogs).toEqual(["OpenCode LangGraph"]);
+      expect(navigations).toEqual([{ name: "langgraph.graph", params: { runs: true } }]);
+      expect(dialogs).toEqual([]);
       writeStoredRun({
         runId: "run-root", rootSessionId: "root-session", userMessageId: "message", graph: "default", task: "test",
         directory: project, worktree: project, status: "completed",

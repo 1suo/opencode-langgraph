@@ -3,7 +3,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import path from "node:path";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import type { ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot } from "../core/types.js";
 import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
@@ -43,14 +43,11 @@ interface AsciiGraph {
 export interface GraphControls {
   back(): void;
   cycle(): void;
-  graph(): void;
-  topology(): void;
-  nodes(): void;
+  tree(): void;
+  detail(): void;
+  runs(): void;
   output(): void;
-  state(): void;
   prompt(): void;
-  previous(): void;
-  next(): void;
   inspect(): void;
   up(): void;
   down(): void;
@@ -67,15 +64,12 @@ export function graphNavigationLayer(controls: GraphControls) {
     commands: [
       { name: "langgraph.graph.back", title: "Return from LangGraph", run: controls.back },
       { name: "langgraph.pane.next", title: "LangGraph: focus next pane", run: controls.cycle },
-      { name: "langgraph.view.graph", title: "LangGraph: show activity", run: controls.graph },
-      { name: "langgraph.view.topology", title: "LangGraph: show topology", run: controls.topology },
-      { name: "langgraph.view.nodes", title: "LangGraph: show plan", run: controls.nodes },
-      { name: "langgraph.view.output", title: "LangGraph: focus output", run: controls.output },
-      { name: "langgraph.view.state", title: "LangGraph: inspect state", run: controls.state },
-      { name: "langgraph.view.prompt", title: "LangGraph: inspect effective prompt", run: controls.prompt },
-      { name: "langgraph.node.previous", title: "LangGraph: previous execution", run: controls.previous },
-      { name: "langgraph.node.next", title: "LangGraph: next execution", run: controls.next },
-      { name: "langgraph.node.inspect", title: "LangGraph: inspect execution", run: controls.inspect },
+      { name: "langgraph.view.tree", title: "LangGraph: show solution tree", run: controls.tree },
+      { name: "langgraph.view.detail", title: "LangGraph: show details", run: controls.detail },
+      { name: "langgraph.view.runs", title: "LangGraph: choose run", run: controls.runs },
+      { name: "langgraph.view.output", title: "LangGraph: show activation output", run: controls.output },
+      { name: "langgraph.view.prompt", title: "LangGraph: show activation prompt", run: controls.prompt },
+      { name: "langgraph.row.inspect", title: "LangGraph: open selected row", run: controls.inspect },
       { name: "langgraph.navigate.up", title: "LangGraph: navigate up", run: controls.up },
       { name: "langgraph.navigate.down", title: "LangGraph: navigate down", run: controls.down },
       { name: "langgraph.navigate.left", title: "LangGraph: navigate left", run: controls.left },
@@ -89,16 +83,12 @@ export function graphNavigationLayer(controls: GraphControls) {
       { key: "escape", cmd: "langgraph.graph.back" },
       { key: "q", cmd: "langgraph.graph.back" },
       { key: "tab", cmd: "langgraph.pane.next" },
-      { key: "1", cmd: "langgraph.view.graph" },
-      { key: "g", cmd: "langgraph.view.topology" },
-      { key: "2", cmd: "langgraph.view.nodes" },
-      { key: "n", cmd: "langgraph.view.nodes" },
-      { key: "3", cmd: "langgraph.view.output" },
+      { key: "1", cmd: "langgraph.view.tree" },
+      { key: "2", cmd: "langgraph.view.detail" },
+      { key: "r", cmd: "langgraph.view.runs" },
       { key: "o", cmd: "langgraph.view.output" },
-      { key: "t", cmd: "langgraph.view.state" },
-      { key: "4", cmd: "langgraph.view.prompt" },
       { key: "p", cmd: "langgraph.view.prompt" },
-      { key: "return", cmd: "langgraph.node.inspect" },
+      { key: "return", cmd: "langgraph.row.inspect" },
       { key: "up", cmd: "langgraph.navigate.up" },
       { key: "k", cmd: "langgraph.navigate.up" },
       { key: "w", cmd: "langgraph.navigate.up" },
@@ -140,6 +130,62 @@ function middleEllipsis(value: string, limit: number): string {
   return `${[...value].slice(0, left).join("")}…${[...value].slice(-right).join("")}`;
 }
 
+function crop(value: string, width: number): string {
+  const chars = [...value];
+  return chars.length <= width ? value : `${chars.slice(0, Math.max(1, width - 1)).join("")}…`;
+}
+
+function shortTime(iso?: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toTimeString().slice(0, 8);
+}
+
+function shortDate(ms: number): string {
+  const date = new Date(ms);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+type SemanticRegion = SolutionSemanticSnapshot["regions"][number];
+type SemanticActivation = SolutionSemanticSnapshot["activations"][number];
+
+const REGION_ICON: Record<string, string> = {
+  verified: "\uf00c", implemented: "\uf0c3", collapsed: "\uf0e8", expanded: "\uf0e8", implementing: "\uf04b",
+  actionable: "\uf10c", ready: "\uf10c", superposed: "\uf24e", contradiction: "\uf071", blocked: "\uf071", failed: "\uf00d",
+};
+const ROLE_ICON: Record<string, string> = { inspect: "\uf002", synthesize: "\uf0eb", implement: "\uf121", verify: "\uf0c3", present: "\uf075" };
+const ACTIVATION_STATUS_ICON: Record<string, string> = { completed: "\uf00c", running: "\uf04b", failed: "\uf00d", waiting: "\uf10c", queued: "\uf10c" };
+const RUN_ICON: Record<string, string> = { completed: "\uf00c", failed: "\uf00d", running: "\uf04b", queued: "\uf10c", interrupted: "\uf04d", cancelled: "\uf04d", pruned: "\uf0c4" };
+
+const regionIcon = (status: string) => REGION_ICON[status] ?? "\uf10c";
+const roleIcon = (capability: string) => ROLE_ICON[capability] ?? "\uf111";
+const activationIcon = (status: string) => ACTIVATION_STATUS_ICON[status] ?? "\uf10c";
+const runIcon = (status: string) => RUN_ICON[status] ?? "\uf10c";
+
+export type SolutionTreeRow =
+  | { kind: "region"; id: string; region: SemanticRegion; indent: string }
+  | { kind: "activation"; id: string; activation: SemanticActivation; indent: string };
+
+export function solutionTreeRows(snapshot: SolutionSemanticSnapshot): SolutionTreeRow[] {
+  const byParent = new Map<string | undefined, SemanticRegion[]>();
+  for (const region of snapshot.regions) byParent.set(region.parentId, [...(byParent.get(region.parentId) ?? []), region]);
+  const activationsByRegion = new Map<string, SemanticActivation[]>();
+  for (const activation of [...snapshot.activations].sort((a, b) => planId(a.id) - planId(b.id)))
+    activationsByRegion.set(activation.regionId, [...(activationsByRegion.get(activation.regionId) ?? []), activation]);
+  const rows: SolutionTreeRow[] = [];
+  const visit = (parentId: string | undefined, indent: string) => {
+    const children = (byParent.get(parentId) ?? []).sort((a, b) => planId(a.id) - planId(b.id) || a.id.localeCompare(b.id));
+    for (const region of children) {
+      rows.push({ kind: "region", id: region.id, region, indent });
+      for (const activation of activationsByRegion.get(region.id) ?? []) rows.push({ kind: "activation", id: activation.id, activation, indent: `${indent}  ` });
+      visit(region.id, `${indent}  `);
+    }
+  };
+  visit(undefined, "");
+  return rows;
+}
+
 function executionState(event: PluginRunEvent): string {
   const progress = event.progress;
   const active = progress?.nodes.find((node) => node.id === progress.activeNodeId);
@@ -152,6 +198,7 @@ export function effectivePrompt(event: PluginRunEvent | undefined): string {
 }
 
 export function renderEventGraph(events: PluginRunEvent[], activeGlyph = "▶", focus?: number): AsciiGraph {
+
   const nodes = executions(events);
   if (!nodes.length) return { width: 0, height: 0, canvas: "" };
   const selected = Math.max(0, Math.min(focus ?? nodes.length - 1, nodes.length - 1));
@@ -171,17 +218,6 @@ export function renderEventGraph(events: PluginRunEvent[], activeGlyph = "▶", 
   const canvas = lines.join("\n");
   const rows = canvas.split("\n");
   return { canvas, width: Math.max(0, ...rows.map((row) => [...row].length)), height: rows.length };
-}
-
-function renderActivationGraph(snapshot: SolutionSemanticSnapshot | undefined): AsciiGraph {
-  if (!snapshot?.activations.length) return { width: 0, height: 0, canvas: "" };
-  const canvas = snapshot.activations.map((activation) => {
-    const sender = activation.senderActivationId ? `${activation.senderActivationId} ──▶ ` : "seed ──▶ ";
-    const glyph = activation.status === "completed" ? "✓" : activation.status === "running" ? "▶" : activation.status === "failed" ? "×" : activation.status === "waiting" ? "◇" : "○";
-    return `${glyph} ${sender}${activation.id}:${activation.capability} [${activation.regionId}]\n  └─ ${middleEllipsis(activation.expectedDelta, 72)}`;
-  }).join("\n      │\n");
-  const rows = canvas.split("\n");
-  return { canvas, width: Math.max(...rows.map((row) => [...row].length)), height: rows.length };
 }
 
 function status(event: PluginRunEvent, activeGlyph = "▶"): string {
@@ -253,12 +289,6 @@ function roleColor(value: string, theme: Theme) {
   let hash = 0;
   for (const character of role) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
   return palette[Math.abs(hash) % palette.length];
-}
-
-function printable(value: unknown): string {
-  if (value === undefined) return "No state captured for this execution.";
-  try { return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item, 2); }
-  catch { return String(value); }
 }
 
 export function renderStructuredEvent(event: PluginRunEvent): string {
@@ -347,33 +377,102 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
   return lines.join("\n");
 }
 
-function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme; selectedRegionId?: string; onSelect?: (id: string) => void }) {
-  const snapshot = createMemo(() => progressSnapshot(props.events));
-  const rows = createMemo(() => snapshot() ? planRows(snapshot()!) : []);
+function SolutionTreeView(props: { rows: SolutionTreeRow[]; selectedId?: string; onSelect: (id: string) => void; activationTime: (activation: SemanticActivation) => string; width: () => number; theme: Theme }) {
+  const budget = () => Math.max(24, props.width());
   return (
-    <Show when={snapshot()}>
-      <box flexDirection="column" gap={1} paddingX={1}>
-        <For each={rows()}>{({ node, branch, continuation }) => (
-          <box flexDirection="column" onMouseUp={() => props.onSelect?.(node.id)}>
-            <box flexDirection="row" gap={1}>
-              <text fg={statusTone(node.status, props.theme)}>{props.selectedRegionId === node.id ? "›" : " "}{branch} {planGlyph(node.status)} <b>{node.id}</b></text>
-              <text fg={props.selectedRegionId === node.id ? props.theme.primary : props.theme.text}><b>{middleEllipsis(node.title, 96)}</b></text>
-            </box>
-            <box flexDirection="row" gap={1}>
-              <text fg={props.theme.borderSubtle}>{continuation}   └─</text>
-              <text fg={statusTone(node.status, props.theme)}>{node.status} · {node.level}</text>
-              <Show when={node.evidence}><text fg={props.theme.info}>· {node.evidence} ev</text></Show>
-              <Show when={node.confidence !== undefined}><text fg={props.theme.secondary}>· {Math.round(node.confidence! * 100)}%</text></Show>
-              <Show when={node.dependencies?.length}><text fg={props.theme.warning}>· after {node.dependencies!.join(",")}</text></Show>
-              <For each={node.agents?.length ? node.agents : ["controller"]}>{(agent) => <text fg={roleColor(agent, props.theme)}>· {shortAgent(agent)}</text>}</For>
-            </box>
+    <box flexDirection="column" paddingX={1}>
+      <For each={props.rows}>{(row) => {
+        const selected = () => props.selectedId === row.id;
+        return (
+          <box flexDirection="column" width="100%" backgroundColor={selected() ? props.theme.backgroundElement : undefined} onMouseUp={() => props.onSelect(row.id)}>
+            {row.kind === "region" ? (
+              <>
+                <text wrapMode="none" fg={statusTone(row.region.status, props.theme)}>
+                  {row.indent}{regionIcon(row.region.status)} <b>{row.region.id}</b> {crop(row.region.objective, budget() - row.indent.length - row.region.id.length - 4)}
+                </text>
+                <text wrapMode="none" fg={props.theme.textMuted}>
+                  {crop(`${row.indent}  ${row.region.status} · L${row.region.lod} · ${row.region.edge} · ${row.region.viable}/${row.region.total} viable · ${row.region.evidenceIds.length} ev`, budget())}
+                </text>
+              </>
+            ) : (
+              <>
+                <text wrapMode="none" fg={roleColor(row.activation.capability, props.theme)}>
+                  {row.indent}{roleIcon(row.activation.capability)} <b>{row.activation.id}</b> {crop(row.activation.request, budget() - row.indent.length - row.activation.id.length - 4)}
+                </text>
+                <text wrapMode="none" fg={props.theme.textMuted}>
+                  {crop(`${row.indent}  ${activationIcon(row.activation.status)} ${row.activation.status} · ${row.activation.expectedDelta}${props.activationTime(row.activation) ? ` · ${props.activationTime(row.activation)}` : ""}${row.activation.error ? ` · ${row.activation.error}` : ""}`, budget())}
+                </text>
+              </>
+            )}
           </box>
-        )}</For>
-        <Show when={snapshot()!.summary && snapshot()!.summary !== rows()[0]?.node.title}><text fg={props.theme.textMuted}>// {snapshot()!.summary}</text></Show>
-      </box>
-    </Show>
+        );
+      }}</For>
+    </box>
   );
 }
+
+export interface RunListItem { run: ReturnType<typeof listAllRuns>[number]; modified: number }
+
+function RunListView(props: { items: RunListItem[]; selectedId?: string; onSelect: (id: string) => void; width: () => number; theme: Theme }) {
+  const budget = () => Math.max(24, props.width());
+  return (
+    <box flexDirection="column" paddingX={1}>
+      <For each={props.items}>{(item) => {
+        const selected = () => props.selectedId === item.run.runId;
+        return (
+          <box flexDirection="column" width="100%" backgroundColor={selected() ? props.theme.backgroundElement : undefined} onMouseUp={() => props.onSelect(item.run.runId)}>
+            <text wrapMode="none" fg={statusTone(item.run.status, props.theme)}>
+              {runIcon(item.run.status)} <b>{path.basename(item.run.worktree)}</b> {crop(item.run.task ?? "", budget() - path.basename(item.run.worktree).length - 4)}
+            </text>
+            <text wrapMode="none" fg={props.theme.textMuted}>
+              {crop(`  ${item.run.status} · ${item.run.graph} · ses …${item.run.rootSessionId.slice(-6)} · ${shortDate(item.modified)} · ${item.run.runId.slice(0, 8)}`, budget())}
+            </text>
+          </box>
+        );
+      }}</For>
+    </box>
+  );
+}
+
+function RunDetailView(props: { item: RunListItem; theme: Theme }) {
+  return (
+    <box flexDirection="column" paddingX={1} gap={1}>
+      <box flexDirection="row" gap={1}>
+        <text fg={statusTone(props.item.run.status, props.theme)}><b>{runIcon(props.item.run.status)} {props.item.run.status.toUpperCase()}</b></text>
+        <text fg={props.theme.secondary}>[{props.item.run.graph.toUpperCase()}]</text>
+        <text fg={props.theme.textMuted}>{shortDate(props.item.modified)}</text>
+      </box>
+      <text fg={props.theme.text} wrapMode="word"><b>{props.item.run.task}</b></text>
+      <text fg={props.theme.textMuted} wrapMode="word">  repo {props.item.run.worktree}</text>
+      <text fg={props.theme.textMuted}>  session {props.item.run.rootSessionId}</text>
+      <text fg={props.theme.textMuted}>  run {props.item.run.runId}</text>
+      <text fg={props.theme.info}>  Enter to open this run</text>
+    </box>
+  );
+}
+
+function ActivationDetailView(props: { activation: SemanticActivation; event?: PluginRunEvent; promptEvent?: PluginRunEvent; tab: "output" | "prompt"; onTab: (tab: "output" | "prompt") => void; theme: Theme }) {
+  return (
+    <box flexDirection="column" paddingX={1} gap={1}>
+      <box flexDirection="row" gap={1}>
+        <text fg={roleColor(props.activation.capability, props.theme)}><b>{roleIcon(props.activation.capability)} {props.activation.id}:{props.activation.capability}</b></text>
+        <text fg={statusTone(props.activation.status, props.theme)}>[{props.activation.status.toUpperCase()}]</text>
+        <Show when={props.event?.at}><text fg={props.theme.textMuted}>{shortTime(props.event?.at)}</text></Show>
+        <Show when={props.event?.usage}>{(usage) => <text fg={props.theme.textMuted} wrapMode="none">{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
+      </box>
+      <text fg={props.theme.textMuted}>  region {props.activation.regionId} · {props.activation.expectedDelta}{props.activation.senderActivationId ? ` · after ${props.activation.senderActivationId}` : ""}</text>
+      <text fg={props.theme.textMuted}>REQUEST</text>
+      <text fg={props.theme.text} wrapMode="word">  {props.activation.request}</text>
+      <Show when={props.activation.error}><text fg={props.theme.error} wrapMode="word">  ERROR {props.activation.error}</text></Show>
+      <box flexDirection="row" gap={2} flexShrink={0}>
+        <text onMouseUp={() => props.onTab("output")} fg={props.tab === "output" ? props.theme.primary : props.theme.textMuted}><b>Output [O]</b></text>
+        <text onMouseUp={() => props.onTab("prompt")} fg={props.tab === "prompt" ? props.theme.primary : props.theme.textMuted}>Prompt [P]</text>
+      </box>
+      <text fg={props.theme.text} wrapMode="word">{props.tab === "output" ? (props.event?.text ?? "No output recorded yet.") : effectivePrompt(props.promptEvent)}</text>
+    </box>
+  );
+}
+
 
 function semanticSnapshot(events: PluginRunEvent[]): SolutionSemanticSnapshot | undefined {
   return progressSnapshot(events)?.semantic;
@@ -384,21 +483,18 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
   const candidates = createMemo(() => props.semantic?.candidates.filter((item) => item.regionId === props.regionId) ?? []);
   const constraints = createMemo(() => props.semantic?.constraints.filter((item) => region()?.constraintIds.includes(item.id)) ?? []);
   const evidence = createMemo(() => props.semantic?.evidence.filter((item) => region()?.evidenceIds.includes(item.id)) ?? []);
-  const activations = createMemo(() => props.semantic?.activations.filter((item) => item.regionId === props.regionId) ?? []);
   const artifacts = createMemo(() => props.semantic?.artifacts.filter((item) => item.regionId === props.regionId) ?? []);
   return <Show when={region()} fallback={<text fg={props.theme.textMuted} padding={1}>Select a solution region.</text>}>{(item) => (
     <box flexDirection="column" paddingX={1} gap={1}>
       <box flexDirection="row" gap={1}>
-        <text fg={statusTone(item().status, props.theme)}><b>{planGlyph(item().status)} {item().id} · L{item().lod}</b></text>
+        <text fg={statusTone(item().status, props.theme)}><b>{regionIcon(item().status)} {item().id} · L{item().lod}</b></text>
         <text fg={props.theme.secondary}>[{item().edge.toUpperCase()}]</text>
         <text fg={props.theme.textMuted}>{item().viable}/{item().total} viable</text>
       </box>
       <text fg={props.theme.text} wrapMode="word"><b>{item().objective}</b></text>
-      <Show when={activations().length}><text fg={props.theme.textMuted}>ACTIVATIONS</text></Show>
-      <For each={activations()}>{(activation) => <text fg={roleColor(activation.capability, props.theme)} wrapMode="word">  [{activation.status}] {activation.senderActivationId ? `${activation.senderActivationId} → ` : ""}{activation.id}:{activation.capability} · {activation.expectedDelta}{activation.error ? ` · ${activation.error}` : ""}</text>}</For>
       <Show when={artifacts().length}><text fg={props.theme.textMuted}>ARTIFACTS</text></Show>
       <For each={artifacts()}>{(artifact) => <text fg={artifact.passed === false ? props.theme.error : props.theme.success} wrapMode="word">  {artifact.kind} {artifact.path ?? artifact.summary}</text>}</For>
-      <text fg={props.theme.textMuted}>DOMAIN</text>
+      <text fg={props.theme.textMuted}>CANDIDATES</text>
       <Show when={candidates().length} fallback={<text fg={props.theme.textMuted}>  · not formed at this LOD</text>}>
         <For each={candidates()}>{(candidate) => <box flexDirection="column">
           <text fg={statusTone(candidate.status, props.theme)}>  {candidate.status === "selected" ? "◆" : candidate.status === "eliminated" ? "×" : "◇"} {candidate.proposition}</text>
@@ -423,12 +519,6 @@ function executions(events: PluginRunEvent[]): PluginRunEvent[] {
   return current.filter((event) =>
     event.status === "completed" || event.status === "failed" || event.status === "interrupted" || lastByNode.get(event.node) === event
   );
-}
-
-function initialSelection(events: PluginRunEvent[]): number {
-  const items = executions(events);
-  const agent = items.findLastIndex((event) => event.agent !== "langgraph" && Boolean(event.text));
-  return agent >= 0 ? agent : Math.max(0, items.length - 1);
 }
 
 function projectPath(api: TuiPluginApi): string {
@@ -630,33 +720,8 @@ async function showGraphSelector(api: TuiPluginApi, sessionID: string | undefine
   }
 }
 
-function runStatusLabel(run: { status: string; graph?: string; task?: string }): string {
-  return [run.status.toUpperCase(), run.graph, run.task ? run.task.slice(0, 80) : ""].filter(Boolean).join(" · ");
-}
-
 function showRunSelector(api: TuiPluginApi): void {
-  const project = projectPath(api);
-  const runs = listAllRuns(stateHome(api));
-  if (!runs.length) {
-    api.ui.dialog.replace(() => api.ui.DialogAlert({ title: "OpenCode LangGraph", message: "No LangGraph runs found yet.", onConfirm: () => api.ui.dialog.clear() }));
-    return;
-  }
-  const own = (run: (typeof runs)[number]) => path.resolve(run.worktree) === path.resolve(project);
-  const foreign = new Set(runs.filter((run) => !own(run)).map((run) => run.runId));
-  const ordered = [...runs.filter(own), ...runs.filter((run) => foreign.has(run.runId))];
-  api.ui.dialog.replace(() => api.ui.DialogSelect({
-    title: "Inspect a LangGraph run",
-    placeholder: "Search runs",
-    options: ordered.map((run) => ({
-      title: `${run.graph} · ${run.status}`,
-      value: run.runId,
-      description: runStatusLabel(run) + (foreign.has(run.runId) ? ` · ${run.worktree}` : ""),
-    })),
-    onSelect(option) {
-      api.ui.dialog.clear();
-      openGraph(api, undefined, undefined, option.value);
-    },
-  }));
+  api.route.navigate("langgraph.graph", { runs: true });
 }
 
 export function graphHelpText(): string {
@@ -667,9 +732,9 @@ USE
 /run-graph <task> once · /graph-resume <answer> · /graph-cancel stop
 
 VIEW · panels
-1 plan · G topology · 2 trace · 3 inspect
-Tab next panel · ↑↓ move/scroll · ←→ pan topology
-Enter inspect · O output · P prompt · T state · Q back
+1 tree · 2 details · R runs
+Tab next pane · ↑↓ select · Enter open/inspect
+O output · P prompt · Q back
 
 DESIGN · .opencode/langgraph.ts
 1. Annotation.Root → StateGraph → compile(checkpointer)
@@ -704,7 +769,7 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
         <Show when={semantic()}>{(value) => (
           <box flexDirection="column">
             <text fg={statusTone(value().phase, theme())}>[{value().phase.toUpperCase()}] [{(value().scope ?? "classifying").toUpperCase()}] {value().callsUsed ?? 0} calls{value().usage ? ` · ${value().usage!.turns}t · ${compactNumber(value().usage!.input)}in` : ""}</text>
-            <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={statusTone(node().status, theme())} wrapMode="word">{planGlyph(node().status)} {node().id} {node().title}</text>}</Show>
+            <Show when={value().nodes.find((node) => node.id === value().activeNodeId)}>{(node) => <text fg={statusTone(node().status, theme())} wrapMode="none">{planGlyph(node().status)} {node().id} {middleEllipsis(node().title, 48)}</text>}</Show>
           </box>
         )}</Show>
         <Show when={node()}>{(event) => (
@@ -723,107 +788,97 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
   );
 }
 
-function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMessageId?: string; runID?: string }) {
-  const [rootSessionId] = createSignal(props.rootSessionId);
-  const [runID] = createSignal(props.runID);
+function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMessageId?: string; runID?: string; chooser?: boolean }) {
+  const [rootSessionId, setRootSessionId] = createSignal(props.rootSessionId);
+  const [runID, setRunID] = createSignal(props.runID);
   const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId, () => runID());
-  const spinner = useSpinner(events, props.api);
-  const nodes = createMemo(() => executions(events()));
   const currentRun = createMemo(() => latest(events()));
   const semantic = createMemo(() => progressSnapshot(events()));
   const solution = createMemo(() => semanticSnapshot(events()));
   const activePlan = createMemo(() => semantic()?.nodes.find((node) => node.id === semantic()?.activeNodeId));
-  const [scrollPosition, setScrollPosition] = createSignal({ x: 0, y: 0 });
-  const [selected, setSelected] = createSignal(initialSelection(events()));
-  const [followLatest, setFollowLatest] = createSignal(true);
-  const layout = createMemo(() => renderActivationGraph(solution()));
-  const [focus, setFocus] = createSignal<"plan" | "trace" | "inspect">("plan");
-  const [leftView, setLeftView] = createSignal<"plan" | "topology">(semantic()?.nodes.length ? "plan" : "topology");
-  const [detail, setDetail] = createSignal<"output" | "state" | "prompt">("output");
-  const [selectedRegionId, setSelectedRegionId] = createSignal(semantic()?.activeNodeId ?? solution()?.regions[0]?.id);
-  const [keymapReady, setKeymapReady] = createSignal(false);
-  let canvas: BoxRenderable | undefined;
-  let outputBox: ScrollBoxRenderable | undefined;
-  let planBox: ScrollBoxRenderable | undefined;
-  let traceBox: ScrollBoxRenderable | undefined;
+  const [view, setView] = createSignal<"tree" | "runs">(props.chooser ? "runs" : "tree");
+  const [focus, setFocus] = createSignal<"tree" | "detail">("tree");
+  const [selectedId, setSelectedId] = createSignal<string>();
+  const [selectedRunId, setSelectedRunId] = createSignal<string>();
+  const [detailTab, setDetailTab] = createSignal<"output" | "prompt">("output");
+  const [runsVersion, setRunsVersion] = createSignal(0);
+  let treeBox: ScrollBoxRenderable | undefined;
+  let detailBox: ScrollBoxRenderable | undefined;
   const theme = () => props.api.theme.current;
-  const selectedEvent = createMemo(() => nodes()[Math.min(selected(), Math.max(0, nodes().length - 1))]);
-  const selectedPromptEvent = createMemo(() => {
-    const item = selectedEvent();
-    if (!item) return;
-    return events().findLast((event) => event.runId === item.runId && event.node === item.node && Boolean(event.prompt) && (!item.sessionId || event.sessionId === item.sessionId));
-  });
-  const requestRender = () => props.api.renderer.requestRender();
-  const setFocusPanel = (value: "plan" | "trace" | "inspect") => { setFocus(value); requestRender(); };
-  const selectPrevious = () => { setFollowLatest(false); setSelected((value) => Math.max(0, value - 1)); outputBox?.scrollTo(0); requestRender(); };
-  const selectNext = () => {
-    setSelected((value) => {
-      const next = Math.min(nodes().length - 1, value + 1);
-      setFollowLatest(next === nodes().length - 1);
-      return next;
+  const termWidth = () => (props.api.renderer as unknown as { width?: number }).width ?? 120;
+  const treeWidth = () => Math.max(30, Math.floor(termWidth() * 0.42) - 4);
+  const rows = createMemo(() => solution() ? solutionTreeRows(solution()!) : []);
+  const runItems = createMemo<RunListItem[]>(() => {
+    runsVersion();
+    return listAllRuns(stateHome(props.api)).map((run) => {
+      let modified = 0;
+      try { modified = statSync(path.join(stateHome(props.api), "opencode-langgraph", "runs", `${run.runId}.json`)).mtimeMs; } catch { /* run file gone */ }
+      return { run, modified };
     });
-    outputBox?.scrollTo(0);
-    requestRender();
-  };
+  });
+  const eventByNode = createMemo(() => {
+    const runId = latestRunId(events());
+    const map = new Map<string, PluginRunEvent>();
+    for (const event of events()) if (event.runId === runId) map.set(event.node, event);
+    return map;
+  });
+  const promptByNode = createMemo(() => {
+    const runId = latestRunId(events());
+    const map = new Map<string, PluginRunEvent>();
+    for (const event of events()) if (event.runId === runId && event.prompt) map.set(event.node, event);
+    return map;
+  });
+  const activationTime = (activation: SemanticActivation) => shortTime(eventByNode().get(`${activation.capability}:${activation.regionId}`)?.at);
+  const selectedRow = createMemo(() => rows().find((row) => row.id === selectedId()));
+  const selectedActivation = createMemo(() => { const row = selectedRow(); return row?.kind === "activation" ? row.activation : undefined; });
+  const selectedRegionId = createMemo(() => { const row = selectedRow(); return row ? (row.kind === "region" ? row.region.id : row.activation.regionId) : undefined; });
+  const selectedActivationEvent = createMemo(() => { const activation = selectedActivation(); return activation ? eventByNode().get(`${activation.capability}:${activation.regionId}`) : undefined; });
+  const selectedActivationPrompt = createMemo(() => { const activation = selectedActivation(); return activation ? promptByNode().get(`${activation.capability}:${activation.regionId}`) : undefined; });
+  const selectedRunItem = createMemo(() => runItems().find((item) => item.run.runId === selectedRunId()));
+  const requestRender = () => props.api.renderer.requestRender();
+  const setFocusPanel = (value: "tree" | "detail") => { setFocus(value); requestRender(); };
   const back = () => {
     if (rootSessionId()) props.api.route.navigate("session", { sessionID: rootSessionId()! });
     else props.api.route.navigate("home");
   };
-  const moveGraph = (update: (position: { x: number; y: number }) => { x: number; y: number }) => {
-    setScrollPosition(update);
-    const position = scrollPosition();
-    if (canvas) canvas.setPosition({ left: -position.x, top: -position.y });
+  const moveSelection = (delta: number) => {
+    if (view() === "runs") {
+      const list = runItems(); if (!list.length) return;
+      const index = list.findIndex((item) => item.run.runId === selectedRunId());
+      setSelectedRunId(list[Math.max(0, Math.min(list.length - 1, (index < 0 ? 0 : index) + delta))].run.runId);
+    } else {
+      const list = rows(); if (!list.length) return;
+      const index = list.findIndex((row) => row.id === selectedId());
+      setSelectedId(list[Math.max(0, Math.min(list.length - 1, (index < 0 ? 0 : index) + delta))].id);
+    }
     requestRender();
+  };
+  const openRun = (id: string) => {
+    const item = runItems().find((entry) => entry.run.runId === id);
+    if (!item) return;
+    setRootSessionId(item.run.rootSessionId);
+    setRunID(item.run.runId);
+    setSelectedId(undefined);
+    setView("tree");
+    setFocusPanel("tree");
   };
   const controls: GraphControls = {
     back,
-    cycle: () => setFocusPanel(focus() === "plan" ? "trace" : focus() === "trace" ? "inspect" : "plan"),
-    graph: () => { setLeftView("plan"); setFocusPanel("plan"); },
-    topology: () => { setLeftView("topology"); setFocusPanel("plan"); },
-    nodes: () => setFocusPanel("trace"),
-    output: () => { setDetail("output"); setFocusPanel("inspect"); outputBox?.scrollTo(0); },
-    state: () => { setDetail("state"); setFocusPanel("inspect"); outputBox?.scrollTo(0); },
-    prompt: () => { setDetail("prompt"); setFocusPanel("inspect"); outputBox?.scrollTo(0); },
-    previous: selectPrevious,
-    next: selectNext,
-    inspect: () => { setFocusPanel("inspect"); outputBox?.scrollTo(0); },
-    up: () => {
-      if (focus() === "plan" && leftView() === "plan") { const regions = solution()?.regions ?? []; const index = regions.findIndex((item) => item.id === selectedRegionId()); setSelectedRegionId(regions[Math.max(0, index - 1)]?.id); requestRender(); }
-      else if (focus() === "trace") traceBox?.scrollBy(-3);
-      else if (focus() === "inspect") outputBox?.scrollBy(-3);
-      else moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 4) }));
-    },
-    down: () => {
-      if (focus() === "plan" && leftView() === "plan") { const regions = solution()?.regions ?? []; const index = regions.findIndex((item) => item.id === selectedRegionId()); setSelectedRegionId(regions[Math.min(regions.length - 1, index + 1)]?.id); requestRender(); }
-      else if (focus() === "trace") traceBox?.scrollBy(3);
-      else if (focus() === "inspect") outputBox?.scrollBy(3);
-      else moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 4) }));
-    },
-    left: () => { if (focus() === "plan" && leftView() === "topology") moveGraph(({ x, y }) => ({ x: Math.max(0, x - 8), y })); },
-    right: () => { if (focus() === "plan" && leftView() === "topology") moveGraph(({ x, y }) => ({ x: Math.min(Math.max(0, layout().width - 20), x + 8), y })); },
-    pageUp: () => {
-      if (focus() === "inspect") outputBox?.scrollBy(-12);
-      else if (focus() === "trace") traceBox?.scrollBy(-12);
-      else if (leftView() === "plan") planBox?.scrollBy(-12);
-      else moveGraph(({ x, y }) => ({ x, y: Math.max(0, y - 12) }));
-    },
-    pageDown: () => {
-      if (focus() === "inspect") outputBox?.scrollBy(12);
-      else if (focus() === "trace") traceBox?.scrollBy(12);
-      else if (leftView() === "plan") planBox?.scrollBy(12);
-      else moveGraph(({ x, y }) => ({ x, y: Math.min(Math.max(0, layout().height - 8), y + 12) }));
-    },
-    home: () => {
-      if (focus() === "inspect") outputBox?.scrollTo(0);
-      else if (focus() === "trace") traceBox?.scrollTo(0);
-      else if (leftView() === "plan") planBox?.scrollTo(0);
-      else moveGraph(() => ({ x: 0, y: 0 }));
-    },
-    end: () => {
-      if (focus() === "inspect" && outputBox) outputBox.scrollTo(outputBox.scrollHeight);
-      else if (focus() === "trace" && traceBox) traceBox.scrollTo(traceBox.scrollHeight);
-      else if (leftView() === "plan" && planBox) planBox.scrollTo(planBox.scrollHeight);
-    },
+    cycle: () => setFocusPanel(focus() === "tree" ? "detail" : "tree"),
+    tree: () => { setView("tree"); setFocusPanel("tree"); },
+    detail: () => setFocusPanel("detail"),
+    runs: () => { setRunsVersion((value) => value + 1); setView("runs"); setFocusPanel("tree"); },
+    output: () => { setDetailTab("output"); setFocusPanel("detail"); },
+    prompt: () => { setDetailTab("prompt"); setFocusPanel("detail"); },
+    inspect: () => { if (view() === "runs") { const id = selectedRunId(); if (id) openRun(id); } else setFocusPanel("detail"); },
+    up: () => { if (focus() === "detail") detailBox?.scrollBy(-3); else moveSelection(-1); },
+    down: () => { if (focus() === "detail") detailBox?.scrollBy(3); else moveSelection(1); },
+    left: () => setFocusPanel("tree"),
+    right: () => setFocusPanel("detail"),
+    pageUp: () => { if (focus() === "detail") detailBox?.scrollBy(-12); else moveSelection(-5); },
+    pageDown: () => { if (focus() === "detail") detailBox?.scrollBy(12); else moveSelection(5); },
+    home: () => { if (focus() === "detail") detailBox?.scrollTo(0); else moveSelection(-1_000); },
+    end: () => { if (focus() === "detail" && detailBox) detailBox.scrollTo(detailBox.scrollHeight); else moveSelection(1_000); },
   };
   const navigation = graphNavigationLayer(controls);
   const disposeNavigation = props.api.keymap.registerLayer({
@@ -832,25 +887,17 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     bindings: navigation.bindings,
   });
   onCleanup(disposeNavigation);
-  const keyHint = (commands: string[], fallback: string) => {
-    keymapReady();
-    const bindings = props.api.keymap.getCommandBindings({ commands, visibility: "registered" });
-    return props.api.keys.formatBindings(commands.flatMap((command) => bindings.get(command)?.slice(0, 1) ?? [])) ?? fallback;
-  };
-  onMount(() => {
-    setKeymapReady(true);
+  createEffect(() => {
+    const list = rows();
+    if (list.length && !list.some((row) => row.id === selectedId())) setSelectedId(semantic()?.activeNodeId ?? list[0].id);
   });
   createEffect(() => {
-    const count = nodes().length;
-    if (followLatest() && count) setSelected(count - 1);
-  });
-  createEffect(() => {
-    const regions = solution()?.regions ?? [];
-    if (!regions.some((region) => region.id === selectedRegionId())) setSelectedRegionId(semantic()?.activeNodeId ?? regions[0]?.id);
+    const list = runItems();
+    if (list.length && !list.some((item) => item.run.runId === selectedRunId())) setSelectedRunId(list[0].run.runId);
   });
   const liveStatus = createMemo(() => runIsActive(events()) ? "LIVE" : currentRun().at(-1)?.status?.toUpperCase() ?? "IDLE");
   const liveColor = createMemo(() => runIsActive(events()) ? theme().warning : currentRun().at(-1)?.status === "failed" ? theme().error : theme().success);
-  const borderFor = (panel: "plan" | "trace" | "inspect") => focus() === panel ? theme().borderActive : theme().border;
+  const borderFor = (panel: "tree" | "detail") => focus() === panel ? theme().borderActive : theme().border;
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" flexDirection="column" padding={1}>
       <box flexDirection="row" gap={2} flexShrink={0}>
@@ -864,53 +911,42 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
       </box>
       <box flexDirection="row" gap={2} flexShrink={0}>
         <text fg={theme().textMuted}>RUN::{currentRun().at(-1)?.runId ? middleEllipsis(currentRun().at(-1)!.runId!, 12) : "idle"}</text>
-        <text fg={theme().textMuted}>[graph-open] inspect another run</text>
+        <text fg={theme().textMuted}>[R] runs</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
-        <box onMouseUp={() => setFocusPanel("plan")} width="55%" flexShrink={0} border={true} borderColor={borderFor("plan")} title={` SOLUTION LOD [1] / ACTIVATION NETWORK [G] :: SELECT [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
-          <Show when={leftView() === "plan"} fallback={
-            <Show when={layout().canvas} fallback={<text fg={theme().textMuted} padding={1}>No activation network available.</text>}>
-              <box ref={(value) => { canvas = value; }} position="absolute" left={0} top={0} width={layout().width} height={layout().height} flexShrink={0}><text fg={theme().text}>{layout().canvas}</text></box>
+        <box onMouseUp={() => setFocusPanel("tree")} width="42%" flexShrink={0} border={true} borderColor={borderFor("tree")} title={view() === "runs" ? " RUNS [R] " : " SOLUTION [1] "} flexDirection="column" overflow="hidden">
+          <scrollbox ref={(value) => { treeBox = value; }} flexGrow={1} minHeight={0} scrollY={true} viewportCulling={true}>
+            <Show when={view() === "runs"} fallback={
+              <Show when={rows().length} fallback={<text fg={theme().textMuted} padding={1}>No solution tree yet for this run. Press [R] to choose a run.</text>}>
+                <SolutionTreeView rows={rows()} selectedId={selectedId()} onSelect={(id) => { setSelectedId(id); requestRender(); }} activationTime={activationTime} width={treeWidth} theme={theme()} />
+              </Show>
+            }>
+              <Show when={runItems().length} fallback={<text fg={theme().textMuted} padding={1}>No LangGraph runs found yet.</text>}>
+                <RunListView items={runItems()} selectedId={selectedRunId()} onSelect={(id) => { setSelectedRunId(id); requestRender(); }} width={treeWidth} theme={theme()} />
+              </Show>
             </Show>
-          }>
-            <scrollbox ref={(value) => { planBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}>
-              <Show when={semantic()?.nodes.length} fallback={<text fg={theme().textMuted} padding={1}>No semantic solution tree is available for this graph.</text>}><PlanTreeView events={events()} theme={theme()} selectedRegionId={selectedRegionId()} onSelect={setSelectedRegionId} /></Show>
-            </scrollbox>
-          </Show>
+          </scrollbox>
         </box>
-        <box flexGrow={1} minWidth={30} flexDirection="column" gap={1}>
-          <box onMouseUp={() => setFocusPanel("trace")} height="58%" minHeight={10} border={true} borderColor={borderFor("trace")} title={` REGION DOMAIN [2] :: ${selectedRegionId() ?? "NONE"} :: SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
-            <scrollbox ref={(value) => { traceBox = value; }} flexGrow={1} minHeight={0} scrollY={true} viewportCulling={true}>
-              <RegionDetailView semantic={solution()} regionId={selectedRegionId()} theme={theme()} />
-            </scrollbox>
-          </box>
-          <box onMouseUp={() => setFocusPanel("inspect")} flexGrow={1} minHeight={8} border={true} borderColor={borderFor("inspect")} title={` NODE INSPECT [3] :: ${detail().toUpperCase()} :: SCROLL [${keyHint(["langgraph.navigate.up", "langgraph.navigate.down"], "UP/DOWN")}] `} flexDirection="column" overflow="hidden">
-            <Show when={selectedEvent()} fallback={<text fg={theme().textMuted} padding={1}>Select an execution first.</text>}>
-              {(item) => <>
-                <box flexDirection="row" gap={2} flexShrink={0} paddingX={1}>
-                  <text onMouseUp={() => { setDetail("output"); requestRender(); }} fg={detail() === "output" ? theme().primary : theme().textMuted}><b>Summary [O]</b></text>
-                  <text onMouseUp={() => { setDetail("prompt"); requestRender(); }} fg={detail() === "prompt" ? theme().primary : theme().textMuted}>Prompt [P]</text>
-                  <text onMouseUp={() => { setDetail("state"); requestRender(); }} fg={detail() === "state" ? theme().primary : theme().textMuted}>Raw state [T]</text>
-                </box>
-                <box flexDirection="row" gap={1} flexShrink={0} paddingX={1}>
-                  <text fg={statusColor(item(), theme())}><b>{status(item(), spinner())} {item().node}</b></text>
-                  <text fg={statusTone(item().status, theme())}>[{item().status.toUpperCase()}]</text>
-                  <text fg={roleColor(item().agent, theme())}>[{shortAgent(item().agent)}]</text>
-                  <Show when={item().usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
-                </box>
-                <scrollbox ref={(value) => { outputBox = value; }} flexGrow={1} minHeight={0} scrollY={true} scrollX={true} viewportCulling={true}><text fg={theme().text}>{detail() === "output" ? renderStructuredEvent(item()) : detail() === "prompt" ? effectivePrompt(selectedPromptEvent()) : printable(item().state)}</text></scrollbox>
-              </>}
+        <box onMouseUp={() => setFocusPanel("detail")} flexGrow={1} minWidth={30} border={true} borderColor={borderFor("detail")} title={` DETAILS [2] :: ${view() === "runs" ? (selectedRunId()?.slice(0, 8) ?? "NONE") : (selectedId() ?? "NONE")} `} flexDirection="column" overflow="hidden">
+          <scrollbox ref={(value) => { detailBox = value; }} flexGrow={1} minHeight={0} scrollY={true} viewportCulling={true}>
+            <Show when={view() === "runs"} fallback={
+              <Show when={selectedActivation()} fallback={<RegionDetailView semantic={solution()} regionId={selectedRegionId()} theme={theme()} />}>
+                {(activation) => <ActivationDetailView activation={activation()} event={selectedActivationEvent()} promptEvent={selectedActivationPrompt()} tab={detailTab()} onTab={(tab) => { setDetailTab(tab); requestRender(); }} theme={theme()} />}
+              </Show>
+            }>
+              <Show when={selectedRunItem()} fallback={<text fg={theme().textMuted} padding={1}>Select a run.</text>}>
+                {(item) => <RunDetailView item={item()} theme={theme()} />}
+              </Show>
             </Show>
-          </box>
+          </scrollbox>
         </box>
       </box>
       <box flexDirection="row" gap={2} flexShrink={0} paddingTop={1}>
-        <text fg={focus() === "plan" ? theme().primary : theme().textMuted}><b>[1] Solution</b></text>
-        <text fg={focus() === "plan" && leftView() === "topology" ? theme().primary : theme().textMuted}>[G] Activations</text>
-        <text fg={focus() === "trace" ? theme().primary : theme().textMuted}><b>[2] Region</b></text>
-        <text fg={focus() === "inspect" ? theme().primary : theme().textMuted}><b>[3] Diagnostic</b></text>
+        <text fg={focus() === "tree" && view() === "tree" ? theme().primary : theme().textMuted}><b>[1] Tree</b></text>
+        <text fg={focus() === "detail" ? theme().primary : theme().textMuted}><b>[2] Details</b></text>
+        <text fg={view() === "runs" ? theme().primary : theme().textMuted}><b>[R] Runs</b></text>
         <text fg={theme().textMuted}>·</text>
-        <text fg={theme().textMuted}>[Tab] next · [Enter] inspect · [O/P/T] output/prompt/state · [↑↓] move · [PgUp/PgDn] page · [Q] back</text>
+        <text fg={theme().textMuted}>[Tab] next pane · [Enter] open · [O/P] output/prompt · [↑↓] select · [Q] back</text>
       </box>
     </box>
   );
@@ -936,7 +972,7 @@ export const tui: TuiPlugin = async (api) => {
       session_prompt_right(_context, props) { activeSessionId = props.session_id; return <GraphToggle api={api} session_id={props.session_id} graph={graphToggle} />; },
     },
   });
-  const renderGraph = ({ params }: { params?: Record<string, unknown> }) => <GraphRoute api={api} rootSessionId={typeof params?.sessionID === "string" ? params.sessionID : activeSessionId} userMessageId={typeof params?.messageID === "string" ? params.messageID : undefined} runID={typeof params?.runID === "string" ? params.runID : undefined} />;
+  const renderGraph = ({ params }: { params?: Record<string, unknown> }) => <GraphRoute api={api} rootSessionId={typeof params?.sessionID === "string" ? params.sessionID : activeSessionId} userMessageId={typeof params?.messageID === "string" ? params.messageID : undefined} runID={typeof params?.runID === "string" ? params.runID : undefined} chooser={params?.runs === true} />;
   api.route.register([{ name: "langgraph.graph", render: renderGraph }]);
   api.keymap.registerLayer({
     commands: [
