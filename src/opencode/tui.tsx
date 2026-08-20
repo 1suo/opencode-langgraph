@@ -341,9 +341,9 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
     const semanticRegion = snapshot.semantic?.regions.find((region) => region.id === node.id);
     const metrics = [node.status, node.level, semanticRegion ? `${semanticRegion.viable}/${semanticRegion.total} viable · ${semanticRegion.edge}` : "", node.evidence ? `${node.evidence} evidence` : "", node.dependencies?.length ? `after ${node.dependencies.join(", ")}` : ""].filter(Boolean).join(" · ");
     const agents = node.agents?.length ? node.agents.map(shortAgent).join(", ") : "controller";
-    lines.push(`${branch} ${planGlyph(node.status)} ${node.id}  ${node.title}`, `${continuation}   ${node.level}`, `${continuation}   ${metrics} ${agents}`);
+    lines.push(`${branch} ${planGlyph(node.status)} ${node.id}  ${middleEllipsis(node.title, 72)}`, `${continuation}   ${node.level}`, `${continuation}   ${metrics} ${agents}`);
   }
-  if (snapshot.summary) lines.push("", snapshot.summary);
+  if (snapshot.summary && snapshot.summary !== snapshot.nodes[0]?.title) lines.push("", snapshot.summary);
   return lines.join("\n");
 }
 
@@ -357,7 +357,7 @@ function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme; selectedR
           <box flexDirection="column" onMouseUp={() => props.onSelect?.(node.id)}>
             <box flexDirection="row" gap={1}>
               <text fg={statusTone(node.status, props.theme)}>{props.selectedRegionId === node.id ? "›" : " "}{branch} {planGlyph(node.status)} <b>{node.id}</b></text>
-              <text fg={props.selectedRegionId === node.id ? props.theme.primary : props.theme.text}><b>{node.title}</b></text>
+              <text fg={props.selectedRegionId === node.id ? props.theme.primary : props.theme.text}><b>{middleEllipsis(node.title, 96)}</b></text>
             </box>
             <box flexDirection="row" gap={1}>
               <text fg={props.theme.borderSubtle}>{continuation}   └─</text>
@@ -369,7 +369,7 @@ function PlanTreeView(props: { events: PluginRunEvent[]; theme: Theme; selectedR
             </box>
           </box>
         )}</For>
-        <Show when={snapshot()!.summary}><text fg={props.theme.textMuted}>// {snapshot()!.summary}</text></Show>
+        <Show when={snapshot()!.summary && snapshot()!.summary !== rows()[0]?.node.title}><text fg={props.theme.textMuted}>// {snapshot()!.summary}</text></Show>
       </box>
     </Show>
   );
@@ -394,6 +394,10 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
         <text fg={props.theme.textMuted}>{item().viable}/{item().total} viable</text>
       </box>
       <text fg={props.theme.text} wrapMode="word"><b>{item().objective}</b></text>
+      <Show when={activations().length}><text fg={props.theme.textMuted}>ACTIVATIONS</text></Show>
+      <For each={activations()}>{(activation) => <text fg={roleColor(activation.capability, props.theme)} wrapMode="word">  [{activation.status}] {activation.senderActivationId ? `${activation.senderActivationId} → ` : ""}{activation.id}:{activation.capability} · {activation.expectedDelta}{activation.error ? ` · ${activation.error}` : ""}</text>}</For>
+      <Show when={artifacts().length}><text fg={props.theme.textMuted}>ARTIFACTS</text></Show>
+      <For each={artifacts()}>{(artifact) => <text fg={artifact.passed === false ? props.theme.error : props.theme.success} wrapMode="word">  {artifact.kind} {artifact.path ?? artifact.summary}</text>}</For>
       <text fg={props.theme.textMuted}>DOMAIN</text>
       <Show when={candidates().length} fallback={<text fg={props.theme.textMuted}>  · not formed at this LOD</text>}>
         <For each={candidates()}>{(candidate) => <box flexDirection="column">
@@ -405,11 +409,8 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
       <Show when={constraints().length}><text fg={props.theme.textMuted}>CONSTRAINTS</text></Show>
       <For each={constraints()}>{(constraint) => <text fg={props.theme.warning}>  {constraint.kind} {constraint.subject} → {constraint.target}{constraint.reason ? ` · ${constraint.reason}` : ""}</text>}</For>
       <Show when={evidence().length}><text fg={props.theme.textMuted}>EVIDENCE</text></Show>
-      <For each={evidence()}>{(fact) => <text fg={props.theme.info} wrapMode="word">  {fact.id} {fact.text} · {fact.source}</text>}</For>
-      <Show when={activations().length}><text fg={props.theme.textMuted}>ACTIVATIONS</text></Show>
-      <For each={activations()}>{(activation) => <text fg={roleColor(activation.capability, props.theme)} wrapMode="word">  [{activation.status}] {activation.senderActivationId ? `${activation.senderActivationId} → ` : ""}{activation.id}:{activation.capability} · {activation.expectedDelta}{activation.error ? ` · ${activation.error}` : ""}</text>}</For>
-      <Show when={artifacts().length}><text fg={props.theme.textMuted}>ARTIFACTS</text></Show>
-      <For each={artifacts()}>{(artifact) => <text fg={artifact.passed === false ? props.theme.error : props.theme.success} wrapMode="word">  {artifact.kind} {artifact.path ?? artifact.summary}</text>}</For>
+      <Show when={evidence().length > 6}><text fg={props.theme.textMuted}>  ⋮ {evidence().length - 6} earlier facts omitted</text></Show>
+      <For each={evidence().slice(-6)}>{(fact) => <text fg={props.theme.info} wrapMode="word">  {fact.id} {fact.text} · {fact.source}</text>}</For>
     </box>
   )}</Show>;
 }
@@ -857,7 +858,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={liveColor()}><b>[{liveStatus()}]</b></text>
         <text fg={theme().secondary}>[{(currentRun().at(-1)?.graph ?? "no-graph").toUpperCase()}]</text>
         <text fg={statusTone(semantic()?.phase ?? "idle", theme())}>[{(semantic()?.phase ?? "idle").toUpperCase()}]</text>
-        <Show when={activePlan()}>{(node) => <text fg={theme().text}>{planGlyph(node().status)} {node().id} {node().title}</text>}</Show>
+        <Show when={activePlan()}>{(node) => <text fg={theme().text}>{planGlyph(node().status)} {node().id}</text>}</Show>
         <box flexGrow={1} />
         <Show when={semantic()?.usage}>{(usage) => <text fg={theme().textMuted}>{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
       </box>
