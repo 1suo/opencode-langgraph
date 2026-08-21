@@ -171,7 +171,7 @@ const REGION_ICON: Record<string, string> = {
   actionable: "\uf10c", ready: "\uf10c", superposed: "\uf24e", contradiction: "\uf071", blocked: "\uf071", failed: "\uf00d",
 };
 const ROLE_ICON: Record<string, string> = { inspect: "\uf002", synthesize: "\uf0eb", implement: "\uf121", verify: "\uf0c3", present: "\uf075" };
-const ACTIVATION_STATUS_ICON: Record<string, string> = { completed: "\uf00c", running: "\uf04b", failed: "\uf00d", waiting: "\uf10c", queued: "\uf10c" };
+const ACTIVATION_STATUS_ICON: Record<string, string> = { completed: "\uf00c", running: "\uf04b", failed: "\uf00d", superseded: "\uf0e2", waiting: "\uf10c", queued: "\uf10c" };
 const RUN_ICON: Record<string, string> = { completed: "\uf00c", failed: "\uf00d", running: "\uf04b", queued: "\uf10c", pausing: "\uf04c", paused: "\uf04c", interrupted: "\uf04d", cancelled: "\uf04d", pruned: "\uf0c4" };
 
 const regionIcon = (status: string) => REGION_ICON[status] ?? "\uf10c";

@@ -51,7 +51,7 @@ function solutionLodPresetDefinition(options: SolutionLodPresetOptions = {}): Co
     version: 1,
     models,
     agents: Object.fromEntries(roles.map((role) => [role, agent(role)])),
-    graphs: { "solution-lod": solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, roleLimits: options.roleLimits }) },
+    graphs: { "solution-lod": solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, roleLimits: options.roleLimits, maxParallelActivations: options.maxParallelActivations }) },
     defaultGraph: "solution-lod",
   };
 }

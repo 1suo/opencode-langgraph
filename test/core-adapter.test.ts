@@ -11,10 +11,10 @@ import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, re
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { ConnectorDefinition } from "../src/core/types.js";
-import { completeVerification, ensureRunnableWork, initialNetwork, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
+import { applyBatchRecords, completeVerification, ensureRunnableWork, initialNetwork, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
-import type { SolutionLodState } from "../src/core/solution-lod/types.js";
+import type { Activation, ActivationTaskResult, SolutionLodState } from "../src/core/solution-lod/types.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "../src/opencode/verifier-workspace.js";
@@ -106,7 +106,7 @@ describe("typed graph validation", () => {
     expect(definition.models["implement-model"]).toEqual({ backend: "opencode", model: "provider/strong" });
     expect(definition.agents.inspect.maxSteps).toBe(3);
     const initial = definition.graphs["solution-lod"].initial({ task: "x", directory: project, worktree: project, runId: "x" }) as SolutionLodState;
-    expect(initial.stateVersion).toBe(3);
+    expect(initial.stateVersion).toBe(4);
   });
 
   it("applies per-session role assignments without changing the configured definition", async () => {
@@ -323,7 +323,7 @@ describe("OpenCode child-session runtime", () => {
 
 describe("solution LOD reducer", () => {
   const state = (): SolutionLodState => ({
-    stateVersion: 3, runId: "run", originalTask: "change", conversationContext: "prior decision", directory: "/repo", worktree: "/repo", phase: "forming-root-domain",
+    stateVersion: 4, runId: "run", originalTask: "change", conversationContext: "prior decision", directory: "/repo", worktree: "/repo", phase: "forming-root-domain", activeBatch: [], results: [],
     network: initialNetwork("change"), usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "",
   });
 
@@ -731,6 +731,70 @@ describe("solution LOD reducer", () => {
     expect(network.candidates).toHaveLength(1);
     expect(network.candidates[0]).toMatchObject({ id: "r1:auth-service", proposition: "Auth service, refined" });
   });
+
+  it("batches queued read-only activations on pairwise distinct regions and keeps mutating work singleton", () => {
+    const network = initialNetwork("task");
+    for (const id of ["r2", "r3"]) network.regions.push({ id, key: id, parentId: "r1", edge: "partOf", lod: 1, objective: id, delivery: "change", allowedVariables: [], acceptanceCriteria: [], status: "unformed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] });
+    const queued = (id: string, capability: Activation["capability"], regionId: string, basisRevision = 0) => network.activations.push({ id, capability, regionId, request: id, expectedDelta: id, contextRefs: [regionId], status: "queued", basisRevision });
+    queued("a2", "inspect", "r2"); queued("a3", "inspect", "r3"); queued("a4", "synthesize", "r1"); queued("a5", "implement", "r3", 1);
+    expect(selectActivationBatch(network, 4).map((item) => item.id)).toEqual(["a1", "a2", "a3"]);
+    expect(selectActivationBatch(network, 2).map((item) => item.id)).toEqual(["a1", "a2"]);
+    for (const item of network.activations) item.status = "completed";
+    queued("a9", "implement", "r1", 5); queued("a10", "inspect", "r2", 5);
+    expect(selectActivationBatch(network, 4).map((item) => item.id)).toEqual(["a9"]);
+  });
+
+  it("applies batch records in (basisRevision, activationId) order regardless of completion order", () => {
+    const network = initialNetwork("task");
+    network.activations.push({ id: "a2", capability: "inspect", regionId: "r1", request: "a2", expectedDelta: "a2", contextRefs: ["r1"], status: "running", basisRevision: 1 });
+    const record = (activationId: string, basisRevision: number, text: string): ActivationTaskResult => ({
+      activationId, regionId: "r1", capability: "inspect", basisRevision, startedAt: 0, finishedAt: 0,
+      usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      outcome: "applied", networkDelta: { kind: "delta", delta: { evidence: [{ text, source: text, kind: "repository" }], candidates: [], constraints: [], select: [], activations: [] } },
+    });
+    const application = applyBatchRecords(network, [record("a2", 1, "second"), record("a1", 0, "first")]);
+    expect(application.applied).toEqual(["a1", "a2"]);
+    expect(application.network.evidence.map((item) => item.text)).toEqual(["first", "second"]);
+    expect(application.network.activations.filter((item) => ["a1", "a2"].includes(item.id)).map((item) => item.status)).toEqual(["completed", "completed"]);
+  });
+
+  it("marks a record superseded when its region disappeared from the current solution", () => {
+    const network = mergeSolutionDelta(state(), "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: false,
+      candidates: [{ key: "only", proposition: "Only path", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [{ key: "child", objective: "Child work", edge: "partOf", allowedVariables: [], acceptanceCriteria: [] }] }], constraints: [], select: ["only"],
+    });
+    const child = network.regions.find((item) => item.key === "child")!;
+    network.activations.push({ id: "a2", capability: "inspect", regionId: child.id, request: "a2", expectedDelta: "a2", contextRefs: [child.id], status: "running", basisRevision: network.revision });
+    const reopened = reopenRegion(network, network.regions[0].id, "contradiction");
+    const record: ActivationTaskResult = {
+      activationId: "a2", regionId: child.id, capability: "inspect", basisRevision: 1, startedAt: 0, finishedAt: 0,
+      usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      outcome: "applied", networkDelta: { kind: "delta", delta: { evidence: [{ text: "late", source: "late", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [] } },
+    };
+    const application = applyBatchRecords(reopened, [record]);
+    expect(application.superseded).toEqual(["a2"]);
+    expect(application.applied).toEqual([]);
+    expect(application.network.activations.find((item) => item.id === "a2")?.status).toBe("superseded");
+    expect(application.network.evidence.some((item) => item.text === "late")).toBe(false);
+  });
+
+  it("retains the workspace mutation of a failed implement record and blocks its region", () => {
+    const network = mergeSolutionDelta(state(), "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [], actionable: true,
+      candidates: [{ key: "direct", proposition: "Direct", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["direct"],
+    });
+    network.activations.push({ id: "a2", capability: "implement", regionId: "r1", request: "a2", expectedDelta: "a2", contextRefs: ["r1"], status: "running", basisRevision: network.revision });
+    network.regions[0].status = "implementing";
+    const record: ActivationTaskResult = {
+      activationId: "a2", regionId: "r1", capability: "implement", basisRevision: network.revision, startedAt: 0, finishedAt: 0,
+      usage: { turns: 1, input: 10, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      outcome: "error", error: "invalid structured output", changedFiles: ["target.txt"], networkDelta: null,
+    };
+    const application = applyBatchRecords(network, [record]);
+    expect(application.failed).toEqual(["a2"]);
+    expect(application.network.activations.find((item) => item.id === "a2")?.status).toBe("failed");
+    expect(application.network.artifacts.some((item) => item.kind === "file" && item.path === "target.txt")).toBe(true);
+  });
 });
 
 describe("solution LOD graph", () => {
@@ -798,6 +862,66 @@ describe("solution LOD graph", () => {
     expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("retained");
     expect((result as SolutionLodState).network.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "file", path: "target.txt" })]));
     expect(configured.progress?.(result)?.phase).toBe("blocked");
+  });
+
+  it("fans a read-only batch out in parallel, merges deterministically, and clears the results log", async () => {
+    const directory = temp("solution-lod-parallel-");
+    const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
+    const events: string[] = [];
+    let open = 0; let maxOpen = 0;
+    const runtime = { call: async (input: { node: string }) => {
+      events.push(`start:${input.node}`); open++; maxOpen = Math.max(maxOpen, open);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      open--; events.push(`end:${input.node}`);
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { acceptanceCriteria: ["both questions answered"] }, evidence: [], candidates: [{ key: "split", proposition: "Two independent answers", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [
+        { key: "left", objective: "Answer the left question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["left answered"] },
+        { key: "right", objective: "Answer the right question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["right answered"] },
+      ] }], constraints: [], select: ["split"], activations: [] } };
+      if (input.node === "synthesize:r2") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["direct"], actionable: true, activations: [
+        { capability: "present", regionId: "r2", request: "answer left", expectedDelta: "present:r2", contextRefs: [] },
+        { capability: "synthesize", regionId: "r3", request: "form right", expectedDelta: "synthesize:r3", contextRefs: [] },
+      ] } };
+      if (input.node === "present:r2") return { text: "", structured: { answer: "left answer" } };
+      if (input.node === "synthesize:r3") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["direct"], actionable: true, activations: [] } };
+      if (input.node === "present:r3") return { text: "", structured: { answer: "right answer" } };
+      if (input.node === "verify:r2" || input.node === "verify:r3") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const result = await configured.graph.invoke(configured.initial({ task: "answer two questions", directory, worktree: directory, runId: "parallel" }), { recursionLimit: 64, configurable: { thread_id: "parallel", langgraphOpenCodeRuntime: runtime } });
+    expect(maxOpen).toBe(2);
+    expect(events.indexOf("start:synthesize:r3")).toBeGreaterThan(-1);
+    expect(events.indexOf("start:synthesize:r3")).toBeLessThan(events.indexOf("end:present:r2"));
+    expect(events.indexOf("start:present:r2")).toBeLessThan(events.indexOf("end:synthesize:r3"));
+    const final = result as SolutionLodState;
+    expect(configured.progress?.(final)?.phase).toBe("completed");
+    expect(configured.result?.(final)).toBe("left answer\n\nright answer");
+    expect(final.results).toEqual([]);
+    expect(final.activeBatch).toEqual([]);
+    expect(final.network.activations.every((item) => item.status === "completed")).toBe(true);
+  });
+
+  it("routes the implement singleton through acquire before dispatching its activation task", async () => {
+    const directory = temp("solution-lod-acquire-");
+    fs.writeFileSync(path.join(directory, "target.txt"), "before");
+    const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
+    const order: string[] = [];
+    const runtime = { call: async (input: { node: string }) => {
+      order.push(`node:${input.node}`);
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [], nextLod: [] }], constraints: [], select: ["direct"], actionable: true, activations: [] } };
+      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] } }; }
+      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    let snapshots = 0;
+    const snapshot = () => snapshots++ === 0 ? new Map([["target.txt", "clean:before"]]) : new Map([["target.txt", "M:after"]]);
+    const result = await configured.graph.invoke(configured.initial({ task: "update", directory, worktree: directory, runId: "acquire" }), { recursionLimit: 64, configurable: { thread_id: "acquire", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => { order.push("acquire"); }, langgraphSnapshotWorkspace: snapshot } });
+    expect(order.filter((item) => item === "acquire")).toHaveLength(1);
+    expect(order.indexOf("acquire")).toBeLessThan(order.indexOf("node:implement:r1"));
+    expect(configured.progress?.(result)?.phase).toBe("completed");
+    expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("after");
+    const final = result as SolutionLodState;
+    expect(final.results).toEqual([]);
+    expect(final.network.artifacts.some((item) => item.kind === "file" && item.path === "target.txt")).toBe(true);
   });
 });
 
@@ -919,7 +1043,7 @@ describe("OpenCode automatic graph routing", () => {
     try {
       fs.writeFileSync(path.join(project, "file.txt"), "value");
       const verifierWorkspace = await prepareVerifierWorkspace("run", project);
-      writeStoredRun({ checkpointVersion: 3, runId: "run", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "interrupted" });
+      writeStoredRun({ checkpointVersion: 4, runId: "run", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "interrupted" });
       const hooks = await server({ client: {}, directory: "/repo", worktree: "/repo" } as never);
       await hooks["command.execute.before"]?.({ command: "graph-cancel", sessionID: "root", arguments: "" }, { parts: [] } as never);
       expect(readStoredRun("run").status).toBe("cancelled");
@@ -1059,7 +1183,7 @@ describe("OpenCode automatic graph routing", () => {
       } };
       const hooks = await server({ client, directory, worktree: directory } as never);
       const runId = "tool-run";
-      writeStoredRun({ checkpointVersion: 3, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
+      writeStoredRun({ checkpointVersion: 4, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
 
       const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", implement: "implement", verify: "verify", present: "present" }, checkpointer: new DurableFileSaver(path.join(state, "opencode-langgraph", "checkpoints")) });
       let recovering = false;
@@ -1108,7 +1232,7 @@ describe("OpenCode automatic graph routing", () => {
     try {
       const hooks = await server({ client: { session: { get: async () => ({ data: { id: "root", parentID: undefined } }) } }, directory, worktree: directory } as never);
       const runId = "fresh-run";
-      writeStoredRun({ checkpointVersion: 3, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
+      writeStoredRun({ checkpointVersion: 4, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
       const toolContext = { sessionID: "root", directory, worktree: directory, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
 
       const inspectOutput = await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext);
