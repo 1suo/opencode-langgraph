@@ -28,10 +28,15 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `/graph-select` opens a searchable TUI selector for the graph used by the current session.
 - `F7` toggles graph execution on or off for the current or next session.
 - `/run-graph <task>` runs one task explicitly even while `graph:off`.
+- `/graph-pause` cooperatively stops a running graph at its latest durable checkpoint. A node interrupted after external side effects may be replayed on resume.
 - `/graph-resume <answer>` explicitly resumes this session's paused run; an ordinary next message does the same automatically.
 - `/graph-cancel` cancels the active or queued graph run.
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
+
+The graph viewer also provides `[N]` new run, `[Space]` pause, `[U]` resume, `[E]` repair selected region, and `[X]` cancel controls.
+
+Agents manage runs through `langgraph_start`, `langgraph_inspect`, `langgraph_pause`, `langgraph_cancel`, `langgraph_prune`, and `langgraph_resume`. `langgraph_start` returns a `runId` immediately while execution continues in the background. Keep that ID, inspect it before acting, prune a wrong solution region before resuming, and do not invoke a nested OpenCode CLI process.
 
 Every agent activation runs in an OpenCode child session. The production graph stores a multi-resolution solution tree separately from its activation network. Constraints collapse candidate domains; only a selected solution family exposes its conditional next-LOD regions. Inspectors, synthesizers, implementers, verifiers, and presenters exchange small referenced state deltas instead of replaying transcripts. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
 

@@ -76,8 +76,15 @@ export const server: Plugin = async (plugin) => {
   return {
     event: ({ event }) => forwardPermissionEvent(event),
     tool: {
+      langgraph_start: tool({
+        description: "Start a LangGraph run in the current project and return its runId as soon as it is saved. The run continues in the background. Use this instead of invoking the OpenCode CLI or /run-graph. Keep the runId and call langgraph_inspect to monitor it. Start the next run only after the current one completes, fails, or is cancelled.",
+        args: { task: tool.schema.string(), graph: tool.schema.string().optional() },
+        execute: async (args: { task: string; graph?: string }, context) => startRun(plugin, context.sessionID, args.task, args.graph, {
+          directory: context.directory, worktree: context.worktree, ask: context.ask, metadata: context.metadata,
+        }),
+      }),
       langgraph_inspect: tool({
-        description: "Read a run's saved status, current work, usage, and result. This changes nothing. Use it before repairing or continuing a failed or stopped run. With no ID it reads this session's latest run. Supply runId or rootSessionId to choose another run, or projectScope for the project's latest run.",
+        description: "Read a run's saved status, current work, solution regions, agent activations, usage, and result. This changes nothing. Pass the runId returned by langgraph_start. With no ID it reads this session's latest run; rootSessionId selects another session and projectScope selects this project's latest run.",
         args: { runId: tool.schema.string().optional(), rootSessionId: tool.schema.string().optional(), projectScope: tool.schema.boolean().optional() },
         execute: async (args: { runId?: string; rootSessionId?: string; projectScope?: boolean }, context) => inspectRun(context.sessionID, args.runId, { rootSessionId: args.rootSessionId, worktree: args.projectScope ? context.worktree : undefined }),
       }),
@@ -90,6 +97,16 @@ export const server: Plugin = async (plugin) => {
         description: "Continue a run from its saved state. Pass answer only when the run stopped to ask the user a question. After langgraph_prune, call this to continue from the repaired solution.",
         args: { runId: tool.schema.string().optional(), answer: tool.schema.string().optional() },
         execute: async (args: { runId?: string; answer?: string }, context) => resumeRun(plugin, context.sessionID, args.runId, args.answer),
+      }),
+      langgraph_cancel: tool({
+        description: "Cancel a running, queued, or interrupted LangGraph run. Pass the runId returned by langgraph_start. The run remains inspectable but cannot be resumed unless a region is pruned first.",
+        args: { runId: tool.schema.string().optional() },
+        execute: async (args: { runId?: string }, context) => cancelRun(context.sessionID, args.runId),
+      }),
+      langgraph_pause: tool({
+        description: "Cooperatively pause a running LangGraph run at its latest durable checkpoint. Pass the runId returned by langgraph_start, then use langgraph_resume to continue. A node interrupted after external side effects may be replayed on resume.",
+        args: { runId: tool.schema.string().optional() },
+        execute: async (args: { runId?: string }, context) => pauseRun(context.sessionID, args.runId),
       }),
     },
     config: async (config) => {
@@ -106,15 +123,21 @@ export const server: Plugin = async (plugin) => {
         template: "$ARGUMENTS",
       };
       config.command["graph-resume"] = { description: "Resume the current paused LangGraph", agent: PRESENTER_AGENT, template: "$ARGUMENTS" };
+      config.command["graph-pause"] = { description: "Pause the active LangGraph run", agent: PRESENTER_AGENT, template: "Pause the active LangGraph run." };
       config.command["graph-cancel"] = { description: "Cancel the active or queued LangGraph run", agent: PRESENTER_AGENT, template: "Cancel the active LangGraph run." };
     },
     "command.execute.before": async (input) => {
       if (input.command === "run-graph") manualMessages.add(input.sessionID);
+      if (input.command === "graph-pause") {
+        await pauseRun(input.sessionID);
+        cancelledMessages.add(input.sessionID);
+        for (const controller of activeControllers.get(input.sessionID) ?? []) controller.abort(new Error("Paused by user"));
+      }
       if (input.command === "graph-cancel") {
         cancelledMessages.add(input.sessionID);
         for (const controller of activeControllers.get(input.sessionID) ?? []) controller.abort(new Error("Cancelled by user"));
         const run = readLatestStoredRun(input.sessionID);
-        if (run?.status === "running" || run?.status === "queued" || run?.status === "interrupted") {
+        if (run?.status === "running" || run?.status === "queued" || run?.status === "pausing" || run?.status === "paused" || run?.status === "interrupted") {
           writeStoredRun({ ...run, status: "cancelled" });
           await releaseVerifierWorkspace(run.runId);
           appendPluginEvent({ at: new Date().toISOString(), runId: run.runId, rootSessionId: run.rootSessionId, userMessageId: run.userMessageId, graph: run.graph, node: "__end__", status: "interrupted", agent: "langgraph", model: "langgraph", text: "Cancelled by user" });
@@ -137,14 +160,17 @@ export const server: Plugin = async (plugin) => {
       const rootMessageID = input.messageID ?? output.message.id;
       const parentModel = input.model ?? output.message.model;
       const interrupted = readLatestStoredRun(input.sessionID);
-      if (!manual && interrupted?.status === "interrupted") {
+      if (!manual && (interrupted?.status === "interrupted" || interrupted?.status === "paused")) {
         output.message.agent = PRESENTER_AGENT;
         output.parts.push({ id: `prt_${randomUUID().replaceAll("-", "")}`, messageID: rootMessageID, sessionID: input.sessionID, type: "text", synthetic: true, text: "The LangGraph connector is resuming the paused graph with this answer. Reply briefly that it is resuming; do not perform the task yourself." });
         const controller = new AbortController();
         registerController(input.sessionID, controller);
         void executeResume(plugin, interrupted, task, parentModel, controller.signal)
           .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
-          .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error))
+          .catch((error) => {
+            const status = readLatestStoredRun(input.sessionID)?.status;
+            if (status !== "paused" && status !== "cancelled") return postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error);
+          })
           .finally(() => unregisterController(input.sessionID, controller));
         return;
       }
@@ -168,7 +194,10 @@ export const server: Plugin = async (plugin) => {
         graph: graphState?.graph, modelAssignments: graphState?.modelAssignments, signal: controller.signal,
       })
         .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
-        .catch((error) => postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error))
+        .catch((error) => {
+          const status = readLatestStoredRun(input.sessionID)?.status;
+          if (status !== "paused" && status !== "cancelled") return postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error);
+        })
         .finally(() => unregisterController(input.sessionID, controller));
     },
     "experimental.chat.system.transform": async (input, output) => {
@@ -263,6 +292,82 @@ async function inspectRun(sessionID: string, runId?: string, options?: { rootSes
   return runSummary(saved, values, configured.progress?.(values as never));
 }
 
+async function startRun(plugin: PluginInput, sessionID: string, task: string, graph: string | undefined, context: {
+  directory: string;
+  worktree: string;
+  ask?: ExecuteGraphInput["ask"];
+  metadata?: ExecuteGraphInput["metadata"];
+}): Promise<string> {
+  const latest = readLatestStoredRun(sessionID);
+  if (latest && (latest.status === "queued" || latest.status === "running" || latest.status === "pausing" || latest.status === "paused" || latest.status === "interrupted")) {
+    throw new Error(`LangGraph run ${latest.runId} is ${latest.status}. Inspect, resume, or cancel it before starting another run from this session.`);
+  }
+  const runId = randomUUID();
+  const graphState = readSessionGraphState(sessionID) ?? readHomeGraphState(context.worktree);
+  const parentModel = await rootSessionModel(plugin, sessionID);
+  let started = false;
+  let resolveStarted!: (value: { runId: string; graph: string }) => void;
+  let rejectStarted!: (reason: unknown) => void;
+  const persisted = new Promise<{ runId: string; graph: string }>((resolve, reject) => {
+    resolveStarted = resolve;
+    rejectStarted = reject;
+  });
+  void executeGraph(plugin, {
+    task,
+    rootSessionId: sessionID,
+    userMessageId: `tool:${runId}`,
+    directory: context.directory,
+    worktree: executionWorktree(context.directory, context.worktree),
+    parentModel,
+    graph: graph ?? graphState?.graph,
+    modelAssignments: graphState?.modelAssignments,
+    ask: context.ask,
+    metadata: context.metadata,
+    runId,
+    onStarted: (value) => {
+      started = true;
+      resolveStarted(value);
+    },
+  }).catch((error) => {
+    if (!started) rejectStarted(error);
+    else {
+      try {
+        const current = readStoredRun(runId);
+        if (current.status === "running" || current.status === "queued") writeStoredRun({ ...current, status: "failed" });
+      } catch { /* run storage was removed externally */ }
+    }
+  });
+  const value = await persisted;
+  return JSON.stringify({ ...value, status: "running", next: `Call langgraph_inspect with runId ${value.runId}.` }, null, 2);
+}
+
+async function pauseRun(sessionID: string, runId?: string): Promise<string> {
+  const saved = await resolveStoredRun(sessionID, runId);
+  if (saved.status !== "running") throw new Error(`LangGraph run ${saved.runId} is ${saved.status} and cannot be paused.`);
+  const { configured } = await loadGraphForRun(saved);
+  const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
+  if (!snapshot.values || Object.keys(snapshot.values as object).length === 0) throw new Error(`LangGraph run ${saved.runId} has not reached a durable checkpoint yet.`);
+  const current = readStoredRun(saved.runId);
+  if (current.status !== "running") throw new Error(`LangGraph run ${saved.runId} is ${current.status} and cannot be paused.`);
+  writeStoredRun({ ...current, status: "pausing" });
+  const deadline = Date.now() + 30_000;
+  let status = "pausing";
+  while (status === "pausing" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    status = readStoredRun(saved.runId).status;
+  }
+  return JSON.stringify({ runId: saved.runId, graph: saved.graph, status }, null, 2);
+}
+
+async function cancelRun(sessionID: string, runId?: string): Promise<string> {
+  const saved = await resolveStoredRun(sessionID, runId);
+  const current = readStoredRun(saved.runId);
+  if (!["queued", "running", "pausing", "paused", "interrupted"].includes(current.status)) throw new Error(`LangGraph run ${saved.runId} is ${current.status} and cannot be cancelled.`);
+  writeStoredRun({ ...current, status: "cancelled" });
+  await releaseVerifierWorkspace(saved.runId);
+  return JSON.stringify({ runId: saved.runId, graph: saved.graph, status: "cancelled" }, null, 2);
+}
+
 type PruneOverrides = { objective?: string; allowedVariables?: string[]; acceptanceCriteria?: string[] };
 
 function applyPruneOverrides(network: Parameters<typeof reopenRegion>[0], regionId: string, overrides: PruneOverrides): Parameters<typeof reopenRegion>[0] {
@@ -314,7 +419,7 @@ async function resumeRun(plugin: PluginInput, sessionID: string, runId: string |
       output: result.output.slice(0, 8_000),
     }, null, 2);
   }
-  if (saved.status === "pruned") {
+  if (saved.status === "pruned" || saved.status === "paused") {
     const parentModel = await rootSessionModel(plugin, saved.rootSessionId);
     const result = await resumeFromCheckpoint(plugin, saved, null, { parentModel });
     return JSON.stringify({
@@ -355,6 +460,8 @@ interface ExecuteGraphInput {
   signal?: AbortSignal;
   ask?: (input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) => Promise<void>;
   metadata?: (input: { title?: string; metadata?: Record<string, unknown> }) => void;
+  runId?: string;
+  onStarted?: (input: { runId: string; graph: string }) => void;
 }
 
 function watchCancellation(runId: string, upstream?: AbortSignal) {
@@ -362,7 +469,10 @@ function watchCancellation(runId: string, upstream?: AbortSignal) {
   const abort = () => controller.abort(upstream?.reason ?? new Error("Graph run cancelled"));
   if (upstream?.aborted) abort(); else upstream?.addEventListener("abort", abort, { once: true });
   const timer = setInterval(() => {
-    try { if (readStoredRun(runId).status === "cancelled") controller.abort(new Error("Cancelled by user")); } catch { /* run is not persisted yet */ }
+    try {
+      const status = readStoredRun(runId).status;
+      if (status === "cancelled" || status === "pausing") controller.abort(new Error(status === "pausing" ? "Paused by user" : "Cancelled by user"));
+    } catch { /* run is not persisted yet */ }
   }, 250);
   timer.unref();
   return {
@@ -378,7 +488,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
   assertValidConnector(await validateConnector(definition));
   const configured = definition.graphs[graphName];
   if (!configured) throw new Error(`Unknown LangGraph: ${graphName}`);
-  const runId = randomUUID();
+  const runId = input.runId ?? randomUUID();
   const cancellation = watchCancellation(runId, input.signal);
   const signal = cancellation.signal;
   const emit = (event: PluginRunEvent) => {
@@ -395,6 +505,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
   });
   const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 3 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, modelAssignments: input.modelAssignments, status: "running" };
   writeStoredRun(saved);
+  input.onStarted?.({ runId, graph: graphName });
   let lease: WorktreeLease | undefined;
   const acquire = async () => {
     if (lease) return;
@@ -425,8 +536,9 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
     return { runId, graph: graphName, output, interrupted: false, failed };
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
+    const stopped = signal.aborted ? readStoredRun(runId).status : "failed";
     emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });
-    writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
+    writeStoredRun({ ...saved, status: stopped === "pausing" ? "paused" : signal.aborted ? "cancelled" : "failed" });
     throw error;
   } finally {
     cancellation.dispose();
@@ -442,7 +554,7 @@ async function executeResume(
   signal = new AbortController().signal,
   ask?: ExecuteGraphInput["ask"],
 ): Promise<GraphExecution> {
-  return resumeFromCheckpoint(plugin, saved, new Command({ resume: answer }), { parentModel, signal, ask });
+  return resumeFromCheckpoint(plugin, saved, saved.status === "paused" ? null : new Command({ resume: answer }), { parentModel, signal, ask });
 }
 
 interface CheckpointResumeOptions {
@@ -496,7 +608,8 @@ async function resumeFromCheckpoint(
     return { runId: saved.runId, graph: saved.graph, output, interrupted: false, failed };
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
-    writeStoredRun({ ...saved, status: signal.aborted ? "cancelled" : "failed" });
+    const stopped = signal.aborted ? readStoredRun(saved.runId).status : "failed";
+    writeStoredRun({ ...saved, status: stopped === "pausing" ? "paused" : signal.aborted ? "cancelled" : "failed" });
     emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });
     throw error;
   } finally {
