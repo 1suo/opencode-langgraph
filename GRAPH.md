@@ -1,121 +1,73 @@
-# GRAPH.md — how the graph works, end to end
+# GRAPH.md — путь графа от запуска до результата
 
-This document describes exactly one thing: what happens between a user message and a finished LangGraph run inside `opencode-langgraph` — entry points, static topology, state, transitions, interrupts, error handling, and lifecycle. The production graph is `solution-lod`; arbitrary user-defined graphs ride the same connector contract (see README).
+Это рассказ по порядку исполнения: что происходит между пользовательским сообщением и финальным результатом run. Нормативная часть — инварианты LOD, точные контракты узлов и схем, семантика отказов, критерии релиза — живёт в [SPEC-graph.md](SPEC-graph.md); здесь описано, как всё это выглядит в движении.
 
-## 1. Purpose
+## 1. Что запускается и как
 
-The built-in `solution-lod` graph turns one OpenCode message into either a repository-grounded answer or a verified mutation by progressively resolving a solution tree at the level of detail the task actually requires. Two orthogonal structures cooperate:
+Production-граф называется `solution-lod` и собирается функцией `solutionLodGraph(options)` в `src/core/solution-lod/graph.ts`. Он превращает одно сообщение в ответ, обоснованный репозиторием, или в проверенную мутацию, постепенно разрешая дерево решения на том уровне детализации, которого задача требует на самом деле. `options.agents` задаёт имя агента для каждой из пяти ролей, `options.roleLimits` — кванты планирования.
 
-1. **The solution hierarchy** (`network`) represents the same problem at conditional levels of detail. WFC-style constraint propagation collapses candidate domains.
-2. **The activation network** is sparse message passing: agents inspect, synthesize, implement, verify, or present small referenced state deltas.
+У запуска три входа:
 
-The static LangGraph itself is not a pipeline of model calls — it is an engine loop that schedules those activations one at a time.
+- **`graph:on`** — каждое корневое сообщение пользователя порождает свежий run, связанный с этим сообщением;
+- **`/run-graph <task>`** — один явный run даже при выключенном графике;
+- **`langgraph_start <task>`** — агентный инструмент; сразу возвращает `runId`, а выполнение идёт в фоне.
 
-## 2. Entry points
+Перед вызовом скомпилированного графа коннектор сохраняет `StoredRun` со статусом `running` рядом с чекпойнтами и ставит run в FIFO-очередь аренды worktree (`acquireWorktree`), чтобы одновременно мутировал максимум один checkout; ожидающие эмитят события `__queue__` со своей позицией. Второй активный run той же сессии отклоняется, пока предыдущий не завершится, не упадёт или не будет отменён. Затем граф вызывается с `recursionLimit: 512` и `thread_id = runId`.
 
-A run can start three ways:
+Первый кадр состояния строит маппер `initial`: задача становится неизменяемым `originalTask`, фаза — `forming-root-domain`, сеть — `initialNetwork(task)`: один корневой регион `r1` без кандидатов. Дальше вступает статический цикл.
 
-- **`graph:on`** — every root user message starts a fresh run linked to that message.
-- **`/run-graph <task>`** — one explicit run even while `graph:off`.
-- **`langgraph_start <task>`** — the agent-facing tool; returns a `runId` immediately while execution continues in the background.
-
-Graph selection comes from the session (`/graph-select`) and falls back to `defaultGraph`; a home-screen selection is transferred once to the session created by the first prompt. Before invoking the compiled graph, the connector snapshots model assignments for resume, stores a `StoredRun` with status `running`, and enqueues on the FIFO **worktree lease** (`acquireWorktree`) so concurrent sessions mutate at most one checkout at a time; queued runs emit `__queue__` events with their position. A new run from a session with an active (`queued`/`running`/`pausing`/`paused`/`interrupted`) run is rejected until it finishes, fails, or is cancelled.
-
-## 3. Static topology
+## 2. Цикл: START → schedule → … → finish → END
 
 ```text
-START → schedule ─┬→ acquire → activate ─→ schedule   (engine loop)
+START → schedule ─┬→ acquire → activate ─→ schedule   (двигатель)
                   ├→ activate            ─→ schedule
                   └→ finish → END
 ```
 
-Conditional edges out of `schedule`:
+**schedule** — чистый контроллер, модели не вызывает. `ensureRunnableWork` прогоняет WFC-распространение ограничений до фикспойнта: пустые домены обнаруживаются, вынужденные коллапсы исполняются, условные дети раскрываются. Если runnable работы не осталось — узел выдаёт терминальную фазу `completed` или `blocked` вместе с `result`. Иначе `nextQueuedActivation` выбирает следующую активацию из очереди, `markActivation` помечает её `running`, а для мутирующего `implement` регион переходит в `implementing`.
 
-- `"finish"` when the state carries a `result` (completed or blocked);
-- `"acquire"` when the next activation is a mutating `implement` and the worktree lease is not held yet;
-- `"activate"` otherwise.
+Условное ребро из `schedule` читается так: `"finish"`, если в состоянии уже есть `result`; `"acquire"`, если следующая активация — `implement`, а аренда worktree ещё не взята; во всех остальных случаях — `"activate"`.
 
-Every step is checkpointed under `thread_id = runId` by the durable checkpointer (`DurableFileSaver`, `$OPENCODE_LANGGRAPH_STATE_HOME` or `~/.local/state/opencode-langgraph/checkpoints`), with `recursionLimit: 512`. Display names for viewers: `schedule` = collapse, `acquire` = lease, `activate` = activate, `finish` = result.
+**acquire** — берёт аренду worktree через инжектируемый `langgraphAcquireWorktree`, отдаёт `{ worktreeAcquired: true }` и передаёт управление дальше. Тоже без моделей; нужен только чтобы два implement-а не писали в один checkout.
 
-### Node contracts
+**activate** — единственный узел, который вызывает модель. `projectActivationContext` собирает промпт из чекпойнченного состояния: исходная задача, назначение активации, цель региона и критерии успеха, факты/связи/артефакты по стабильным ID, уже принятые решения предков (`lineage`). Схема вывода подбирается по роли: `SolutionDeltaSchema` для inspect/synthesize, `ImplementationOutputSchema`, `VerificationOutputSchema` или `PresentationOutputSchema` для остальных. `runtime.call` открывает один изолированный дочерний сеанс OpenCode с агентом `options.agents[capability]`. Три исхода:
 
-| Node | Calls a model? | Contract |
-|---|---|---|
-| `schedule` | never | Pure controller: propagate constraints to fixed point, ensure runnable work, pick the next queued activation, mark it `running` (and its region `implementing` for implement). Emits `{ network, activeActivationId, phase }`, or `{ phase: "completed", result }` / `{ phase: "blocked", result }`. |
-| `acquire` | never | Takes the worktree lease via injected `langgraphAcquireWorktree`; returns `{ worktreeAcquired: true }`. |
-| `activate` | **only node that calls a model** | Projects the activation context into a prompt, opens one isolated OpenCode child session through `runtime.call(...)`, validates structured output against the capability's Zod schema, reduces it into a network delta. Snapshots workspace status + SHA-256 hashes before/after mutating activations. |
-| `finish` | never | Returns `{ result }` from final state. |
+- структурированный успех → редьюсер вливает дельту в сеть, фаза `propagating`, возврат в `schedule`;
+- `budgetStop` (квант планирования исчерпан) → работа откладывается, регион остаётся `actionable`, фаза `activation-deferred`;
+- исключение (невалидный JSON, ошибка схемы, таймаут) → активация помечается `failed`, фаза `activation-failed`; решение остаётся доступным и может продолжить другая способность.
 
-## 4. Graph state
+Для `implement` до и после сеанса снимается хэш-снимок рабочего дерева (`status --porcelain` + SHA-256 файлов): реальные изменения фиксируются и сохраняются, даже если финальный вывод агента оказался битым, а заранее грязные файлы остаются отличимы от новых.
 
-`SolutionState` (checkpoint schema version 3):
+Ребро из `activate` всегда ведёт обратно в `schedule` — цикл крутится, пока планировщик не решит, что работы больше нет, и не выдаст `result`.
 
-- identity/lifecycle: `stateVersion`, `runId`, `phase`, `activeActivationId`, `startedAt`, `result`;
-- environment: `originalTask` (immutable), `conversationContext`, `directory`, `worktree`, `worktreeAcquired`;
-- accounting: `usage` (turns/tokens/cost telemetry and scheduling quanta — never budget gates), `callsUsed` (orchestration nodes, not child-session model turns);
-- the entire solution `network`.
+**finish** — чистый контроллер: отдаёт `{ result }` из финального состояния, дальше `END`.
 
-Initial state is produced by the graph's `initial` mapper with phase `forming-root-domain` and `initialNetwork(task)` (root region `r1`, no candidates yet).
+## 3. Пять ролей через options.agents[capability]
 
-## 5. The solution network
+Каждая активация несёт capability, и `activate` выбирает исполнителя строкой `options.agents[activation.capability]` — ровно пять ключей:
 
-The `network` holds everything durable:
+- `inspect` — только чтение и поиск по репозиторию; собирает факты, нужные, чтобы различить текущий домен;
+- `synthesize` — без инструментов; предлагает кандидатов, ограничения, выбор и условные определения следующего LOD;
+- `implement` — исполняет один коллапсированный actionable-регион в арендованном worktree;
+- `verify` — проверяет артефакты против точных критериев и адресует дефекты в конкретные регионы;
+- `present` — рендерит свёрнутый read-only ответ.
 
-- **Regions** — a solution at some LOD, each declaring `objective`, `allowedVariables`, `acceptanceCriteria`, delivery kind (`change` / `answer` / mixed), status (`actionable → implementing → implemented → verified`, or `blocked`), parent link and edge kind: `refines` (same solution, finer resolution) vs `partOf` (independent deliverable). Conditional children materialize only after their parent candidate collapses.
-- **Candidates** — mutually distinguishable solution families per region with statuses `possible / selected / equivalent / eliminated` (+ elimination reasons) and conditional `nextLod` definitions revealed by choosing them.
-- **Constraints** — typed relations (`requires`, `excludes`, `supports`, `refutes`, `equivalent`, `acceptance`, `permission`) propagated by controller code to a fixed point (`propagateNetwork`): empty domains are detected, forced collapses performed, conditional children exposed.
-- **Evidence** — facts stored once, deduplicated by fingerprint, passed by ID.
-- **Activations** — capability + region + exact request + expected delta + stable context refs + sender + state revision + status; duplicates of the same capability/region/delta at the same revision are suppressed.
-- **Artifacts** — observed outputs (files with pass/fail, checks) reconciled against real workspace changes.
+Контракты ролей лежат в `src/core/solution-lod/roles.ts`. Каждая активация видит весь каталог возможностей с условиями допуска и может запросить нижестоящую активацию (например, inspect просит один недостающий факт), но не может создавать сеансы, выбирать модели, изобретать роли или обходить контроллер. Восстановительные дельты (`synthesis:*`, `contradiction:*`, `implement:*`, `verification:*`) несут ревизию сети: изменившаяся основа переносит работу в расписание, неизменившаяся — дедуплицируется.
 
-Models propose deltas; they never mutate controller bookkeeping directly — `mergeSolutionDelta` and propagation run in `schedule`/`activate`. A synthesis delta that would leave a region with zero viable candidates and nothing selected is rejected by `validateSolutionDelta` and retried with guidance; dead regions are recovered by reopening the parent, never by empty domains.
+## 4. Долговечность: durable-чекпойнты и редьюсеры
 
-## 6. Capabilities (agent roles)
+Каждый промежуточный шаг цикла чекпойнтится под `thread_id = runId`. Чекпойнтер — `DurableFileSaver`, пишущий в `$OPENCODE_LANGGRAPH_STATE_HOME` (по умолчанию `~/.local/state/opencode-langgraph/checkpoints`). Поэтому осмотр, prune и resume работают и между перезапусками процесса: `langgraph_inspect` читает состояние без мутации, `langgraph_prune <regionId>` переоткрывает застрявший регион и сбрасывает его поддерево (опционально переписывая objective/allowedVariables/criteria), `langgraph_resume` продолжает с последнего чекпойнта.
 
-Each activation selects one built-in capability; contracts live in `src/core/solution-lod/roles.ts` and every activation sees the full catalog with admission conditions, but cannot create sessions, choose models, invent roles, or bypass the controller:
+Все переходы состояния выполняют чистые функции `src/core/solution-lod/reducer.ts`: `ensureRunnableWork` планирует и распространяет ограничения, `mergeSolutionDelta` вливает дельту синтеза после валидации `validateSolutionDelta`, `completeImplementation` / `completeVerification` / `completePresentation` закрывают соответствующие активации, `markActivation`, `setRegionStatus` и `reopenRegion` ведут статусы. Модели предлагают дельты, но книгу состояний ведёт только контроллер: дельта, обнуляющая все кандидаты региона без выбора, отвергается и повторяется с подсказкой, а тупиковый регион лечится открытием родителя, а не пустым доменом.
 
-- `inspect` — repository read/search only, no shell; returns facts that distinguish the current domain;
-- `synthesize` — tool-free; proposes candidates, constraints, selections, and conditional next-LOD regions;
-- `implement` — executes one collapsed actionable change region in the leased worktree;
-- `verify` — checks artifacts against exact criteria and maps failures back to precise regions;
-- `present` — renders the collapsed read-only answer.
+## 5. Результат
 
-Agents may queue downstream activations (e.g. inspect requests). Recovery deltas (`synthesis:*`, `contradiction:*`, `implement:*`, `verification:*`) carry the network revision, so changed bases reschedule while unchanged ones dedupe.
+Цикл заканчивается, когда `schedule` больше не находит runnable работы. Итог собирает `finalResult`: если в сети есть регионы-ответы (`delivery: "answer"`) — соединяет их тексты; иначе перечисляет реализованные и верифицированные регионы изменений со списком изменённых файлов из артефактов; если работа блокирована — точную причину вместо бесконечного зацикливания. Маппер `result` графа достаёт `state.result`, и сервер публикует его в чат: успех — «представь результат напрямую», сбой — «осмотри run через langgraph_inspect и восстанови регион через prune+resume», человеческий interrupt — вопрос пользователю, ответ которого возобновляет run через `Command.resume(answer)`.
 
-## 7. Transitions and phases
+### Чужие графы — тот же каркас
 
-Each `activate` return sets the loop's next phase:
+`solution-lod` лишь конкретная сборка. Любой скомпилированный LangGraph подключается через `defineOpenCodeLangGraph({ graphs, agents })` c `defineGraph({ graph, initial, result })` и получает тот же запуск, те же durable-чекпойнты, паузу/отмену/resume и жизненный цикл stored-run.
 
-- structured success (or `answer` for present) → `propagating` → back to `schedule`;
-- scheduling-quantum stop (`budgetStop`: max turns/context/inactivity reached) → `activation-deferred`: region stays actionable, work is deferred, not failed;
-- throw (schema/validation/timeout) → `activation-failed`: that activation is marked `failed`;
-- `schedule` emits `capability:regionId` phases while working and terminal `completed` / `blocked` phases when no runnable work remains.
+---
 
-Region completion: implement success records reconciled artifacts and moves `implemented`; a verifier pass completes the region as `verified`; a bounded defect returns it to `actionable`; a contradicted choice reopens only the nearest implicated region via `reopenRegion` — unrelated collapsed regions and all artifacts survive. Read-only regions complete after presentation. The run ends when every required live region is verified or has a verified answer (`finalResult` joins answers or reports implemented regions plus changed files); if no capability can produce a novel delta, the run returns a precise `blocked` result instead of looping.
-
-## 8. Interrupts and error handling
-
-- **Human interrupts**: graphs call LangGraph `interrupt()`; the connector stores status `interrupted`, posts the question, and the next root user message (or `/graph-resume`, or `langgraph_resume <answer>`) resumes with `Command.resume(answer)` automatically.
-- **Cooperative pause**: `/graph-pause` / `langgraph_pause` sets `pausing`; the abort signal is checked between steps and the run settles at its latest durable checkpoint as `paused`. A node interrupted after external side effects may replay on resume.
-- **Cancel**: `/graph-cancel` / `langgraph_cancel` marks `cancelled` (from `queued`/`running`/`pausing`/`paused`/`interrupted`); the run stays inspectable but resumable only after pruning.
-- **Local failures**: invalid JSON, schema errors, timeouts, or a quantum stop fail only that activation. For implement, actual workspace mutations are reconciled and retained even when output is malformed (hash diff before/after); pre-existing dirty files stay distinct. Repeating failed work against an unchanged revision is forbidden.
-- **Prune**: `langgraph_prune <regionId>` reopens the region, drops its subtree, clears stale activations and retry counters, optionally overrides objective/allowed variables/acceptance criteria, writes the network back via `updateState(..., "__start__")`, and marks the run `pruned`. Active runs are rejected.
-
-All of inspect (`langgraph_inspect`, including `no-checkpoint-yet` before the first checkpoint), prune, and resume operate on the same durable per-thread checkpoint and survive process restarts.
-
-## 9. Run lifecycle (stored status)
-
-```text
-queued → running → completed
-                ├→ failed
-                ├→ interrupted → (answer) → running …
-                ├→ pausing → paused → (resume) → running …
-                ├→ cancelled
-                └→ (after finish/fail) pruned → (resume) → running …
-```
-
-Lifecycle messages (start/resume/result/failure) are posted by a hidden one-step presenter with every tool disabled, so the normal root build agent never executes them. `/graph` (F8) shows live semantic state: the solution LOD tree, region details, the activation/message network (`G`), and diagnostic raw views — all derived from the same latest state-bearing event.
-
-## 10. Arbitrary user graphs
-
-Any compiled LangGraph connects through `defineOpenCodeLangGraph({ agents, graphs, defaultGraph })` with `defineGraph({ graph, initial, result })`: `initial` maps the OpenCode message (plus optional bounded `conversationContext`) into state, `result` maps final state back into chat. `agentNode` / `structuredAgentNode` create the same isolated child-session boundaries; compiling without the built-in preset requires your own persistent checkpointer for interrupt/resume. Everything above about checkpoints, pause/cancel/resume, and lifecycle applies unchanged.
+Отличие от нормативного документа: [SPEC-graph.md](SPEC-graph.md) фиксирует требования — инварианты LOD, контракты узлов и схем, семантику контекста и отказов, приёмку релиза; этот файл показывает порядок исполнения одним проходом. При расхождении приоритет у SPEC-graph.md.
