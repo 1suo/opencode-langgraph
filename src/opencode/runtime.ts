@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
-import type { AgentBudgetStop, AgentCall, AgentCallLimits, AgentCallResult, AgentPromptTrace, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition } from "../core/types.js";
+import type { AgentBudgetStop, AgentCall, AgentCallLimits, AgentCallResult, AgentPromptTrace, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition, UsageStreamingEstimate } from "../core/types.js";
 import { registerPermissionHandler } from "./permissions.js";
 
 export interface OpenCodeRuntimeOptions {
@@ -13,13 +13,31 @@ export interface OpenCodeRuntimeOptions {
   worktree: string;
   signal: AbortSignal;
   ask?: (input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) => Promise<void>;
-  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; structured?: unknown; sessionId?: string; usage?: AgentUsage; prompt?: AgentPromptTrace }) => void;
+  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; structured?: unknown; sessionId?: string; usage?: AgentUsage; streaming?: UsageStreamingEstimate; prompt?: AgentPromptTrace }) => void;
 }
 
 function modelId(value: string): { providerID: string; modelID: string } {
   const slash = value.indexOf("/");
   if (slash < 1 || slash === value.length - 1) throw new Error(`Invalid OpenCode model: ${value}`);
   return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) };
+}
+
+const CHARS_PER_TOKEN = 4;
+const ESTIMATE_EMIT_INTERVAL_MS = 1_000;
+
+function estimateTokens(chars: number): number {
+  return Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+function streamingEstimate(messages: Array<{ info: { role: string; finish?: string }; parts: Part[] }>, inputEstimated: number): UsageStreamingEstimate | undefined {
+  const inFlight = [...messages].reverse().find((message) => message.info.role === "assistant" && !message.info.finish);
+  if (!inFlight) return undefined;
+  let outputChars = 0;
+  for (const part of inFlight.parts) {
+    if (part.type === "text" && !part.ignored) outputChars += part.text.length;
+    else if (part.type === "reasoning") outputChars += part.text.length;
+  }
+  return { inputEstimated, outputEstimated: estimateTokens(outputChars) };
 }
 
 function text(parts: Part[]): string {
@@ -194,7 +212,8 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     let baselineUsage = sessionUsage(before.data);
     let baselineMessageIds = new Set(before.data.flatMap((message) => message.info.id ? [message.info.id] : []));
     let baselinePartIds = new Set(before.data.flatMap((message) => message.parts.map((part) => part.id)));
-    this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId, prompt: composedPrompt });
+    const inputEstimated = estimateTokens(composedPrompt.system.length + composedPrompt.input.length + (composedPrompt.schemaInstruction?.length ?? 0));
+    this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, state: input.state, sessionId, prompt: composedPrompt, streaming: { inputEstimated, outputEstimated: 0 } });
     const abort = () => { void this.options.plugin.client.session.abort({ path: { id: sessionId }, query: { directory } }); };
     const unregisterPermission = registerPermissionHandler(sessionId, async (permission) => {
       const patterns = Array.isArray(permission.pattern) ? permission.pattern : permission.pattern ? [permission.pattern] : ["*"];
@@ -222,7 +241,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         const output = await this.waitForAnswer(
           sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, directory,
           agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
-          remainingLimits(limits, usage), usage, baselineUsage, baselineMessageIds, baselinePartIds,
+          remainingLimits(limits, usage), usage, inputEstimated, baselineUsage, baselineMessageIds, baselinePartIds,
         );
         usage = addUsage(usage, output.usage);
         if (output.tools) tools.push(...output.tools);
@@ -260,12 +279,14 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     }
   }
 
-  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, directory: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, priorUsage: AgentUsage, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
+  private async waitForAnswer(sessionId: string, node: string, agent: string, model: string, directory: string, inactivityTimeoutMs: number, maxRuntimeMs: number, limits: AgentCallLimits, priorUsage: AgentUsage, inputEstimated: number, baselineUsage: AgentUsage, baselineMessageIds: Set<string>, baselinePartIds: Set<string>): Promise<Omit<AgentCallResult, "sessionId">> {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastFingerprint = "";
     let lastProgress = "";
     let lastUsage = "";
+    let lastStreaming = "";
+    let lastEstimateEmitAt = 0;
     const pollIntervalMs = Math.min(250, Math.max(10, Math.floor(inactivityTimeoutMs / 4)));
     while (true) {
       if (this.options.signal.aborted) throw this.options.signal.reason ?? new Error("LangGraph run aborted");
@@ -273,10 +294,15 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const current = status.data[sessionId];
       const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true });
       const usage = subtractUsage(sessionUsage(messages.data), baselineUsage);
+      const streaming = streamingEstimate(messages.data, inputEstimated);
       const usageFingerprint = JSON.stringify(usage);
-      if (usageFingerprint !== lastUsage) {
+      const streamingFingerprint = JSON.stringify(streaming) ?? "";
+      const polledAt = Date.now();
+      if (usageFingerprint !== lastUsage || (streamingFingerprint !== lastStreaming && polledAt - lastEstimateEmitAt >= ESTIMATE_EMIT_INTERVAL_MS)) {
         lastUsage = usageFingerprint;
-        this.options.onEvent?.({ node, status: "active", agent, model, sessionId, usage: addUsage(priorUsage, usage) });
+        lastStreaming = streamingFingerprint;
+        lastEstimateEmitAt = polledAt;
+        this.options.onEvent?.({ node, status: "active", agent, model, sessionId, usage: addUsage(priorUsage, usage), ...(streaming ? { streaming } : {}) });
       }
       const fingerprint = activityFingerprint(messages.data);
       if (fingerprint !== lastFingerprint) {
@@ -295,7 +321,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         const preview = assistant ? progress(assistant.parts) : "";
         if (preview && preview !== lastProgress) {
           lastProgress = preview;
-          this.options.onEvent?.({ node, status: "active", agent, model, text: preview, sessionId });
+          this.options.onEvent?.({ node, status: "active", agent, model, text: preview, sessionId, ...(streaming ? { streaming } : {}) });
         }
       }
       const now = Date.now();

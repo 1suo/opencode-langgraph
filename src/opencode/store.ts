@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
-import type { AgentPromptTrace, AgentUsage, GraphProgressSnapshot, SolutionRoleModelAssignments } from "../core/types.js";
+import type { AgentPromptTrace, AgentUsage, GraphProgressSnapshot, SolutionRoleModelAssignments, UsageStreamingEstimate } from "../core/types.js";
 
 export interface PluginRunEvent {
   at: string;
@@ -19,6 +19,7 @@ export interface PluginRunEvent {
   structured?: unknown;
   sessionId?: string;
   usage?: AgentUsage;
+  streaming?: UsageStreamingEstimate;
   prompt?: AgentPromptTrace;
   mermaid?: string;
   topology?: { nodes: string[]; edges: Array<{ source: string; target: string }> };

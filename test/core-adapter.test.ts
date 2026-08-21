@@ -6,12 +6,12 @@ import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, is
 import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
-import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, type GraphControls } from "../src/opencode/tui.js";
+import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, usageLine, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput } from "../src/opencode/schema-view.js";
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
-import type { ConnectorDefinition } from "../src/core/types.js";
+import type { AgentUsage, ConnectorDefinition } from "../src/core/types.js";
 import { applyBatchRecords, completeVerification, ensureRunnableWork, initialNetwork, mergeRefinementOutput, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateRefinementOutput, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
@@ -154,6 +154,43 @@ describe("OpenCode child-session runtime", () => {
       expect.objectContaining({ node: "plan", status: "active", state: {}, prompt: { system: "system", input: "prompt" } }),
       expect.objectContaining({ node: "plan", status: "completed", text: "actual answer", state: {} }),
     ]));
+  });
+
+  it("streams a live token estimate only while the assistant answer is unfinished", async () => {
+    const events: Array<{ status: string; usage?: AgentUsage; streaming?: { inputEstimated: number; outputEstimated: number } }> = [];
+    let polls = 0;
+    const client = { session: {
+      create: async () => ({ data: { id: "child" } }),
+      promptAsync: async () => ({ data: undefined }),
+      status: async () => ({ data: polls < 4 ? { child: { type: "busy" } } : {} }),
+      messages: async () => {
+        polls++;
+        if (polls <= 3) return { data: [{ info: { id: "a1", role: "assistant" }, parts: [{ id: "p1", type: "text", text: "x".repeat(400 * polls) }] }] };
+        return { data: [{ info: { id: "a1", role: "assistant", finish: "stop", tokens: { input: 900, output: 100, cache: { read: 3_000 } } }, parts: [{ id: "p1", type: "text", text: "final answer" }] }] };
+      },
+      abort: async () => ({ data: true }),
+    } };
+    const definition: ConnectorDefinition = {
+      version: 1, models: { current: { backend: "opencode", model: "inherit" } },
+      agents: { planner: { model: "current", systemPrompt: "system" } }, graphs: {}, defaultGraph: "default",
+    };
+    const runtime = new OpenCodeAgentRuntime({
+      plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" },
+      directory: "/repo", worktree: "/repo", signal: new AbortController().signal, onEvent: (event) => events.push(event),
+    });
+    const result = await runtime.call({ agent: "planner", node: "plan", prompt: "prompt", state: {} });
+    expect(result.text).toBe("final answer");
+    expect(result.usage).toEqual({ turns: 1, input: 900, output: 100, reasoning: 0, cacheRead: 3_000, cacheWrite: 0, cost: 0 });
+    expect("streaming" in result).toBe(false);
+    expect(events[0]).toMatchObject({ status: "active", streaming: { inputEstimated: 3, outputEstimated: 0 } });
+    const withEstimate = events.filter((event) => event.streaming);
+    expect(withEstimate).toHaveLength(2);
+    expect(withEstimate[1]).toMatchObject({ status: "active", usage: { turns: 0 }, streaming: { inputEstimated: 3, outputEstimated: 100 } });
+    const completed = events.at(-1);
+    expect(completed).toMatchObject({ status: "completed", usage: { turns: 1, input: 900, cacheRead: 3_000 } });
+    expect(completed?.streaming).toBeUndefined();
+    const afterFinish = events.filter((event) => event.usage?.turns === 1);
+    expect(afterFinish.every((event) => event.streaming === undefined)).toBe(true);
   });
 
   it("runs command models through stdin", async () => {
@@ -1836,6 +1873,18 @@ describe("OpenCode graph viewer", () => {
     expect(structured).toContain("a14:implement  [failed]  r2");
     expect(structured).toContain("budget");
     expect(structured).not.toContain("\"phase\"");
+  });
+
+  it("appends the live streaming estimate suffix only while an event carries it", () => {
+    const base = { runId: "run", rootSessionId: "root", graph: "solution-lod", node: "synthesize:r6", status: "active", agent: "langgraph-synthesize", model: "inherit" };
+    const usage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    const streaming = renderStructuredEvent({ ...base, usage, streaming: { inputEstimated: 4_000, outputEstimated: 200 } } as never);
+    expect(streaming).toContain("USAGE  0t · 0in · 0cache · ~4.2k live");
+    const completed = renderStructuredEvent({ ...base, status: "completed", usage: { ...usage, turns: 2, input: 1_000, cacheRead: 500 } } as never);
+    expect(completed).toContain("USAGE  2t · 1kin · 500cache");
+    expect(completed).not.toContain("live");
+    expect(usageLine(usage, { inputEstimated: 4_000, outputEstimated: 200 })).toBe("0t · 0in · 0cache · ~4.2k live");
+    expect(usageLine({ ...usage, cost: 0.5 })).toBe("0t · 0in · 0cache · $0.500");
   });
 
   it("opens the project graph when no chat session exists yet", async () => {
