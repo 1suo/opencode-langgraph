@@ -44,14 +44,14 @@ git rev-parse --short HEAD
 then update from the repository root:
 
 ```sh
-git pull && npm run build && opencode plugin . --force
+git switch main && git pull && npm run build && opencode plugin . --force
 ```
 
 and re-run both commands to confirm the new version and commit.
 
 ### Is automatic updating possible?
 
-No. There is no built-in auto-update: releases are published manually via `npm run release`, the plugin never replaces its own files while running, so any update requires reinstalling the package (`npm install -g opencode-langgraph@latest` or rebuilding locally) and restarting OpenCode. Automation is possible only from outside—for example, an external scheduler such as cron or launchd that runs the update command on a schedule and then restarts OpenCode.
+Partially. There is no built-in auto-update: the plugin contains no self-update code, there is no publish workflow (releases are published manually via `npm run release`), and OpenCode loads plugin code once at startup—so every update requires reinstalling the package (`npm install -g opencode-langgraph@latest` or rebuilding locally) and restarting OpenCode. Full automation is therefore possible only from outside—for example, an external scheduler such as cron or launchd that runs the update command on a schedule and then restarts OpenCode.
 
 ## Use
 
