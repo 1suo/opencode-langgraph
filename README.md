@@ -21,6 +21,37 @@ opencode plugin . --force
 
 The package exposes `opencode-langgraph/server` and `opencode-langgraph/tui`; OpenCode loads both automatically.
 
+## Update the plugin
+
+OpenCode loads plugin code once at startup, so every update takes effect only after reinstalling the package and restarting OpenCode.
+
+For a global npm installation, check the installed version, update, restart, and confirm:
+
+```sh
+npm ls -g opencode-langgraph
+npm install -g opencode-langgraph@latest
+opencode
+npm ls -g opencode-langgraph
+```
+
+For a local development installation, check the version before and after with `package.json`:
+
+```sh
+node -p "require('./package.json').version"
+```
+
+then update from the repository root:
+
+```sh
+git switch main && git pull && npm run build && opencode plugin . --force
+```
+
+and re-run the same `node -p` command to confirm the new version.
+
+### Is automatic updating possible?
+
+No. There is no built-in auto-update: the plugin never replaces its own files while running, so any update requires reinstalling the package (`npm install -g opencode-langgraph@latest` or rebuilding locally) and restarting OpenCode. Automation is possible only from outside—for example, an external scheduler such as cron or launchd that runs the update command on a schedule and then restarts OpenCode.
+
 ## Use
 
 Each OpenCode session starts with `graph:off`. Click that indicator beside the prompt or run `/graph-toggle`; this also works on the home prompt before the first session exists. While `graph:on`, every root user message starts a fresh graph execution linked to that message.
