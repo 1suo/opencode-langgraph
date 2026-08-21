@@ -35,6 +35,11 @@ export interface AgentUsage {
   cost: number;
 }
 
+export interface UsageStreamingEstimate {
+  inputEstimated: number;
+  outputEstimated: number;
+}
+
 export interface AgentPromptTrace {
   system: string;
   input: string;

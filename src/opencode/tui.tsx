@@ -5,7 +5,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import path from "node:path";
 import { accessSync, constants, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
-import type { ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot } from "../core/types.js";
+import type { AgentUsage, ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot, UsageStreamingEstimate } from "../core/types.js";
 import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
@@ -317,7 +317,7 @@ export function renderStructuredEvent(event: PluginRunEvent): string {
     }
   }
   if (event.usage) {
-    lines.push("", `USAGE  ${event.usage.turns}t · ${compactNumber(event.usage.input)}in · ${compactNumber(event.usage.cacheRead)}cache${event.usage.cost ? ` · $${event.usage.cost.toFixed(3)}` : ""}`);
+    lines.push("", `USAGE  ${usageLine(event.usage, event.streaming)}`);
   }
   return lines.join("\n");
 }
@@ -328,11 +328,26 @@ function compactNumber(value: number): string {
   return String(value);
 }
 
+function compactEstimate(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
+export function usageLine(usage: AgentUsage, streaming?: UsageStreamingEstimate): string {
+  return `${usage.turns}t · ${compactNumber(usage.input)}in · ${compactNumber(usage.cacheRead)}cache${usage.cost ? ` · $${usage.cost.toFixed(3)}` : ""}${streaming ? ` · ~${compactEstimate(streaming.inputEstimated + streaming.outputEstimated)} live` : ""}`;
+}
+
 function planId(value: string): number { const parsed = Number(value.replace(/^[a-z]+/, "")); return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER; }
 
 function progressSnapshot(events: PluginRunEvent[]): ProgressSnapshot | undefined {
   const runId = latestRunId(events);
   return events.filter((event) => event.runId === runId && event.progress).at(-1)?.progress;
+}
+
+function liveStreamingEstimate(events: PluginRunEvent[]): UsageStreamingEstimate | undefined {
+  const runId = latestRunId(events);
+  return events.filter((event) => event.runId === runId).at(-1)?.streaming;
 }
 
 interface PlanRow { node: ProgressNode; branch: string; continuation: string }
@@ -458,7 +473,7 @@ function ActivationDetailView(props: { activation: SemanticActivation; event?: P
         <text fg={roleColor(props.activation.capability, props.theme)}><b>{roleIcon(props.activation.capability)} {props.activation.id}:{props.activation.capability}</b></text>
         <text fg={statusTone(props.activation.status, props.theme)}>[{props.activation.status.toUpperCase()}]</text>
         <Show when={props.event?.at}><text fg={props.theme.textMuted}>{shortTime(props.event?.at)}</text></Show>
-        <Show when={props.event?.usage}>{(usage) => <text fg={props.theme.textMuted} wrapMode="none">{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
+        <Show when={props.event?.usage}>{(usage) => <text fg={props.theme.textMuted} wrapMode="none">{usageLine(usage(), props.event?.streaming)}</text>}</Show>
       </box>
       <text fg={props.theme.textMuted}>  region {props.activation.regionId} · {props.activation.expectedDelta}{props.activation.senderActivationId ? ` · after ${props.activation.senderActivationId}` : ""}</text>
       <text fg={props.theme.textMuted}>REQUEST</text>
@@ -780,7 +795,7 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
               <text fg={statusColor(event(), theme())}>[{event().status.toUpperCase()}]</text>
             </box>
             <text fg={roleColor(event().agent, theme())} wrapMode="none">  [{shortAgent(event().agent)}] {event().model}</text>
-            <Show when={event().usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">  {usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache</text>}</Show>
+            <Show when={event().usage}>{(usage) => <text fg={theme().textMuted} wrapMode="none">  {usageLine(usage(), event().streaming)}</text>}</Show>
           </box>
         )}</Show>
       </box>
@@ -794,6 +809,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const events = useEvents(() => rootSessionId(), () => projectPath(props.api), () => stateHome(props.api), () => props.userMessageId, () => runID());
   const currentRun = createMemo(() => latest(events()));
   const semantic = createMemo(() => progressSnapshot(events()));
+  const liveEstimate = createMemo(() => liveStreamingEstimate(events()));
   const solution = createMemo(() => semanticSnapshot(events()));
   const activePlan = createMemo(() => semantic()?.nodes.find((node) => node.id === semantic()?.activeNodeId));
   const [view, setView] = createSignal<"tree" | "runs">(props.chooser ? "runs" : "tree");
@@ -907,7 +923,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={statusTone(semantic()?.phase ?? "idle", theme())}>[{(semantic()?.phase ?? "idle").toUpperCase()}]</text>
         <Show when={activePlan()}>{(node) => <text fg={theme().text}>{planGlyph(node().status)} {node().id}</text>}</Show>
         <box flexGrow={1} />
-        <Show when={semantic()?.usage}>{(usage) => <text fg={theme().textMuted}>{usage().turns}t · {compactNumber(usage().input)}in · {compactNumber(usage().cacheRead)}cache{usage().cost ? ` · $${usage().cost.toFixed(3)}` : ""}</text>}</Show>
+        <Show when={semantic()?.usage}>{(usage) => <text fg={theme().textMuted}>{usageLine(usage(), liveEstimate())}</text>}</Show>
       </box>
       <box flexDirection="row" gap={2} flexShrink={0}>
         <text fg={theme().textMuted}>RUN::{currentRun().at(-1)?.runId ? middleEllipsis(currentRun().at(-1)!.runId!, 12) : "idle"}</text>
