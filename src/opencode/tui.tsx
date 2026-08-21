@@ -561,7 +561,6 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
         <text fg={props.theme.textMuted}>{item().viable}/{item().total} viable</text>
       </box>
       <text fg={props.theme.text} wrapMode="word"><b>{item().objective}</b></text>
-      <Show when={item().implementationContract?.length}><text fg={props.theme.success} wrapMode="word">✓ certified: {item().implementationContract!.join(" · ")}</text></Show>
       <Show when={artifacts().length}><text fg={props.theme.textMuted}>ARTIFACTS</text></Show>
       <For each={artifacts()}>{(artifact) => <text fg={artifact.passed === false ? props.theme.error : props.theme.success} wrapMode="word">  {artifact.kind} {artifact.path ?? artifact.summary}</text>}</For>
       <text fg={props.theme.textMuted}>CANDIDATES</text>

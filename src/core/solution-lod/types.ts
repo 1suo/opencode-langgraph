@@ -16,13 +16,6 @@ export interface ChildRegionDefinition {
   coveredCriteria: number[];
 }
 
-export interface ImplementationContract {
-  delivery?: "answer" | "change";
-  allowedVariables: string[];
-  acceptanceCriteria: string[];
-  coveredCriteria: number[];
-}
-
 export interface SolutionCandidate {
   id: string;
   regionId: string;
@@ -53,7 +46,6 @@ export interface SolutionRegion {
   artifactIds: string[];
   answer?: string;
   contradiction?: string;
-  implementationContract?: ImplementationContract;
   coveredCriteria?: number[];
 }
 
@@ -137,7 +129,7 @@ export interface ActivationTaskInput {
   kind: "activation-task";
   activation: Activation;
   snapshot: {
-    stateVersion: 4;
+    stateVersion: 5;
     runId: string;
     originalTask: string;
     conversationContext: string;
@@ -232,14 +224,7 @@ export type SolutionDelta = z.infer<typeof SolutionDeltaSchema>;
 
 export const RefinementOutputSchema = z.object({
   evidence: SolutionDeltaSchema.shape.evidence,
-  terminal: z.boolean().default(false).describe("True only when the chosen approach can be carried out by ordinary coding judgment inside one bounded change. When true, supply an implementationContract and no children. When false, supply children and no contract."),
-  children: z.array(ChildRegionSchema).default([]).describe("Sub-goals that must each be settled before the parent can be carried out. Together they must address every success criterion of the parent, and each child must address at least one. Add only a later real choice ('refines') or an independent required deliverable ('partOf'). Never add routine steps, files, tests, or verification."),
-  implementationContract: z.object({
-    delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when carrying out the work means answering a question without changing files. Otherwise use 'change'."),
-    allowedVariables: z.array(z.string()).default([]).describe("The choices the implementer may make freely without returning for another decision."),
-    acceptanceCriteria: z.array(z.string().min(1)).min(1).describe("The bounded observable conditions that prove this change is complete."),
-    coveredCriteria: z.array(z.number().int().nonnegative()).default([]).describe("Positions (0-based) of the supplied success criteria the acceptance criteria replace or sharpen."),
-  }).optional().describe("Required when terminal is true: the bounded description of the single change to make."),
+  children: z.array(ChildRegionSchema).min(1).describe("The next steps of work: each resolves one later decision ('refines') or delivers one independent piece ('partOf'). Together they must address every success criterion of the current work, and each child must carry at least one concrete success criterion of its own. Never routine steps, files, tests, or verification."),
   activations: SolutionDeltaSchema.shape.activations,
 });
 export type RefinementOutput = z.infer<typeof RefinementOutputSchema>;
@@ -266,7 +251,7 @@ export type VerificationOutput = z.infer<typeof VerificationOutputSchema>;
 export const PresentationOutputSchema = z.object({ answer: z.string().min(1) });
 
 export interface SolutionLodState extends Record<string, unknown> {
-  stateVersion: 4;
+  stateVersion: 5;
   runId: string;
   originalTask: string;
   conversationContext: string;

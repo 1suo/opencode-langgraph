@@ -21,7 +21,7 @@ const resultsReducer = (left: ActivationTaskResult[], right: ActivationTaskResul
 };
 
 const SolutionState = Annotation.Root({
-  stateVersion: Annotation<4>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
+  stateVersion: Annotation<5>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
   activeActivationId: Annotation<string | undefined>, activeBatch: Annotation<ActiveBatchEntry[]>({ reducer: (_left: ActiveBatchEntry[], right: ActiveBatchEntry[]) => right, default: () => [] }), network: Annotation<SolutionNetwork>, results: Annotation<ActivationTaskResult[]>({ reducer: resultsReducer, default: () => [] }), usage: Annotation<AgentUsage>, callsUsed: Annotation<number>, startedAt: Annotation<number>, worktreeAcquired: Annotation<boolean>, result: Annotation<string>,
 });
 
@@ -93,7 +93,7 @@ export function projectActivationContext(state: SolutionLodState, activation: Ac
   }));
   if (activation.capability === "inspect") return { ...common, earlierChoices, questionToAnswer: activation.request, mustNotChooseSolution: region.delivery === "change" };
   if (activation.capability === "synthesize") return { ...common, earlierChoices, choiceToMake: region.objective, chooseOnly: region.allowedVariables, alternativesAlreadyConsidered: approachesAlreadyConsidered, ifFactIsMissing: "request inspection of one named repository fact" };
-  if (activation.capability === "refine") return { ...common, chosenApproach: earlierChoices, approachToSettle: region.objective, successCriteriaPositions: region.acceptanceCriteria.map((criterion, position) => ({ position, criterion })), decideOrSplit: { carryOutNow: "declare the work terminal and supply an implementation contract with concrete observable criteria for one bounded change", settleFirst: "supply children that each resolve one later decision or deliver one independent deliverable; together they must cover every criterion position" }, ifFactIsMissing: "request inspection of one named repository fact" };
+  if (activation.capability === "refine") return { ...common, chosenApproach: earlierChoices, approachToSettle: region.objective, successCriteriaPositions: region.acceptanceCriteria.map((criterion, position) => ({ position, criterion })), nextStepsContract: { split: "supply the children that carry the work forward: each resolves one later decision or delivers one independent piece; together they must cover every criterion position, and each child needs at least one concrete success criterion of its own", leafNote: "whether the remainder is small enough to implement is computed from the criteria counts; do not try to declare the work done" }, ifFactIsMissing: "request inspection of one named repository fact" };
   if (activation.capability === "implement") return { ...common, chosenApproach: earlierChoices, ifBlocked: { missingFact: "request inspection of one named repository fact", wrongChoice: "request reconsideration only when evidence contradicts an earlier choice" } };
   if (activation.capability === "verify") return { ...common, earlierChoices, changeToCheck: region.objective };
   return { ...common, earlierChoices, answerToWrite: region.objective };
@@ -121,7 +121,7 @@ function changedBetween(before: Map<string, string>, after: Map<string, string>)
 function semantic(network: SolutionNetwork): SolutionSemanticSnapshot {
   return {
     kind: "solution-lod-v1", revision: network.revision,
-    regions: network.regions.map((region) => ({ id: region.id, key: region.key, parentId: region.parentId, edge: region.edge, lod: region.lod, objective: region.objective, status: region.status, viable: region.candidateIds.filter((id) => network.candidates.find((candidate) => candidate.id === id)?.status !== "eliminated").length, total: region.candidateIds.length, selectedCandidateIds: region.selectedCandidateIds, candidateIds: region.candidateIds, constraintIds: region.constraintIds, evidenceIds: region.evidenceIds, activationIds: region.activationIds, artifactIds: region.artifactIds, ...(region.implementationContract ? { implementationContract: region.implementationContract.acceptanceCriteria } : {}) })),
+    regions: network.regions.map((region) => ({ id: region.id, key: region.key, parentId: region.parentId, edge: region.edge, lod: region.lod, objective: region.objective, status: region.status, viable: region.candidateIds.filter((id) => network.candidates.find((candidate) => candidate.id === id)?.status !== "eliminated").length, total: region.candidateIds.length, selectedCandidateIds: region.selectedCandidateIds, candidateIds: region.candidateIds, constraintIds: region.constraintIds, evidenceIds: region.evidenceIds, activationIds: region.activationIds, artifactIds: region.artifactIds })),
     candidates: network.candidates.map(({ id, regionId, proposition, status, eliminationReasons, evidenceIds }) => ({ id, regionId, proposition, status, eliminationReasons, evidenceIds })),
     constraints: network.constraints.map(({ id, kind, subject, target, reason }) => ({ id, kind, subject, target, reason })),
     evidence: network.evidence.map(({ id, text, source, kind }) => ({ id, text, source, kind })),
@@ -155,10 +155,10 @@ export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<So
   const dispatchBatch = (state: SolutionLodState): Send[] => state.activeBatch.map((entry) => {
     const activation = state.network.activations.find((item) => item.id === entry.activationId);
     if (!activation) throw new Error(`Batch entry ${entry.activationId} references a missing activation`);
-    const task: ActivationTaskInput = { kind: "activation-task", activation, snapshot: { stateVersion: 4, runId: state.runId, originalTask: state.originalTask, conversationContext: state.conversationContext, directory: state.directory, worktree: state.worktree, phase: state.phase, network: state.network } };
+    const task: ActivationTaskInput = { kind: "activation-task", activation, snapshot: { stateVersion: 5, runId: state.runId, originalTask: state.originalTask, conversationContext: state.conversationContext, directory: state.directory, worktree: state.worktree, phase: state.phase, network: state.network } };
     return new Send("activate", task);
   });
-  const taskState = (task: ActivationTaskInput): SolutionLodState => ({ stateVersion: 4, runId: task.snapshot.runId, originalTask: task.snapshot.originalTask, conversationContext: task.snapshot.conversationContext, directory: task.snapshot.directory, worktree: task.snapshot.worktree, phase: task.snapshot.phase, activeBatch: [], network: task.snapshot.network, results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" });
+  const taskState = (task: ActivationTaskInput): SolutionLodState => ({ stateVersion: 5, runId: task.snapshot.runId, originalTask: task.snapshot.originalTask, conversationContext: task.snapshot.conversationContext, directory: task.snapshot.directory, worktree: task.snapshot.worktree, phase: task.snapshot.phase, activeBatch: [], network: task.snapshot.network, results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" });
   const builder = new StateGraph(SolutionState)
     .addNode("schedule", (state: SolutionLodState) => {
       const scheduled = ensureRunnableWork(state.network, width);
@@ -226,7 +226,7 @@ export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<So
     .addEdge("finish", END);
   return {
     graph: builder.compile({ checkpointer: options.checkpointer ?? defaultSolutionCheckpointer() }),
-    initial: ({ task, conversationContext = "", directory, worktree, runId }) => ({ stateVersion: 4, runId, originalTask: task, conversationContext, directory, worktree, phase: "forming-root-domain", activeBatch: [], network: initialNetwork(task), results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: Date.now(), worktreeAcquired: false, result: "" }),
+    initial: ({ task, conversationContext = "", directory, worktree, runId }) => ({ stateVersion: 5, runId, originalTask: task, conversationContext, directory, worktree, phase: "forming-root-domain", activeBatch: [], network: initialNetwork(task), results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: Date.now(), worktreeAcquired: false, result: "" }),
     result: (state) => state.result,
     progress,
     display: { schedule: { phase: "collapse" }, acquire: { phase: "lease" }, activate: { phase: "activate" }, merge: { phase: "propagate" }, finish: { phase: "result" } },

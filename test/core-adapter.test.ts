@@ -108,7 +108,7 @@ describe("typed graph validation", () => {
     expect(definition.models["implement-model"]).toEqual({ backend: "opencode", model: "provider/strong" });
     expect(definition.agents.inspect.maxSteps).toBe(3);
     const initial = definition.graphs["solution-lod"].initial({ task: "x", directory: project, worktree: project, runId: "x" }) as SolutionLodState;
-    expect(initial.stateVersion).toBe(4);
+    expect(initial.stateVersion).toBe(5);
   });
 
   it("applies per-session role assignments without changing the configured definition", async () => {
@@ -362,14 +362,14 @@ describe("OpenCode child-session runtime", () => {
 
 describe("solution LOD reducer", () => {
   const state = (): SolutionLodState => ({
-    stateVersion: 4, runId: "run", originalTask: "change", conversationContext: "prior decision", directory: "/repo", worktree: "/repo", phase: "forming-root-domain", activeBatch: [], results: [],
+    stateVersion: 5, runId: "run", originalTask: "change", conversationContext: "prior decision", directory: "/repo", worktree: "/repo", phase: "forming-root-domain", activeBatch: [], results: [],
     network: initialNetwork("change"), usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "",
   });
   const candidate = (key: string, proposition: string, outcome: "possible" | "eliminated" | "selected" | "equivalent" = "possible") => ({ key, proposition, outcome, reasons: [], evidenceRefs: [] });
   const contract = (acceptanceCriteria: string[], coveredCriteria = acceptanceCriteria.map((_, index) => index)) => ({ delivery: "change" as const, allowedVariables: [], acceptanceCriteria, coveredCriteria });
-  const terminal = (acceptanceCriteria: string[]): RefinementOutput => ({ evidence: [], terminal: true, children: [], implementationContract: contract(acceptanceCriteria), activations: [] });
+  const terminal = (acceptanceCriteria: string[]): RefinementOutput => ({ evidence: [], children: [], activations: [] });
   const selectDelta = (network: SolutionLodState["network"], activationId: string, ...keys: string[]) => {
-    const merged = mergeSolutionDelta({ stateVersion: 4, runId: "run", originalTask: "change", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", network, usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" } as SolutionLodState, activationId, {
+    const merged = mergeSolutionDelta({ stateVersion: 5, runId: "run", originalTask: "change", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", network, usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" } as SolutionLodState, activationId, {
       region: {}, evidence: [], constraints: [], activations: [], select: keys,
       candidates: keys.map((key) => candidate(key, `${key} approach`, "selected")),
     });
@@ -382,10 +382,10 @@ describe("solution LOD reducer", () => {
     network.regions.find((region) => region.id === regionId)?.activationIds.push(id);
   };
 
-  it("keeps a selected region unrefined until refinement certifies or splits it", () => {
+  it("keeps a criterion-less selection unrefined until refinement splits it", () => {
     const current = state();
     const merged = mergeSolutionDelta(current, "a1", {
-      region: { acceptanceCriteria: ["target updated"] }, evidence: [], constraints: [], activations: [],
+      region: {}, evidence: [], constraints: [], activations: [],
       candidates: [candidate("adapter", "Use an adapter", "selected"), candidate("rewrite", "Rewrite the subsystem")],
       select: ["adapter"],
     });
@@ -395,16 +395,19 @@ describe("solution LOD reducer", () => {
     expect(nextQueuedActivation(ensureRunnableWork(merged).network)).toMatchObject({ capability: "refine", regionId: "r1" });
   });
 
-  it("certifies a terminal refinement into an implementable leaf with the bounded contract", () => {
+  it("declares a single-criterion selection actionable without refinement, and a multi-criterion one not", () => {
     const current = state();
-    current.network = selectDelta(current.network, "a1", "direct");
-    pushActivation(current.network, "refine", "r1", "a2");
-    current.network = mergeRefinementOutput(current.network, "a2", { evidence: [{ text: "bounded by one module", source: "src/a.ts:1", kind: "repository" }], terminal: true, children: [], implementationContract: contract(["target updated"]), activations: [] });
-    expect(current.network.regions[0]).toMatchObject({ status: "actionable" });
-    expect(current.network.regions[0].implementationContract).toMatchObject({ acceptanceCriteria: ["target updated"] });
-    expect(current.network.regions[0].acceptanceCriteria).toEqual(["target updated"]);
-    const scheduled = ensureRunnableWork(current.network);
-    expect(nextQueuedActivation(scheduled.network)).toMatchObject({ capability: "implement", regionId: "r1" });
+    current.network.activations[0].status = "completed";
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["target updated"] }, evidence: [], constraints: [], activations: [],
+      candidates: [candidate("direct", "Direct change", "selected")], select: ["direct"],
+    });
+    expect(merged.regions[0]).toMatchObject({ status: "actionable" });
+    expect(nextQueuedActivation(ensureRunnableWork(merged).network)).toMatchObject({ capability: "implement", regionId: "r1" });
+    merged.regions[0].acceptanceCriteria = ["target updated", "docs updated"];
+    const rescheduled = ensureRunnableWork(merged);
+    expect(rescheduled.network.regions[0].status).toBe("unrefined");
+    expect(nextQueuedActivation(rescheduled.network)).toMatchObject({ capability: "refine" });
   });
 
   it("materializes refined children, collapses the parent, and inspects each child before synthesis", () => {
@@ -412,7 +415,7 @@ describe("solution LOD reducer", () => {
     current.network = selectDelta(current.network, "a1", "direct");
     pushActivation(current.network, "refine", "r1", "a2");
     current.network = mergeRefinementOutput(current.network, "a2", {
-      evidence: [], terminal: false, activations: [],
+      evidence: [], activations: [],
       children: [
         { key: "mapping", objective: "Resolve mapping", edge: "refines", allowedVariables: ["mapping contract"], acceptanceCriteria: ["mapping is explicit"], coveredCriteria: [0] },
         { key: "docs", objective: "Update docs", edge: "partOf", allowedVariables: [], acceptanceCriteria: ["docs mention mapping"], coveredCriteria: [0] },
@@ -431,7 +434,7 @@ describe("solution LOD reducer", () => {
     current.network = selectDelta(current.network, "a1", "direct");
     pushActivation(current.network, "refine", "r1", "a2");
     current.network = mergeRefinementOutput(current.network, "a2", {
-      evidence: [], terminal: false, activations: [],
+      evidence: [], activations: [],
       children: [{ key: "mapping", objective: "Resolve mapping", edge: "refines", allowedVariables: [], acceptanceCriteria: [], coveredCriteria: [0] }],
     });
     const child = current.network.regions.find((region) => region.parentId === "r1")!;
@@ -446,38 +449,29 @@ describe("solution LOD reducer", () => {
     current.network = selectDelta(current.network, "a1", "adapter");
     pushActivation(current.network, "refine", "r1", "a2");
     current.network = mergeRefinementOutput(current.network, "a2", {
-      evidence: [], terminal: false, activations: [],
+      evidence: [], activations: [],
       children: [{ key: "mapping", objective: "Resolve mapping", edge: "refines", allowedVariables: [], acceptanceCriteria: [], coveredCriteria: [0] }],
     });
     current.network = selectDelta(current.network, "a1", "rewrite");
     expect(current.network.regions.filter((region) => region.parentId === "r1")).toHaveLength(0);
     expect(current.network.regions[0]).toMatchObject({ status: "unrefined" });
-    expect(current.network.regions[0].implementationContract).toBeUndefined();
     expect(current.network.regions[0].selectedCandidateIds).toEqual(["r1:rewrite"]);
   });
 
-  it("rejects terminal claims without a bounded contract and splits without coverage", () => {
+  it("rejects refinements that do not split into covering, self-carrying children", () => {
     const current = state();
     current.network = selectDelta(current.network, "a1", "direct");
     current.network.regions[0].acceptanceCriteria = ["works", "documented"];
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: true, children: [], activations: [] })).toThrow(/requires an implementation contract/);
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["works"], coveredCriteria: [5] }, activations: [] })).toThrow(/positions that do not exist/);
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["works"], coveredCriteria: [] }, activations: [] })).toThrow(/cover every success criterion/);
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: false, children: [], activations: [] })).toThrow(/split the work into children/);
-    const child = (key: string, coveredCriteria: number[]) => ({ key, objective: `${key} work`, edge: "partOf" as const, allowedVariables: [], acceptanceCriteria: [], coveredCriteria });
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: false, children: [child("left", [])], activations: [] })).toThrow(/does not address any known success criterion/);
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: false, children: [child("left", [0])], activations: [] })).toThrow(/collectively cover/);
-    expect(() => validateRefinementOutput(current, "r1", { evidence: [], terminal: false, children: [child("left", [0]), child("left", [1])], activations: [] })).toThrow(/distinct stable name/);
-    expect(() => validateRefinementOutput(current, "r1", {
-      evidence: [], terminal: false, activations: [],
-      children: [
-        { ...child("left", [0]), edge: "refines" as const },
-        { ...child("right", [0, 1]), edge: "partOf" as const },
-      ],
-    })).not.toThrow();
+    expect(() => validateRefinementOutput(current, "r1", { evidence: [], children: [], activations: [] })).toThrow(/split the work into its next steps/);
+    const child = (key: string, coveredCriteria: number[], acceptanceCriteria: string[] = ["child done"]) => ({ key, objective: `${key} work`, edge: "partOf" as const, allowedVariables: [], acceptanceCriteria, coveredCriteria });
+    expect(() => validateRefinementOutput(current, "r1", { evidence: [], children: [child("left", [])], activations: [] })).toThrow(/does not address any known success criterion/);
+    expect(() => validateRefinementOutput(current, "r1", { evidence: [], children: [child("left", [0])], activations: [] })).toThrow(/collectively cover/);
+    expect(() => validateRefinementOutput(current, "r1", { evidence: [], children: [child("left", [0]), child("left", [1])], activations: [] })).toThrow(/distinct stable name/);
+    expect(() => validateRefinementOutput(current, "r1", { evidence: [], children: [child("left", [0], []), child("right", [0, 1])], activations: [] })).toThrow(/carries no success criterion/);
+    expect(() => validateRefinementOutput(current, "r1", { evidence: [], children: [child("left", [0]), child("right", [0, 1])], activations: [] })).not.toThrow();
   });
 
-  it("collapses a repository-backed read-only answer without synthesis or a child LOD, then verifies it", () => {
+    it("collapses a repository-backed read-only answer without synthesis or a child LOD, then verifies it", () => {
     const current = state();
     const network = mergeSolutionDelta(current, "a1", {
       region: { delivery: "answer" },
@@ -538,8 +532,9 @@ describe("solution LOD reducer", () => {
     current.network = selectDelta(current.network, "a99", "direct");
     expect(current.network.regions.find((region) => region.key === "api")?.status).toBe("unrefined");
     pushActivation(current.network, "refine", api.id, "a100");
-    current.network = mergeRefinementOutput(current.network, "a100", terminal(["API works"]));
-    expect(current.network.regions.find((region) => region.key === "api")?.status).toBe("actionable");
+    current.network = mergeRefinementOutput(current.network, "a100", { evidence: [], activations: [], children: [{ key: "ship", objective: "Ship the API work", edge: "partOf", allowedVariables: [], acceptanceCriteria: ["API works"], coveredCriteria: [0] }] });
+    expect(current.network.regions.find((region) => region.key === "api")?.status).toBe("collapsed");
+    expect(current.network.regions.find((region) => region.key === "ship")?.status).toBe("unformed");
     expect(current.network.regions.find((region) => region.key === "storage")?.status).toBe("unformed");
   });
 
@@ -554,7 +549,7 @@ describe("solution LOD reducer", () => {
     });
     expect(merged.candidates.find((candidate) => candidate.key === "rewrite")?.status).toBe("eliminated");
     expect(merged.candidates.find((candidate) => candidate.key === "adapter")?.status).toBe("selected");
-    expect(merged.regions[0].status).toBe("unrefined");
+    expect(merged.regions[0].status).toBe("actionable");
   });
 
   it("does not eliminate a refutes target when the refuting candidate is itself rejected", () => {
@@ -571,7 +566,7 @@ describe("solution LOD reducer", () => {
       ], select: [],
     });
     expect(merged.candidates.find((candidate) => candidate.key === "good")?.status).toBe("selected");
-    expect(merged.regions[0].status).toBe("unrefined");
+    expect(merged.regions[0].status).toBe("actionable");
   });
 
   it("still fires a refutes constraint from a non-candidate subject like task or evidence", () => {
@@ -687,7 +682,7 @@ describe("solution LOD reducer", () => {
       candidates: [{ key: "direct", proposition: "Implement the selected family", outcome: "selected", reasons: [], evidenceRefs: [] }],
     });
     network.activations[0].status = "completed";
-    expect(network.regions[0]).toMatchObject({ status: "unrefined", acceptanceCriteria: ["change"] });
+    expect(network.regions[0]).toMatchObject({ status: "unrefined" });
     expect(nextQueuedActivation(ensureRunnableWork(network).network)).toMatchObject({ capability: "refine" });
   });
 
@@ -698,7 +693,7 @@ describe("solution LOD reducer", () => {
       candidates: [{ key: "direct", proposition: "Implement it", outcome: "selected", reasons: [], evidenceRefs: [] }],
       resolvedAnswer: { answer: "Here is a plan", acceptanceCriteria: ["describe it"], evidenceRefs: [] },
     });
-    expect(network.regions[0]).toMatchObject({ delivery: "change", status: "unrefined", selectedCandidateIds: ["r1:direct"] });
+    expect(network.regions[0]).toMatchObject({ delivery: "change", status: "actionable", selectedCandidateIds: ["r1:direct"] });
     expect(network.regions[0].answer).toBeUndefined();
   });
 
@@ -778,7 +773,6 @@ describe("solution LOD reducer", () => {
     network.regions[0].candidateIds = ["r1:direct"];
     network.regions[0].selectedCandidateIds = ["r1:direct"];
     network.regions[0].acceptanceCriteria = ["works"];
-    network.regions[0].implementationContract = { delivery: "change", allowedVariables: [], acceptanceCriteria: ["works"], coveredCriteria: [0] };
     network.candidates.push({ id: "r1:direct", regionId: "r1", key: "direct", proposition: "implement it", status: "selected", evidenceIds: [], eliminationReasons: [] });
     network.activations.push({ id: "a2", capability: "implement", regionId: "r1", request: "implement", expectedDelta: `implement:r1:${network.revision}`, contextRefs: ["r1"], status: "failed", basisRevision: network.revision });
     const scheduled = ensureRunnableWork(network);
@@ -796,7 +790,7 @@ describe("solution LOD reducer", () => {
         { key: "b", proposition: "Equivalent implementation B", outcome: "possible", reasons: [], evidenceRefs: [] },
       ], constraints: [{ kind: "equivalent", subject: "a", target: "b", reason: "same external contract" }], select: ["a"],
     });
-    expect(network.regions[0]).toMatchObject({ status: "unrefined", selectedCandidateIds: ["r1:a", "r1:b"] });
+    expect(network.regions[0]).toMatchObject({ status: "actionable", selectedCandidateIds: ["r1:a", "r1:b"] });
   });
 
   it("rejects multiple selected non-equivalent alternatives in one region", () => {
@@ -817,7 +811,7 @@ describe("solution LOD reducer", () => {
       region: {}, evidence: [], constraints: [], activations: [],
       candidates: [{ key: "coherent", proposition: "One complete event-store design", outcome: "selected", reasons: [], evidenceRefs: [] }], select: ["coherent"],
     });
-    expect(corrected.regions[0]).toMatchObject({ status: "unrefined", selectedCandidateIds: ["r1:coherent"] });
+    expect(corrected.regions[0]).toMatchObject({ status: "actionable", selectedCandidateIds: ["r1:coherent"] });
   });
 
   it("wakes a waiting activation only after its state predicate revision", () => {
@@ -860,7 +854,7 @@ describe("solution LOD reducer", () => {
       select: ["a", "b", "c"],
     });
     expect(network.regions[0].status).not.toBe("contradiction");
-    expect(network.regions[0]).toMatchObject({ status: "unrefined", selectedCandidateIds: ["r1:a", "r1:b", "r1:c"] });
+    expect(network.regions[0]).toMatchObject({ status: "actionable", selectedCandidateIds: ["r1:a", "r1:b", "r1:c"] });
   });
 
   it("merges candidates whose keys normalize to the same slug instead of duplicating them", () => {
@@ -909,7 +903,7 @@ describe("solution LOD reducer", () => {
     });
     network.activations[0].status = "completed";
     network.activations.push({ id: "a9", capability: "refine", regionId: "r1", request: "split", expectedDelta: "refine:r1", contextRefs: ["r1"], status: "running", basisRevision: network.revision });
-    const split = mergeRefinementOutput(network, "a9", { evidence: [], terminal: false, activations: [], children: [{ key: "child", objective: "Child work", edge: "partOf", allowedVariables: [], acceptanceCriteria: [], coveredCriteria: [0] }] });
+    const split = mergeRefinementOutput(network, "a9", { evidence: [], activations: [], children: [{ key: "child", objective: "Child work", edge: "partOf", allowedVariables: [], acceptanceCriteria: [], coveredCriteria: [0] }] });
     const child = split.regions.find((item) => item.key === "child")!;
     split.activations.push({ id: "a2", capability: "inspect", regionId: child.id, request: "a2", expectedDelta: "a2", contextRefs: [child.id], status: "running", basisRevision: split.revision });
     const reopened = reopenRegion(split, split.regions[0].id, "contradiction");
@@ -954,13 +948,12 @@ describe("solution LOD graph", () => {
       calls.push(input.node);
       if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", allowedVariables: ["solution family"], acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: ["e1"] }] } };
       if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: ["e1"] }], constraints: [], select: ["direct"], answer: "stale pre-implementation design", activations: [] } };
-      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["target updated"], coveredCriteria: [0] }, activations: [] } };
       if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [], activations: [] } }; }
       if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     const result = await configured.graph.invoke(configured.initial({ task: "update", directory, worktree: directory, runId: "run" }), { recursionLimit: 64, configurable: { thread_id: "run", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => {} } });
-    expect(calls).toEqual(["inspect:r1", "synthesize:r1", "refine:r1", "implement:r1", "verify:r1"]);
+    expect(calls).toEqual(["inspect:r1", "synthesize:r1", "implement:r1", "verify:r1"]);
     expect(configured.progress?.(result)).toMatchObject({ phase: "completed", semantic: { kind: "solution-lod-v1" } });
     expect(configured.result?.(result)).toContain("Implemented and verified");
     expect(configured.result?.(result)).not.toContain("stale pre-implementation design");
@@ -982,7 +975,6 @@ describe("solution LOD graph", () => {
     const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
     const runtime = { call: async (input: { node: string }) => {
       if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["files updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "change files", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["files updated"], coveredCriteria: [0] }, activations: [] } };
       if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "agent change"); fs.writeFileSync(path.join(directory, "new.txt"), "new"); return { text: "", structured: { status: "completed", summary: "done", changedFiles: [], checks: [], activations: [] } }; }
       if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
@@ -1002,7 +994,6 @@ describe("solution LOD graph", () => {
     let first = true;
     const runtime = { call: async (input: { node: string }) => {
       if (first && input.node === "inspect:r1") { first = false; return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } }; }
-      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["target updated"], coveredCriteria: [0] }, activations: [] } };
       if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "retained"); throw new Error("invalid structured output"); }
       throw new Error("recovery activation also malformed");
     } };
@@ -1023,15 +1014,14 @@ describe("solution LOD graph", () => {
       events.push(`start:${input.node}`); open++; maxOpen = Math.max(maxOpen, open);
       await new Promise((resolve) => setTimeout(resolve, 25));
       open--; events.push(`end:${input.node}`);
-      if (input.node === "inspect:r1") return { text: "", structured: { region: { acceptanceCriteria: ["both questions answered"] }, evidence: [], candidates: [{ key: "split", proposition: "Two independent answers", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["split"], activations: [] } };
-      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], terminal: false, activations: [], children: [
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { acceptanceCriteria: ["left answered", "right answered"] }, evidence: [], candidates: [{ key: "split", proposition: "Two independent answers", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["split"], activations: [] } };
+      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], activations: [], children: [
         { key: "left", objective: "Answer the left question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["left answered"], coveredCriteria: [0] },
         { key: "right", objective: "Answer the right question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["right answered"], coveredCriteria: [0] },
       ] } };
       if (input.node === "inspect:r2") return { text: "", structured: { region: {}, evidence: [{ text: "left context", source: "left:1", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] } };
       if (input.node === "inspect:r3") return { text: "", structured: { region: {}, evidence: [{ text: "right context", source: "right:1", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] } };
       if (input.node === "synthesize:r2" || input.node === "synthesize:r3") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-      if (input.node === "refine:r2" || input.node === "refine:r3") return { text: "", structured: { evidence: [], terminal: true, children: [], implementationContract: { delivery: "answer", allowedVariables: [], acceptanceCriteria: [input.node.endsWith("r2") ? "left answered" : "right answered"], coveredCriteria: [0] }, activations: [] } };
       if (input.node === "present:r2") return { text: "", structured: { answer: "left answer" } };
       if (input.node === "present:r3") return { text: "", structured: { answer: "right answer" } };
       if (input.node === "verify:r2" || input.node === "verify:r3") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
@@ -1058,7 +1048,6 @@ describe("solution LOD graph", () => {
     const runtime = { call: async (input: { node: string }) => {
       order.push(`node:${input.node}`);
       if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["target updated"], coveredCriteria: [0] }, activations: [] } };
       if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] } }; }
       if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
@@ -1110,31 +1099,24 @@ describe("activation IO schema views", () => {
     expect(lines!.flatMap((line) => line.spans).find((span) => span.text.includes("src/core/index.ts:1"))?.tone).toBe("muted");
   });
 
-  it("renders certified refinements with contract criteria and split children with coverage", () => {
-    const certified = renderSchemaOutput({ evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: ["naming"], acceptanceCriteria: ["target updated"], coveredCriteria: [0] }, activations: [] })!;
-    const certifiedFlat = flattenSchemaLines(certified);
-    expect(certifiedFlat).toContain("[REFINEMENT]");
-    expect(certifiedFlat).toContain("[CERTIFIED TERMINAL]");
-    expect(certifiedFlat).toContain("✓ target updated");
-    expect(certifiedFlat).toContain("FREE CHOICES naming");
-    expect(certifiedFlat).toContain("COVERS #0");
-    expect(spans(certified, "[CERTIFIED TERMINAL]").spans.some((span) => span.tone === "success")).toBe(true);
+  it("renders forced refinements as next steps with per-child criteria and coverage", () => {
     const split = renderSchemaOutput({
-      evidence: [], terminal: false,
+      evidence: [], activations: [],
       children: [
-        { key: "mapping", objective: "Resolve mapping", edge: "refines", allowedVariables: [], acceptanceCriteria: [], coveredCriteria: [0] },
-        { key: "docs", objective: "Update docs", edge: "partOf", allowedVariables: [], acceptanceCriteria: [], coveredCriteria: [1] },
-      ], activations: [],
+        { key: "mapping", objective: "Resolve mapping", edge: "refines", allowedVariables: [], acceptanceCriteria: ["mapping is explicit"], coveredCriteria: [0] },
+        { key: "docs", objective: "Update docs", edge: "partOf", allowedVariables: [], acceptanceCriteria: ["docs mention mapping"], coveredCriteria: [1] },
+      ],
     })!;
-    const splitFlat = flattenSchemaLines(split);
-    expect(splitFlat).toContain("[SPLIT · 2 CHILDREN]");
-    expect(splitFlat).toContain("⌇ [REFINES] Resolve mapping");
-    expect(splitFlat).toContain("· covers #0 · mapping");
-    expect(splitFlat).toContain("■ [PART OF] Update docs");
-    expect(splitFlat).toContain("· covers #1 · docs");
+    const flat = flattenSchemaLines(split);
+    expect(flat).toContain("[REFINEMENT]");
+    expect(flat).toContain("[2 NEXT STEPS]");
+    expect(flat).toContain("⌇ [REFINES] Resolve mapping");
+    expect(flat).toContain("· covers #0 · mapping");
+    expect(flat).toContain("■ [PART OF] Update docs");
+    expect(flat).toContain("✓ docs mention mapping");
   });
 
-  it("renders implementation files and check outcomes plus blocked reasons", () => {
+    it("renders implementation files and check outcomes plus blocked reasons", () => {
     const completed = renderSchemaOutput({ status: "completed", summary: "did the thing", changedFiles: ["src/a.ts"], checks: [{ name: "lint", passed: true, evidence: "clean" }, { name: "test", passed: false, evidence: "1 failing" }], activations: [] })!;
     const completedFlat = flattenSchemaLines(completed);
     expect(completedFlat).toContain("[IMPLEMENTATION]");
@@ -1193,7 +1175,7 @@ describe("activation IO schema views", () => {
       relationships: [{ relationship: "requires", from: "barrel", to: "core", explanation: "re-exports everything" }],
       earlierChoices: ["Use an adapter"],
       alternativesAlreadyConsidered: [{ approach: "Inline exports", status: "rejected", reasonsRejected: ["no single entry"] }],
-      decideOrSplit: { carryOutNow: "declare terminal", settleFirst: "split into children" },
+      nextStepsContract: { split: "split into covering children", leafNote: "leaves are computed" },
     }))!;
     const flat = flattenSchemaLines(input);
     expect(flat).toContain("[ACTIVATION INPUT]");
@@ -1207,7 +1189,8 @@ describe("activation IO schema views", () => {
     expect(flat).toContain("· re-exports everything");
     expect(flat).toContain("CHOSEN SO FAR Use an adapter");
     expect(flat).toContain("× Inline exports");
-    expect(flat).toContain("CARRY OUT NOW declare terminal");
+    expect(flat).toContain("SPLIT split into covering children");
+    expect(flat).toContain("LEAVES leaves are computed");
     expect(spans(input, "[REQUIRES]").spans.some((span) => span.tone === "info")).toBe(true);
     expect(renderSchemaInput("not json")).toBeUndefined();
     expect(renderSchemaInput(undefined)).toBeUndefined();
@@ -1348,7 +1331,7 @@ describe("OpenCode automatic graph routing", () => {
     try {
       fs.writeFileSync(path.join(project, "file.txt"), "value");
       const verifierWorkspace = await prepareVerifierWorkspace("run", project);
-      writeStoredRun({ checkpointVersion: 4, runId: "run", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "interrupted" });
+      writeStoredRun({ checkpointVersion: 5, runId: "run", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "interrupted" });
       const hooks = await server({ client: {}, directory: "/repo", worktree: "/repo" } as never);
       await hooks["command.execute.before"]?.({ command: "graph-cancel", sessionID: "root", arguments: "" }, { parts: [] } as never);
       expect(readStoredRun("run").status).toBe("cancelled");
@@ -1384,7 +1367,6 @@ describe("OpenCode automatic graph routing", () => {
         const title = titles.get(requestPath.id) ?? "";
         const structured = title.includes("inspect:r1")
           ? { region: { delivery: "answer", acceptanceCriteria: ["Answer the question"] }, evidence: [{ text: "2+2 is 4", source: "arithmetic", kind: "inference" }], candidates: [{ key: "answer", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["answer"], activations: [] }
-          : title.includes("refine:r1") ? { evidence: [], terminal: true, children: [], implementationContract: { delivery: "answer", allowedVariables: [], acceptanceCriteria: ["Answer the question"], coveredCriteria: [0] }, activations: [] }
           : title.includes("present:r1") ? { answer: "The answer is 4." }
           : title.includes("verify:r1") ? { verdict: "pass", summary: "Answer matches the facts", findings: [], checks: [], activations: [] } : undefined;
         return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: "The answer is 4." }] }] };
@@ -1422,13 +1404,13 @@ describe("OpenCode automatic graph routing", () => {
       expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
       expect(output.message.agent).toBe("langgraph-presenter");
       deadline = Date.now() + 4_000;
-      while ((child < 8 || posted.length < 10) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(child).toBe(8);
-      expect(posted).toHaveLength(10);
+      while ((child < 6 || posted.length < 8) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(child).toBe(6);
+      expect(posted).toHaveLength(8);
       expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter" } });
       expect((posted.at(-1) as { body: Record<string, unknown> }).body.tools).toBeUndefined();
       const events = readPluginEvents("root");
-      expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "refine:r1", "present:r1", "verify:r1", "__end__"]));
+      expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "present:r1", "verify:r1", "__end__"]));
       expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
       expect(events.find((event) => event.userMessageId === "message-1" && event.node === "__start__")?.state).toMatchObject({
         originalTask: "What is 2+2?",
@@ -1476,9 +1458,7 @@ describe("OpenCode automatic graph routing", () => {
           if (title.includes("inspect:r1")) {
             structured = { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] };
           } else if (title.includes("synthesize:r1")) {
-            structured = { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] };
-          } else if (title.includes("refine:r1")) {
-            structured = { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["target updated"], coveredCriteria: [0] }, activations: [] };
+            structured = { region: { acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] };
           } else if (title.includes("implement:r1")) {
             fs.writeFileSync(path.join(directory, "target.txt"), "after");
             structured = { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] };
@@ -1491,7 +1471,7 @@ describe("OpenCode automatic graph routing", () => {
       } };
       const hooks = await server({ client, directory, worktree: directory } as never);
       const runId = "tool-run";
-      writeStoredRun({ checkpointVersion: 4, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
+      writeStoredRun({ checkpointVersion: 5, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
 
       const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new DurableFileSaver(path.join(state, "opencode-langgraph", "checkpoints")) });
       let recovering = false;
@@ -1499,8 +1479,7 @@ describe("OpenCode automatic graph routing", () => {
         if (!recovering) throw new Error("insufficient balance");
         if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] } };
         if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-        if (input.node === "refine:r1") return { text: "", structured: { evidence: [], terminal: true, children: [], implementationContract: { delivery: "change", allowedVariables: [], acceptanceCriteria: ["target updated"], coveredCriteria: [0] }, activations: [] } };
-        if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [], activations: [] } }; }
+          if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [], activations: [] } }; }
         if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] } };
         throw new Error(`unexpected node ${input.node}`);
       } };
@@ -1541,7 +1520,7 @@ describe("OpenCode automatic graph routing", () => {
     try {
       const hooks = await server({ client: { session: { get: async () => ({ data: { id: "root", parentID: undefined } }) } }, directory, worktree: directory } as never);
       const runId = "fresh-run";
-      writeStoredRun({ checkpointVersion: 4, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
+      writeStoredRun({ checkpointVersion: 5, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
       const toolContext = { sessionID: "root", directory, worktree: directory, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
 
       const inspectOutput = await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext);

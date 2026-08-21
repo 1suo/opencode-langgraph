@@ -156,7 +156,7 @@ export interface GraphProgressNode {
 export interface SolutionSemanticSnapshot {
   kind: "solution-lod-v1";
   revision: number;
-  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[]; implementationContract?: string[] }>;
+  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[] }>;
   candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[] }>;
   constraints: Array<{ id: string; kind: string; subject: string; target: string; reason: string }>;
   evidence: Array<{ id: string; text: string; source: string; kind: string }>;

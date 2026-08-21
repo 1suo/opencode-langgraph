@@ -104,22 +104,14 @@ function synthesisLines(value: Record<string, unknown>): SchemaLine[] {
 }
 
 function refinementLines(value: Record<string, unknown>): SchemaLine[] {
-  const terminal = value.terminal === true;
-  const contract = asObject(value.implementationContract);
   const children = asArray(value.children);
-  const lines: SchemaLine[] = [L(badge("REFINEMENT", "accent"), terminal ? badge("CERTIFIED TERMINAL", "success") : badge(`SPLIT · ${children.length} CHILDREN`, "info"))];
-  if (contract) {
-    section(lines, "CONTRACT");
-    for (const criterion of asStrings(contract.acceptanceCriteria)) lines.push(L(t(`  ✓ ${clip(criterion)}`, "success")));
-    if (asStrings(contract.allowedVariables).length) lines.push(L(t("  FREE CHOICES ", "muted"), t(asStrings(contract.allowedVariables).map((choice) => clip(choice, 40)).join(" · "))));
-    const covered = asNumbers(contract.coveredCriteria).map((index) => `#${String(index)}`);
-    if (covered.length) lines.push(L(dim(`  COVERS ${covered.join(", ")}`)));
-  }
+  const lines: SchemaLine[] = [L(badge("REFINEMENT", "accent"), badge(`${children.length} NEXT STEPS`, "info"))];
   section(lines, "CHILDREN", children.length);
   for (const child of children.slice(0, 10)) {
     const refines = str(child.edge) !== "partOf";
     const coverage = asNumbers(child.coveredCriteria).map((index) => `#${String(index)}`).join(",");
     lines.push(L(t(`  ${refines ? "⌇" : "■"} `, refines ? "secondary" : "primary"), badge(refines ? "REFINES" : "PART OF", refines ? "secondary" : "primary"), t(` ${clip(child.objective)}`), coverage ? dim(`  · covers ${coverage}${child.key ? ` · ${clip(child.key, 24)}` : ""}`) : child.key ? dim(`  · ${clip(child.key, 24)}`) : dim("")));
+    for (const criterion of asStrings(child.acceptanceCriteria).slice(0, 3)) lines.push(L(t(`      ✓ ${clip(criterion)}`, "success")));
   }
   moreLines(lines, Math.max(0, children.length - 10), "children");
   evidenceLines(lines, value.evidence);
@@ -179,7 +171,7 @@ export function renderSchemaOutput(structured: unknown): SchemaLine[] | undefine
   const value = asObject(structured);
   if (!value) return undefined;
   let lines: SchemaLine[] | undefined;
-  if ("terminal" in value && ("children" in value || "implementationContract" in value)) lines = refinementLines(value);
+  if ("children" in value) lines = refinementLines(value);
   else if ("verdict" in value) lines = verificationLines(value);
   else if ("status" in value && ("changedFiles" in value || "checks" in value)) lines = implementationLines(value);
   else if ("candidates" in value || "select" in value || "resolvedAnswer" in value) lines = synthesisLines(value);
@@ -237,11 +229,11 @@ export function renderSchemaInput(promptInput: string | undefined): SchemaLine[]
   const outputs = asArray(value.outputs);
   section(lines, "OUTPUTS", outputs.length);
   for (const output of outputs.slice(0, 8)) lines.push(L(t(`  ${output.passed === false ? "✗" : "✓"} ${clip(output.kind, 10)}`, output.passed === false ? "error" : "success"), t(` ${clip(output.path ?? output.summary)}`)));
-  const decideOrSplit = asObject(value.decideOrSplit);
-  if (decideOrSplit) {
-    section(lines, "DECIDE OR SPLIT");
-    if (typeof decideOrSplit.carryOutNow === "string") lines.push(L(t("  CARRY OUT NOW ", "muted"), t(clip(decideOrSplit.carryOutNow))));
-    if (typeof decideOrSplit.settleFirst === "string") lines.push(L(t("  SETTLE FIRST ", "muted"), t(clip(decideOrSplit.settleFirst))));
+  const nextSteps = asObject(value.nextStepsContract);
+  if (nextSteps) {
+    section(lines, "NEXT STEPS");
+    if (typeof nextSteps.split === "string") lines.push(L(t("  SPLIT ", "muted"), t(clip(nextSteps.split))));
+    if (typeof nextSteps.leafNote === "string") lines.push(L(t("  LEAVES ", "muted"), dim(clip(nextSteps.leafNote))));
   }
   const positions = asArray(value.successCriteriaPositions);
   if (positions.length) lines.push(L(t("POSITIONS ", "muted"), t(positions.map((position) => `#${String(position.position)} ${clip(position.criterion, 30)}`).join(" · "), "text")));

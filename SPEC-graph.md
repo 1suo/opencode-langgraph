@@ -21,23 +21,18 @@ Agent routing is not WFC, and hierarchy depth is not automatically a LOD.
 4. Child regions materialize only from a successful refinement of a selected approach.
 5. `refines` means the same solution at finer resolution; `partOf` means an independent deliverable region.
 6. Different regions may remain at different LODs simultaneously.
-7. Implementation begins when a required region is certified terminal, not at a configured depth.
+7. Implementation begins when a required region is computed implementable, not at a configured depth.
 8. Equivalent surviving candidates may be delegated as an implementer-local choice when no unresolved external constraint distinguishes them.
 9. A contradiction reopens only the nearest implicated region. Unrelated collapsed regions and all observed artifacts survive.
 10. Selection never implies actionability. Only successful refinement can create implementable leaves.
 
 ## Terminality and refinement
 
-The controller validates terminality; models only propose it. A refinement output is rejected unless:
-
-- `terminal: true` carries a bounded implementation contract whose acceptance criteria cover every supplied success criterion;
-- `terminal: false` supplies children that collectively cover the parent's acceptance criteria, with each child addressing at least one criterion and every child name unique.
-
-A new synthesis choice drops the previous refinement's subtree and contract. Reopening a region does the same for its descendants.
+Actionability is computed by the controller, never declared by a model. Refinement has no terminal outcome: it must split the work into children that collectively cover the parent's acceptance criteria, with each child addressing at least one criterion, every name unique, and each child carrying its own concrete criterion. A region becomes actionable only when the controller derives it: exactly one explicit success criterion, or the depth floor. A new synthesis choice drops the previous refinement's subtree. Reopening a region does the same for its descendants.
 
 ## Solution state
 
-Checkpoints are versioned; schema 4 contains regions (with an optional implementation contract), candidates, typed constraints, normalized evidence, activations, and observed artifacts. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Interrupted runs recorded under older schemas are rejected.
+Checkpoints are versioned; schema 5 contains regions, candidates, typed constraints, normalized evidence, activations, and observed artifacts. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Interrupted runs recorded under older schemas are rejected.
 
 Constraint kinds are `requires`, `excludes`, `supports`, `refutes`, `equivalent`, `acceptance`, and `permission`. Controller code propagates them to a fixed point, detects empty domains, and performs forced collapse. Models propose deltas; they do not mutate controller bookkeeping, and no delta can set a region's status directly.
 
@@ -57,8 +52,8 @@ The built-in capabilities are:
 
 - `inspect`: gather only facts needed to form or distinguish the current alternatives;
 - `synthesize`: form complete candidates, record constraints, and select one without tools; it never declares work ready;
-- `refine`: certify the chosen approach as one bounded change under an implementation contract, or split it into covering children;
-- `implement`: execute one certified terminal change region;
+- `refine`: split the chosen approach into covering next-step children, each with its own criterion;
+- `implement`: execute one computed-implementable change region;
 - `verify`: check artifacts against exact criteria and target failures to regions;
 - `present`: render a collapsed read-only answer.
 
@@ -69,7 +64,7 @@ unformed → inspect
 superposed → synthesize
 selected/unrefined → refine
 refined with children → solve children
-certified terminal (actionable) → implement
+single explicit criterion or depth floor (actionable) → implement
 ```
 
 All capability contracts live in `src/core/solution-lod/roles.ts`. The shared invariant prompt forbids finer variables before collapse. Graph nodes supply typed projected payloads; configuration chooses models and scheduling quanta.
@@ -98,7 +93,7 @@ Turns, tokens, cache reads, and cost are telemetry and per-call scheduling quant
 
 ## Completion
 
-A change region moves through unrefined (selected), actionable (certified terminal), implementing, implemented, and verified. A verifier pass completes it. A bounded defect returns it to actionable under the same contract; a contradicted solution choice reopens the targeted region and drops its refinement. A read-only region completes after presentation. The run completes only when all required live regions are verified or have a verified answer.
+A change region moves through unrefined (selected), collapsed (split), actionable (computed implementable), implementing, implemented, and verified. A verifier pass completes it. A bounded defect returns it to actionable; a contradicted solution choice reopens the targeted region and drops its refinement. A read-only region completes after presentation. The run completes only when all required live regions are verified or have a verified answer.
 
 ## Node contracts
 
