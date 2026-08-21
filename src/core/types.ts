@@ -90,7 +90,7 @@ export interface ConnectorPresetConfig {
   options?: SolutionLodPresetOptions;
 }
 
-export type SolutionPresetRole = "inspect" | "synthesize" | "implement" | "verify" | "present";
+export type SolutionPresetRole = "inspect" | "synthesize" | "refine" | "implement" | "verify" | "present";
 export type SolutionPresetModel = OpenCodeModel["model"] | ModelDefinition;
 export type SolutionRoleModelAssignments = Partial<Record<SolutionPresetRole, ModelDefinition>>;
 export interface SolutionLodPresetOptions {
@@ -151,8 +151,8 @@ export interface GraphProgressNode {
 export interface SolutionSemanticSnapshot {
   kind: "solution-lod-v1";
   revision: number;
-  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[] }>;
-  candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[]; conditionalChildren: string[] }>;
+  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[]; implementationContract?: string[] }>;
+  candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[] }>;
   constraints: Array<{ id: string; kind: string; subject: string; target: string; reason: string }>;
   evidence: Array<{ id: string; text: string; source: string; kind: string }>;
   activations: Array<{ id: string; capability: string; regionId: string; request: string; expectedDelta: string; senderActivationId?: string; status: string; error?: string }>;

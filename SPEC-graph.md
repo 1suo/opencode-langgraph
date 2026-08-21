@@ -17,19 +17,29 @@ Agent routing is not WFC, and hierarchy depth is not automatically a LOD.
 
 1. A region declares the variables permitted at its current LOD.
 2. A region's candidates are mutually distinguishable solution families at that resolution.
-3. Finer variables exist only as conditional definitions attached to candidates.
-4. Conditional regions materialize only after their parent candidate collapses.
+3. Finer structure is created only by refinement after a candidate collapses; candidates never carry pre-committed child definitions.
+4. Child regions materialize only from a successful refinement of a selected approach.
 5. `refines` means the same solution at finer resolution; `partOf` means an independent deliverable region.
 6. Different regions may remain at different LODs simultaneously.
-7. Implementation begins when a required region is actionable, not at a configured depth.
+7. Implementation begins when a required region is certified terminal, not at a configured depth.
 8. Equivalent surviving candidates may be delegated as an implementer-local choice when no unresolved external constraint distinguishes them.
 9. A contradiction reopens only the nearest implicated region. Unrelated collapsed regions and all observed artifacts survive.
+10. Selection never implies actionability. Only successful refinement can create implementable leaves.
+
+## Terminality and refinement
+
+The controller validates terminality; models only propose it. A refinement output is rejected unless:
+
+- `terminal: true` carries a bounded implementation contract whose acceptance criteria cover every supplied success criterion;
+- `terminal: false` supplies children that collectively cover the parent's acceptance criteria, with each child addressing at least one criterion and every child name unique.
+
+A new synthesis choice drops the previous refinement's subtree and contract. Reopening a region does the same for its descendants.
 
 ## Solution state
 
-Checkpoint schema 3 contains regions, candidates, typed constraints, normalized evidence, activations, and observed artifacts. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message.
+Checkpoints are versioned; schema 4 contains regions (with an optional implementation contract), candidates, typed constraints, normalized evidence, activations, and observed artifacts. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Interrupted runs recorded under older schemas are rejected.
 
-Constraint kinds are `requires`, `excludes`, `supports`, `refutes`, `equivalent`, `acceptance`, and `permission`. Controller code propagates them to a fixed point, detects empty domains, performs forced collapse, and exposes conditional children. Models propose deltas; they do not mutate controller bookkeeping.
+Constraint kinds are `requires`, `excludes`, `supports`, `refutes`, `equivalent`, `acceptance`, and `permission`. Controller code propagates them to a fixed point, detects empty domains, and performs forced collapse. Models propose deltas; they do not mutate controller bookkeeping, and no delta can set a region's status directly.
 
 ## Activation network
 
@@ -45,11 +55,22 @@ Every activation sees the complete capability catalog with each capability's adm
 
 The built-in capabilities are:
 
-- `inspect`: gather only facts needed to distinguish the current domain;
-- `synthesize`: form candidates, constraints, selection, and conditional next-LOD definitions without tools;
-- `implement`: execute one collapsed actionable change region;
+- `inspect`: gather only facts needed to form or distinguish the current alternatives;
+- `synthesize`: form complete candidates, record constraints, and select one without tools; it never declares work ready;
+- `refine`: certify the chosen approach as one bounded change under an implementation contract, or split it into covering children;
+- `implement`: execute one certified terminal change region;
 - `verify`: check artifacts against exact criteria and target failures to regions;
 - `present`: render a collapsed read-only answer.
+
+Controller scheduling follows the region lifecycle:
+
+```text
+unformed → inspect
+superposed → synthesize
+selected/unrefined → refine
+refined with children → solve children
+certified terminal (actionable) → implement
+```
 
 All capability contracts live in `src/core/solution-lod/roles.ts`. The shared invariant prompt forbids finer variables before collapse. Graph nodes supply typed projected payloads; configuration chooses models and scheduling quanta.
 
@@ -77,7 +98,7 @@ Turns, tokens, cache reads, and cost are telemetry and per-call scheduling quant
 
 ## Completion
 
-A change region moves through actionable, implementing, implemented, and verified. A verifier pass completes it. A bounded defect returns it to actionable; a contradicted solution choice reopens the targeted region. A read-only region completes after presentation. The run completes only when all required live regions are verified or have a verified answer.
+A change region moves through unrefined (selected), actionable (certified terminal), implementing, implemented, and verified. A verifier pass completes it. A bounded defect returns it to actionable under the same contract; a contradicted solution choice reopens the targeted region and drops its refinement. A read-only region completes after presentation. The run completes only when all required live regions are verified or have a verified answer.
 
 ## Node contracts
 
@@ -91,7 +112,7 @@ The static graph is an engine loop, not a pipeline of model calls. Each node has
   - a throw (schema/validation/timeout) → the activation is marked failed, `{ network, callsUsed, activeActivationId: undefined, phase: "activation-failed" }`.
 - `finish` (pure controller): returns `{ result }` from the final state. It never calls a model.
 
-`mergeSolutionDelta` and the WFC propagation run inside `activate`/`schedule` respectively; models never mutate controller bookkeeping directly. A synthesis delta that would leave every candidate in a region eliminated with none selected is rejected at validation (`validateSolutionDelta`) and retried with guidance — elimination requires genuine defeaters, and a truly dead region is recovered by reopening the parent, not by an empty domain. Recovery deltas (`synthesis:*`, `contradiction:*`, `implement:*`, `verification:*`) carry the network revision, so a changed basis always reschedules while an unchanged one dedupes. Every intermediate `{ network, phase, ... }` is checkpointed, so any of these outputs is a valid restart point for the inspect/prune/resume workflow below.
+`mergeSolutionDelta`, `mergeRefinementOutput`, and the WFC propagation run inside `activate`/`schedule` respectively; models never mutate controller bookkeeping directly. A synthesis delta that would leave every candidate in a region eliminated with none selected is rejected at validation (`validateSolutionDelta`) and retried with guidance — elimination requires genuine defeaters, and a truly dead region is recovered by reopening the parent, not by an empty domain. A refinement output that claims terminality without a bounded contract, splits without children, or fails criterion coverage is rejected at validation (`validateRefinementOutput`) and retried with guidance. Recovery deltas (`synthesis:*`, `refinement:*`, `contradiction:*`, `implement:*`, `verification:*`, `inspection:*`) carry the network revision, so a changed basis always reschedules while an unchanged one dedupes. Every intermediate `{ network, phase, ... }` is checkpointed, so any of these outputs is a valid restart point for the inspect/prune/resume workflow below.
 
 ## Inspect and relaunch workflow
 
@@ -109,8 +130,9 @@ All of inspect/prune/resume operate on the same durable per-thread checkpoint th
 F8 opens the semantic run view:
 
 - the primary pane is the solution LOD tree with relation, LOD, status, viable-domain count, contributing capabilities, and selection;
-- the region pane shows candidates, elimination reasons, conditional children, constraints, evidence, activations, and artifacts;
+- the region pane shows candidates, elimination reasons, the certified implementation contract, constraints, evidence, activations, and artifacts;
 - `G` shows the distinct activation/message network;
+- activation details render input and output by schema semantics — outcome badges (`[CHOSEN]`, `[REJECTED]`), constraint-kind badges (`[REFUTES]`, `requires`, …), refinement contracts with criterion coverage, verification verdicts, check pass/fail, file lists — each tone-mapped to theme colors; unparseable payloads fall back to raw text;
 - output, effective prompt, and raw state remain diagnostic views.
 
 All panes derive from the same latest state-bearing event. Navigation legends are in panel headers and registered keymaps are the source of truth.
@@ -138,4 +160,4 @@ Configuration is optional. Arbitrary user-defined compiled LangGraphs remain fir
 
 ## Release acceptance
 
-A release requires reducer tests for conditional exposure, mixed LODs, propagation, equivalence, convergence, and selective reopening; graph tests for answer and mutation paths, local malformed-output failure, artifact reconciliation, and verifier feedback; TUI view/navigation tests; typecheck/build/pack; clean npm installation; and a real OpenCode mutation with visible F8 state.
+A release requires reducer tests for refinement certification, coverage rejection, mixed LODs, propagation, equivalence, convergence, and selective reopening; graph tests for answer and mutation paths, local malformed-output failure, artifact reconciliation, and verifier feedback; TUI view/navigation tests; typecheck/build/pack; clean npm installation; and a real OpenCode mutation with visible F8 state.

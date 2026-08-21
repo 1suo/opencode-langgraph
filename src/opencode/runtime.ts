@@ -13,7 +13,7 @@ export interface OpenCodeRuntimeOptions {
   worktree: string;
   signal: AbortSignal;
   ask?: (input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) => Promise<void>;
-  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; sessionId?: string; usage?: AgentUsage; prompt?: AgentPromptTrace }) => void;
+  onEvent?: (event: { node: string; status: string; agent: string; model: string; text?: string; state?: Record<string, unknown>; structured?: unknown; sessionId?: string; usage?: AgentUsage; prompt?: AgentPromptTrace }) => void;
 }
 
 function modelId(value: string): { providerID: string; modelID: string } {
@@ -156,9 +156,10 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       const schemaInstruction = composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : "";
       const output = await commandCall(model.command, model.args ?? [], model.env, worktree, `${composedPrompt.system}\n\n${composedPrompt.input}${schemaInstruction}`, this.options.signal);
       if (!output) throw new Error(`Command agent ${input.agent} returned no output`);
-      this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: agent.model, text: output, state: input.state });
       const structured = input.schema ? parseCommandStructured(output) : undefined;
-      return { text: output, structured: structured !== undefined && input.validateStructured ? input.validateStructured(structured) : structured };
+      const validated = structured !== undefined && input.validateStructured ? input.validateStructured(structured) : structured;
+      this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: agent.model, text: output, state: input.state, ...(validated !== undefined ? { structured: validated } : {}) });
+      return { text: output, structured: validated };
     }
     const selected = model.model === "inherit" ? this.options.parentModel : modelId(model.model);
     if (!selected) throw new Error(`Agent ${input.agent} inherits a model, but the parent OpenCode message did not provide one`);
@@ -235,7 +236,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
           const raw = output.structured !== undefined ? output.structured : parseCommandStructured(output.text);
           const structured = input.validateStructured ? input.validateStructured(raw) : raw;
           const measured = usage.turns ? usage : undefined;
-          this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, sessionId, usage: measured });
+          this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, structured, sessionId, usage: measured });
           return { ...output, structured, ...(measured ? { usage: measured } : {}), ...(tools.length ? { tools } : {}), sessionId };
         } catch (error) {
           if (attempt + 1 >= attempts) throw new Error(`${input.node} returned invalid structured output after ${attempts} attempts: ${error instanceof Error ? error.message : String(error)}`);

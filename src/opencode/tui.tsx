@@ -7,6 +7,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import type { ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot } from "../core/types.js";
 import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, type SchemaLine, type SchemaTone } from "./schema-view.js";
 import { releaseVerifierWorkspace } from "./verifier-workspace.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
@@ -168,9 +169,9 @@ type SemanticActivation = SolutionSemanticSnapshot["activations"][number];
 
 const REGION_ICON: Record<string, string> = {
   verified: "\uf00c", implemented: "\uf0c3", collapsed: "\uf0e8", expanded: "\uf0e8", implementing: "\uf04b",
-  actionable: "\uf10c", ready: "\uf10c", superposed: "\uf24e", contradiction: "\uf071", blocked: "\uf071", failed: "\uf00d",
+  unrefined: "\uf0ad", actionable: "\uf10c", ready: "\uf10c", superposed: "\uf24e", contradiction: "\uf071", blocked: "\uf071", failed: "\uf00d",
 };
-const ROLE_ICON: Record<string, string> = { inspect: "\uf002", synthesize: "\uf0eb", implement: "\uf121", verify: "\uf0c3", present: "\uf075" };
+const ROLE_ICON: Record<string, string> = { inspect: "\uf002", synthesize: "\uf0eb", refine: "\uf0ad", implement: "\uf121", verify: "\uf0c3", present: "\uf075" };
 const ACTIVATION_STATUS_ICON: Record<string, string> = { completed: "\uf00c", running: "\uf04b", failed: "\uf00d", superseded: "\uf0e2", waiting: "\uf10c", queued: "\uf10c" };
 const RUN_ICON: Record<string, string> = { completed: "\uf00c", failed: "\uf00d", running: "\uf04b", queued: "\uf10c", pausing: "\uf04c", paused: "\uf04c", interrupted: "\uf04d", cancelled: "\uf04d", pruned: "\uf0c4" };
 
@@ -311,7 +312,9 @@ export function renderStructuredEvent(event: PluginRunEvent): string {
   const lines = [
     `${event.node.replaceAll("_", " ").toUpperCase()}  [${event.status.toUpperCase()}]  ${shortAgent(event.agent)}  ${event.model}`,
   ];
-  if (event.text) {
+  const schemaOutput = event.structured !== undefined ? renderSchemaOutput(event.structured) : undefined;
+  if (schemaOutput) lines.push("", "OUTPUT", ...flattenSchemaLines(schemaOutput).split("\n"));
+  else if (event.text) {
     const text = event.text.replace(/\s+/g, " ").trim();
     lines.push("", "OUTPUT", text.slice(0, 4_000));
   }
@@ -370,7 +373,7 @@ function planRows(snapshot: ProgressSnapshot): PlanRow[] {
 }
 
 function planGlyph(value: string): string {
-  return value === "verified" ? "●" : value === "implemented" ? "■" : value === "collapsed" || value === "expanded" ? "◆" : value === "active" || value === "implementing" ? "▶" : value === "failed" || value === "blocked" || value === "contradiction" ? "!" : value === "removed" ? "·" : value === "ready" || value === "actionable" ? "○" : value === "superposed" ? "◇" : "·";
+  return value === "verified" ? "●" : value === "implemented" ? "■" : value === "collapsed" || value === "expanded" ? "◆" : value === "active" || value === "implementing" ? "▶" : value === "unrefined" ? "⌇" : value === "failed" || value === "blocked" || value === "contradiction" ? "!" : value === "removed" ? "·" : value === "ready" || value === "actionable" ? "○" : value === "superposed" ? "◇" : "·";
 }
 
 export function renderPlanTree(events: PluginRunEvent[]): string {
@@ -467,7 +470,28 @@ function RunDetailView(props: { item: RunListItem; theme: Theme }) {
   );
 }
 
+function schemaToneColor(tone: SchemaTone | undefined, theme: Theme) {
+  if (!tone || tone === "text") return theme.text;
+  if (tone === "muted") return theme.textMuted;
+  return theme[tone];
+}
+
+function SchemaLinesView(props: { lines: SchemaLine[]; theme: Theme }) {
+  return (
+    <box flexDirection="column">
+      <For each={props.lines}>{(line) => (
+        <text wrapMode="word">
+          <For each={line.spans}>{(span) => span.bold ? <text fg={schemaToneColor(span.tone, props.theme)}><b>{span.text}</b></text> : <text fg={schemaToneColor(span.tone, props.theme)}>{span.text}</text>}</For>
+        </text>
+      )}</For>
+    </box>
+  );
+}
+
 function ActivationDetailView(props: { activation: SemanticActivation; event?: PluginRunEvent; promptEvent?: PluginRunEvent; tab: "output" | "prompt"; onTab: (tab: "output" | "prompt") => void; theme: Theme }) {
+  const outputLines = createMemo(() => props.event?.structured !== undefined ? renderSchemaOutput(props.event.structured) : undefined);
+  const inputLines = createMemo(() => renderSchemaInput(props.promptEvent?.prompt?.input));
+  const promptFallback = () => effectivePrompt(props.promptEvent);
   return (
     <box flexDirection="column" paddingX={1} gap={1}>
       <box flexDirection="row" gap={1}>
@@ -483,8 +507,18 @@ function ActivationDetailView(props: { activation: SemanticActivation; event?: P
       <box flexDirection="row" gap={2} flexShrink={0}>
         <text onMouseUp={() => props.onTab("output")} fg={props.tab === "output" ? props.theme.primary : props.theme.textMuted}><b>Output [O]</b></text>
         <text onMouseUp={() => props.onTab("prompt")} fg={props.tab === "prompt" ? props.theme.primary : props.theme.textMuted}>Prompt [P]</text>
+        <Show when={props.tab === "output" && outputLines()}><text fg={props.theme.success}>(schema view · raw text in state dump)</text></Show>
+        <Show when={props.tab === "prompt" && inputLines()}><text fg={props.theme.success}>(schema view)</text></Show>
       </box>
-      <text fg={props.theme.text} wrapMode="word">{props.tab === "output" ? (props.event?.text ?? "No output recorded yet.") : effectivePrompt(props.promptEvent)}</text>
+      <Show when={props.tab === "output"} fallback={
+        <Show when={inputLines()} fallback={<text fg={props.theme.text} wrapMode="word">{promptFallback()}</text>}>
+          {(lines) => <SchemaLinesView lines={lines()} theme={props.theme} />}
+        </Show>
+      }>
+        <Show when={outputLines()} fallback={<text fg={props.theme.text} wrapMode="word">{props.event?.text ?? "No output recorded yet."}</text>}>
+          {(lines) => <SchemaLinesView lines={lines()} theme={props.theme} />}
+        </Show>
+      </Show>
     </box>
   );
 }
@@ -508,6 +542,7 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
         <text fg={props.theme.textMuted}>{item().viable}/{item().total} viable</text>
       </box>
       <text fg={props.theme.text} wrapMode="word"><b>{item().objective}</b></text>
+      <Show when={item().implementationContract?.length}><text fg={props.theme.success} wrapMode="word">✓ certified: {item().implementationContract!.join(" · ")}</text></Show>
       <Show when={artifacts().length}><text fg={props.theme.textMuted}>ARTIFACTS</text></Show>
       <For each={artifacts()}>{(artifact) => <text fg={artifact.passed === false ? props.theme.error : props.theme.success} wrapMode="word">  {artifact.kind} {artifact.path ?? artifact.summary}</text>}</For>
       <text fg={props.theme.textMuted}>CANDIDATES</text>
@@ -515,7 +550,6 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
         <For each={candidates()}>{(candidate) => <box flexDirection="column">
           <text fg={statusTone(candidate.status, props.theme)}>  {candidate.status === "selected" ? "◆" : candidate.status === "eliminated" ? "×" : "◇"} {candidate.proposition}</text>
           <Show when={candidate.eliminationReasons.length}><text fg={props.theme.error}>    └─ {candidate.eliminationReasons.join("; ")}</text></Show>
-          <Show when={candidate.conditionalChildren.length}><text fg={props.theme.secondary}>    ↳ next LOD: {candidate.conditionalChildren.join(" · ")}</text></Show>
         </box>}</For>
       </Show>
       <Show when={constraints().length}><text fg={props.theme.textMuted}>CONSTRAINTS</text></Show>
@@ -650,7 +684,7 @@ function createGraphToggleController(api: TuiPluginApi): GraphToggleController {
   };
 }
 
-const solutionRoles: SolutionPresetRole[] = ["inspect", "synthesize", "implement", "verify", "present"];
+const solutionRoles: SolutionPresetRole[] = ["inspect", "synthesize", "refine", "implement", "verify", "present"];
 
 function commandAvailable(command: string): boolean {
   return (process.env.PATH ?? "").split(path.delimiter).some((directory) => {

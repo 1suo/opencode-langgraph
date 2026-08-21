@@ -16,6 +16,7 @@ export interface PluginRunEvent {
   model: string;
   text?: string;
   state?: unknown;
+  structured?: unknown;
   sessionId?: string;
   usage?: AgentUsage;
   prompt?: AgentPromptTrace;

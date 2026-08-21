@@ -19,6 +19,7 @@ const server = await createOpencodeServer({
       build: { permission: { edit: "allow", bash: "allow", webfetch: "allow", external_directory: "allow" } },
       "langgraph-inspector": { mode: "subagent", permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } },
       "langgraph-synthesizer": { mode: "subagent", permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } },
+      "langgraph-refiner": { mode: "subagent", permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } },
       "langgraph-verifier": { mode: "subagent", permission: { edit: "deny", bash: "allow", webfetch: "deny", external_directory: "allow" } },
       "langgraph-presenter": { mode: "primary", permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } },
     },
@@ -67,8 +68,8 @@ console.log(`regions=${network.regions.length} constraints=${network.constraints
 for (const region of network.regions as Array<{ id: string; lod: number; status: string; delivery: string; selectedCandidateIds: string[]; contradiction?: string }>) {
   console.log(`  region ${region.id} lod=${region.lod} status=${region.status} delivery=${region.delivery} selected=${region.selectedCandidateIds.length}${region.contradiction ? ` contradiction="${region.contradiction.slice(0, 100)}"` : ""}`);
 }
-for (const candidate of network.candidates as Array<{ id: string; regionId: string; status: string; proposition: string; eliminationReasons: string[]; nextLod: unknown[] }>) {
-  console.log(`  candidate ${candidate.id} [${candidate.status}] nextLod=${candidate.nextLod.length} | ${candidate.proposition.slice(0, 70)}${candidate.eliminationReasons.length ? ` << ${candidate.eliminationReasons.join("; ").slice(0, 90)}` : ""}`);
+for (const candidate of network.candidates as Array<{ id: string; regionId: string; status: string; proposition: string; eliminationReasons: string[] }>) {
+  console.log(`  candidate ${candidate.id} [${candidate.status}] | ${candidate.proposition.slice(0, 70)}${candidate.eliminationReasons.length ? ` << ${candidate.eliminationReasons.join("; ").slice(0, 90)}` : ""}`);
 }
 for (const constraint of network.constraints as Array<{ kind: string; subject: string; target: string; reason: string }>) {
   console.log(`  constraint ${constraint.kind}: ${constraint.subject} -> ${constraint.target} (${constraint.reason.slice(0, 60)})`);

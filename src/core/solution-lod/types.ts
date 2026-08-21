@@ -1,18 +1,26 @@
 import { z } from "zod";
 import type { AgentCallLimits, AgentUsage } from "../types.js";
 
-export type Capability = "inspect" | "synthesize" | "implement" | "verify" | "present";
+export type Capability = "inspect" | "synthesize" | "refine" | "implement" | "verify" | "present";
 export type RegionEdge = "root" | "refines" | "partOf";
-export type RegionStatus = "unformed" | "superposed" | "collapsed" | "actionable" | "implementing" | "implemented" | "verified" | "contradiction" | "blocked";
+export type RegionStatus = "unformed" | "superposed" | "unrefined" | "collapsed" | "actionable" | "implementing" | "implemented" | "verified" | "contradiction" | "blocked";
 export type CandidateStatus = "possible" | "eliminated" | "selected" | "equivalent";
 
-export interface ConditionalRegionDefinition {
+export interface ChildRegionDefinition {
   key: string;
   objective: string;
   edge: Exclude<RegionEdge, "root">;
   delivery?: "answer" | "change";
   allowedVariables: string[];
   acceptanceCriteria: string[];
+  coveredCriteria: number[];
+}
+
+export interface ImplementationContract {
+  delivery?: "answer" | "change";
+  allowedVariables: string[];
+  acceptanceCriteria: string[];
+  coveredCriteria: number[];
 }
 
 export interface SolutionCandidate {
@@ -23,7 +31,6 @@ export interface SolutionCandidate {
   status: CandidateStatus;
   evidenceIds: string[];
   eliminationReasons: string[];
-  nextLod: ConditionalRegionDefinition[];
 }
 
 export interface SolutionRegion {
@@ -46,6 +53,8 @@ export interface SolutionRegion {
   artifactIds: string[];
   answer?: string;
   contradiction?: string;
+  implementationContract?: ImplementationContract;
+  coveredCriteria?: number[];
 }
 
 export interface SolutionEvidence {
@@ -102,6 +111,7 @@ export interface ActiveBatchEntry {
 /** The network effect of one finished activation task, or null when the task errored. */
 export type ActivationNetworkDelta =
   | { kind: "delta"; delta: SolutionDelta }
+  | { kind: "refinement"; output: RefinementOutput }
   | { kind: "implementation"; output: ImplementationOutput; changedFiles: string[] }
   | { kind: "verification"; output: VerificationOutput }
   | { kind: "presentation"; answer: string };
@@ -156,6 +166,7 @@ export interface SolutionNetwork {
 export interface SolutionRoleLimits {
   inspect: AgentCallLimits;
   synthesize: AgentCallLimits;
+  refine: AgentCallLimits;
   implement: AgentCallLimits;
   verify: AgentCallLimits;
   present: AgentCallLimits;
@@ -164,18 +175,20 @@ export interface SolutionRoleLimits {
 export const DEFAULT_SOLUTION_ROLE_LIMITS: SolutionRoleLimits = {
   inspect: { maxTurns: 32, maxContextTokens: 160_000 },
   synthesize: { maxTurns: 8, maxContextTokens: 96_000 },
+  refine: { maxTurns: 8, maxContextTokens: 96_000 },
   implement: { maxTurns: 32, maxContextTokens: 160_000 },
   verify: { maxTurns: 16, maxContextTokens: 96_000 },
   present: { maxTurns: 4, maxContextTokens: 48_000 },
 };
 
-const ConditionalRegionSchema = z.object({
+const ChildRegionSchema = z.object({
   key: z.string().min(1).describe("A short stable name for this child."),
   objective: z.string().min(1).describe("What this child must decide or deliver."),
   edge: z.enum(["refines", "partOf"]).describe("Use 'refines' for a choice that becomes meaningful only after choosing the parent. Use 'partOf' for an independent required deliverable."),
   delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when this child must answer a question without changing files. Otherwise use 'change'."),
   allowedVariables: z.array(z.string()).default([]).describe("The only aspects this child may choose."),
   acceptanceCriteria: z.array(z.string()).default([]).describe("Observable conditions that prove this child is complete."),
+  coveredCriteria: z.array(z.number().int().nonnegative()).default([]).describe("Positions (0-based) of the parent success criteria this child addresses."),
 });
 
 export const SolutionDeltaSchema = z.object({
@@ -192,7 +205,6 @@ export const SolutionDeltaSchema = z.object({
     outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible").describe("Whether this alternative remains possible, is rejected, is chosen, or is interchangeable with another."),
     reasons: z.array(z.string()).default([]).describe("For a rejected alternative, explain why it should not be chosen. Do not put supporting facts here."),
     evidenceRefs: z.array(z.string()).default([]).describe("References to facts that justify the stated outcome."),
-    nextLod: z.array(ConditionalRegionSchema).default([]).describe("Children revealed by choosing this alternative. Add only a later real choice ('refines') or an independent required deliverable ('partOf'). Do not add routine steps, files, tests, or verification. An empty list means the alternative is ready to implement."),
   })).default([]).describe("Complete alternatives to the same choice. They must not be combined, and exactly one should be chosen. Put independent deliverables under the chosen alternative as 'partOf' children, not as competing alternatives."),
   constraints: z.array(z.object({
     kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]),
@@ -201,7 +213,6 @@ export const SolutionDeltaSchema = z.object({
     reason: z.string().default("").describe("Why this relationship is true, using supplied facts."),
   })).default([]).describe("Relationships between referenced items: 'requires' means one needs another; 'excludes' means they cannot coexist; 'supports' means one strengthens another; 'refutes' means one contradicts another; 'equivalent' means they are interchangeable."),
   select: z.array(z.string()).default([]).describe("Keys or references of the chosen alternative. Choose one, except that interchangeable alternatives may be selected together."),
-  actionable: z.boolean().optional().describe("Set true only when the chosen alternative has no children and is ready to carry out."),
   answer: z.string().optional().describe("Answer text for a goal already marked as answer-only."),
   resolvedAnswer: z.object({
     answer: z.string().min(1).describe("The complete answer to give the user."),
@@ -209,7 +220,7 @@ export const SolutionDeltaSchema = z.object({
     evidenceRefs: z.array(z.string()).default([]).describe("References to facts that support the answer. Cite at least one existing fact or a fact supplied with this result; an uncited answer is rejected."),
   }).optional().describe("Use only when the user's request can be fully answered without changing files."),
   activations: z.array(z.object({
-    capability: z.enum(["inspect", "synthesize", "implement", "verify", "present"]).describe("The kind of help needed."),
+    capability: z.enum(["inspect", "synthesize", "refine", "implement", "verify", "present"]).describe("The kind of help needed."),
     regionId: z.string().optional().describe("The supplied goal reference. Omit it to use the current goal."),
     request: z.string().min(1).describe("One specific task for the requested helper."),
     expectedDelta: z.string().min(1).describe("A short stable name for the expected new information or work. It prevents duplicate requests."),
@@ -218,6 +229,20 @@ export const SolutionDeltaSchema = z.object({
   })).default([]).describe("Requests for another helper. Leave empty unless one missing fact or proven conflict prevents your assigned work."),
 });
 export type SolutionDelta = z.infer<typeof SolutionDeltaSchema>;
+
+export const RefinementOutputSchema = z.object({
+  evidence: SolutionDeltaSchema.shape.evidence,
+  terminal: z.boolean().default(false).describe("True only when the chosen approach can be carried out by ordinary coding judgment inside one bounded change. When true, supply an implementationContract and no children. When false, supply children and no contract."),
+  children: z.array(ChildRegionSchema).default([]).describe("Sub-goals that must each be settled before the parent can be carried out. Together they must address every success criterion of the parent, and each child must address at least one. Add only a later real choice ('refines') or an independent required deliverable ('partOf'). Never add routine steps, files, tests, or verification."),
+  implementationContract: z.object({
+    delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when carrying out the work means answering a question without changing files. Otherwise use 'change'."),
+    allowedVariables: z.array(z.string()).default([]).describe("The choices the implementer may make freely without returning for another decision."),
+    acceptanceCriteria: z.array(z.string().min(1)).min(1).describe("The bounded observable conditions that prove this change is complete."),
+    coveredCriteria: z.array(z.number().int().nonnegative()).default([]).describe("Positions (0-based) of the supplied success criteria the acceptance criteria replace or sharpen."),
+  }).optional().describe("Required when terminal is true: the bounded description of the single change to make."),
+  activations: SolutionDeltaSchema.shape.activations,
+});
+export type RefinementOutput = z.infer<typeof RefinementOutputSchema>;
 
 export const ImplementationOutputSchema = z.object({
   status: z.enum(["completed", "blocked"]),

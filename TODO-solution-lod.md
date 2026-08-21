@@ -50,3 +50,13 @@ This file tracks the clean state-v3 replacement of the fixed progressive-lod pip
 - [x] Run typecheck, unit tests, build, and inspect a clean package tarball.
 - [x] Run a real OpenCode task requiring inspection, alternative collapse, finer LOD resolution, implementation, corrective feedback, and verification.
 - [x] Fault-test malformed output and scheduling-quantum exhaustion without discarding state or prompting through a budget loop.
+
+## Selection/refinement split (state-v4)
+
+- [x] Remove `nextLod` and `actionable` from synthesizer output; selection never implies actionability.
+- [x] Add the `refine` capability, role contract, and refinement output schema (terminal + implementation contract, or covering children).
+- [x] Validate terminality in the controller: reject unbounded contracts, uncovered criteria, empty non-terminal splits, duplicate child keys.
+- [x] Replace the `children.length ? collapsed : actionable` rule with explicit refinement state (`unrefined`, contract-backed `actionable`).
+- [x] Schedule by lifecycle: unformed→inspect, superposed→synthesize, unrefined→refine, collapsed→solve children, certified terminal→implement.
+- [x] Drop stale refinement subtrees and contracts on re-selection, blocked implementation, and reopening.
+- [x] Bump checkpoint schema to 4 and reject older interrupted runs.
