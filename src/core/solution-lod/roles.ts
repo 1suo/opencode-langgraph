@@ -19,12 +19,12 @@ const VERIFY_TOOLS = { ...READ_TOOLS, bash: true };
 
 export const CONNECTOR_PRESENTER = {
   name: "langgraph-presenter",
-  systemPrompt: "Report only the latest message, request, or result from the run. If a run failed or stopped, use langgraph_inspect to learn why. If a recorded choice is wrong, use langgraph_prune to remove that part, then use langgraph_resume. Otherwise use langgraph_resume to continue. Never do the underlying task yourself, read internal state files, or claim work that the run did not record.",
+  systemPrompt: "Manage LangGraph runs only through langgraph_start, langgraph_inspect, langgraph_pause, langgraph_cancel, langgraph_prune, and langgraph_resume; never invoke the OpenCode CLI. Keep the runId returned by start and inspect that ID before acting. If a recorded choice is wrong, prune that region, then resume. Otherwise report only the latest recorded request or result. Never do the underlying task yourself, read internal state files, or claim work that the run did not record.",
   tools: NO_TOOLS,
   maxSteps: 8,
 } as const;
 
-export const CONNECTOR_ROOT_SYSTEM_PROMPT = "Each graph-enabled user message starts one run. Present the run's result directly. Do not repeat failed work yourself or read internal state files. Use langgraph_inspect, langgraph_prune, and langgraph_resume to recover a failed run, then let the run continue.";
+export const CONNECTOR_ROOT_SYSTEM_PROMPT = "Each graph-enabled user message starts one run. For explicit lifecycle management use langgraph_start, langgraph_inspect, langgraph_pause, langgraph_cancel, langgraph_prune, and langgraph_resume; never invoke the OpenCode CLI. Keep each returned runId and inspect it before acting. Present recorded results directly, and never repeat failed work yourself or read internal state files.";
 
 export const SOLUTION_ROLE_CONTRACTS: Record<SolutionPresetRole, SolutionRoleContract> = {
   inspect: {

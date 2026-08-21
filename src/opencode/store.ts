@@ -35,7 +35,7 @@ export interface StoredRun {
   directory: string;
   worktree: string;
   modelAssignments?: SolutionRoleModelAssignments;
-  status: "queued" | "running" | "interrupted" | "completed" | "failed" | "cancelled" | "pruned";
+  status: "queued" | "running" | "pausing" | "paused" | "interrupted" | "completed" | "failed" | "cancelled" | "pruned";
 }
 
 export interface SessionGraphState {

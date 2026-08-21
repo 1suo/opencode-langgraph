@@ -1002,12 +1002,12 @@ describe("OpenCode automatic graph routing", () => {
       const hooks = await server({ client, directory: project, worktree: project } as never);
       const config = {} as { command?: Record<string, unknown>; agent?: Record<string, { tools?: Record<string, boolean>; maxSteps?: number; permission?: Record<string, unknown> }> };
       await hooks.config?.(config as never);
-      expect(Object.keys(config.command ?? {})).toEqual(["run-graph", "graph-resume", "graph-cancel"]);
+      expect(Object.keys(config.command ?? {})).toEqual(["run-graph", "graph-resume", "graph-pause", "graph-cancel"]);
       expect(config.agent?.["langgraph-presenter"]).toMatchObject({ maxSteps: 8, tools: { read: false, bash: false, edit: false, task: false, skill: false } });
       expect(config.agent?.["langgraph-inspector"]).toMatchObject({ maxSteps: 32, tools: { read: true, bash: false, skill: false }, permission: { bash: "deny", external_directory: "deny" } });
       expect(config.agent?.["langgraph-synthesizer"]).toMatchObject({ maxSteps: 8, tools: { read: false, bash: false, skill: false }, permission: { bash: "deny", external_directory: "deny" } });
       expect(config.agent?.["langgraph-verifier"]).toMatchObject({ tools: { bash: true, edit: false, skill: false }, permission: { bash: "allow", edit: "deny", external_directory: "deny" } });
-      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_inspect", "langgraph_prune", "langgraph_resume"]);
+      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_start", "langgraph_inspect", "langgraph_prune", "langgraph_resume", "langgraph_cancel", "langgraph_pause"]);
       const output = {
         message: { id: "message-1", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
         parts: [{ id: "part-1", messageID: "message-1", sessionID: "root", type: "text", text: "What is 2+2?" }],
@@ -1041,6 +1041,14 @@ describe("OpenCode automatic graph routing", () => {
         originalTask: "What is 2+2?",
         conversationContext: "ASSISTANT: The answer is 4.\nASSISTANT: The answer is 4.",
       });
+      const toolContext = { sessionID: "root", directory: project, worktree: project, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
+      const startOutput = await (hooks.tool?.langgraph_start.execute as (args: { task: string }, ctx: never) => Promise<string>)({ task: "What is 2+2?" }, toolContext);
+      const started = JSON.parse(startOutput) as { runId: string; status: string };
+      expect(started).toMatchObject({ status: "running" });
+      deadline = Date.now() + 2_000;
+      while (!(["completed", "failed"] as string[]).includes(readStoredRun(started.runId).status) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(["completed", "failed"]).toContain(readStoredRun(started.runId).status);
+      expect(JSON.parse(await (hooks.tool?.langgraph_inspect.execute as (args: { runId: string }, ctx: never) => Promise<string>)({ runId: started.runId }, toolContext)).runId).toBe(started.runId);
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
@@ -1147,6 +1155,9 @@ describe("OpenCode automatic graph routing", () => {
 
       await expect((hooks.tool?.langgraph_prune.execute as (args: { runId?: string; regionId: string }, ctx: never) => Promise<string>)({ regionId: "r1" }, toolContext)).rejects.toThrow(/Cannot prune queued run/);
       await expect((hooks.tool?.langgraph_resume.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext)).rejects.toThrow(/cannot be resumed/);
+      await expect((hooks.tool?.langgraph_pause.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext)).rejects.toThrow(/queued and cannot be paused/);
+      expect(JSON.parse(await (hooks.tool?.langgraph_cancel.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext))).toMatchObject({ runId, status: "cancelled" });
+      expect(readStoredRun(runId).status).toBe("cancelled");
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
@@ -1246,6 +1257,7 @@ describe("OpenCode graph viewer", () => {
       ["q", "back"], ["tab", "cycle"], ["1", "tree"], ["2", "detail"], ["r", "runs"], ["o", "output"],
       ["p", "prompt"], ["return", "inspect"], ["up", "up"], ["j", "down"], ["left", "left"],
       ["d", "right"], ["pageup", "pageUp"], ["pagedown", "pageDown"], ["home", "home"], ["end", "end"],
+      ["n", "newRun"], ["space", "pause"], ["u", "resume"], ["e", "repair"], ["x", "cancel"],
     ] as const) {
       const binding = layer.bindings.find((candidate) => candidate.key === key);
       expect(binding).toBeDefined();

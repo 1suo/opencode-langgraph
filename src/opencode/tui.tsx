@@ -6,7 +6,8 @@ import path from "node:path";
 import { accessSync, constants, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import type { AgentUsage, ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot, UsageStreamingEstimate } from "../core/types.js";
-import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, type PluginRunEvent } from "./store.js";
+import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { releaseVerifierWorkspace } from "./verifier-workspace.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
   const value = api.route.current.name === "session" && "params" in api.route.current ? api.route.current.params?.sessionID : undefined;
@@ -57,6 +58,11 @@ export interface GraphControls {
   pageDown(): void;
   home(): void;
   end(): void;
+  newRun(): void;
+  pause(): void;
+  resume(): void;
+  repair(): void;
+  cancel(): void;
 }
 
 export function graphNavigationLayer(controls: GraphControls) {
@@ -78,6 +84,11 @@ export function graphNavigationLayer(controls: GraphControls) {
       { name: "langgraph.navigate.page_down", title: "LangGraph: page down", run: controls.pageDown },
       { name: "langgraph.navigate.home", title: "LangGraph: go to start", run: controls.home },
       { name: "langgraph.navigate.end", title: "LangGraph: go to end", run: controls.end },
+      { name: "langgraph.run.new", title: "LangGraph: start new run", run: controls.newRun },
+      { name: "langgraph.run.pause", title: "LangGraph: pause run", run: controls.pause },
+      { name: "langgraph.run.resume", title: "LangGraph: resume run", run: controls.resume },
+      { name: "langgraph.run.repair", title: "LangGraph: repair selected region", run: controls.repair },
+      { name: "langgraph.run.cancel", title: "LangGraph: cancel run", run: controls.cancel },
     ],
     bindings: [
       { key: "escape", cmd: "langgraph.graph.back" },
@@ -105,6 +116,11 @@ export function graphNavigationLayer(controls: GraphControls) {
       { key: "pagedown", cmd: "langgraph.navigate.page_down" },
       { key: "home", cmd: "langgraph.navigate.home" },
       { key: "end", cmd: "langgraph.navigate.end" },
+      { key: "n", cmd: "langgraph.run.new" },
+      { key: "space", cmd: "langgraph.run.pause" },
+      { key: "u", cmd: "langgraph.run.resume" },
+      { key: "e", cmd: "langgraph.run.repair" },
+      { key: "x", cmd: "langgraph.run.cancel" },
     ],
   };
 }
@@ -156,7 +172,7 @@ const REGION_ICON: Record<string, string> = {
 };
 const ROLE_ICON: Record<string, string> = { inspect: "\uf002", synthesize: "\uf0eb", implement: "\uf121", verify: "\uf0c3", present: "\uf075" };
 const ACTIVATION_STATUS_ICON: Record<string, string> = { completed: "\uf00c", running: "\uf04b", failed: "\uf00d", waiting: "\uf10c", queued: "\uf10c" };
-const RUN_ICON: Record<string, string> = { completed: "\uf00c", failed: "\uf00d", running: "\uf04b", queued: "\uf10c", interrupted: "\uf04d", cancelled: "\uf04d", pruned: "\uf0c4" };
+const RUN_ICON: Record<string, string> = { completed: "\uf00c", failed: "\uf00d", running: "\uf04b", queued: "\uf10c", pausing: "\uf04c", paused: "\uf04c", interrupted: "\uf04d", cancelled: "\uf04d", pruned: "\uf0c4" };
 
 const regionIcon = (status: string) => REGION_ICON[status] ?? "\uf10c";
 const roleIcon = (capability: string) => ROLE_ICON[capability] ?? "\uf111";
@@ -264,7 +280,7 @@ type ProgressNode = ProgressSnapshot["nodes"][number];
 
 function statusTone(value: string, theme: Theme) {
   if (value === "failed" || value === "blocked" || value === "contradiction") return theme.error;
-  if (value === "active" || value === "implementing" || value === "interrupted" || value === "pruned" || value === "superposed") return theme.warning;
+  if (value === "active" || value === "implementing" || value === "pausing" || value === "paused" || value === "interrupted" || value === "pruned" || value === "superposed") return theme.warning;
   if (value === "verified" || value === "completed") return theme.success;
   if (value === "ready" || value === "implemented") return theme.info;
   if (value === "expanded") return theme.secondary;
@@ -744,11 +760,12 @@ export function graphHelpText(): string {
 
 USE
 /graph-open inspect past run · /graph-select choose · /graph-models assign roles · /graph-toggle auto
-/run-graph <task> once · /graph-resume <answer> · /graph-cancel stop
+/run-graph <task> once · /graph-pause · /graph-resume <answer> · /graph-cancel stop
 
 VIEW · panels
 1 tree · 2 details · R runs
 Tab next pane · ↑↓ select · Enter open/inspect
+N new · Space pause · U resume · E repair · X cancel
 O output · P prompt · Q back
 
 DESIGN · .opencode/langgraph.ts
@@ -803,6 +820,18 @@ function Sidebar(props: { api: TuiPluginApi; session_id: string }) {
   );
 }
 
+async function askManagementAgent(api: TuiPluginApi, parentSessionId: string, text: string): Promise<void> {
+  try {
+    const created = await api.client.session.create({ directory: projectPath(api), parentID: parentSessionId, title: "LangGraph management", agent: "langgraph-presenter" });
+    const id = created.data?.id;
+    if (!id) throw new Error("Could not create a LangGraph management session.");
+    await api.client.session.promptAsync({ sessionID: id, directory: projectPath(api), agent: "langgraph-presenter", parts: [{ type: "text", text }] });
+    api.ui.toast({ variant: "success", message: "LangGraph management action started." });
+  } catch (error) {
+    api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMessageId?: string; runID?: string; chooser?: boolean }) {
   const [rootSessionId, setRootSessionId] = createSignal(props.rootSessionId);
   const [runID, setRunID] = createSignal(props.runID);
@@ -851,6 +880,11 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const selectedActivationEvent = createMemo(() => { const activation = selectedActivation(); return activation ? eventByNode().get(`${activation.capability}:${activation.regionId}`) : undefined; });
   const selectedActivationPrompt = createMemo(() => { const activation = selectedActivation(); return activation ? promptByNode().get(`${activation.capability}:${activation.regionId}`) : undefined; });
   const selectedRunItem = createMemo(() => runItems().find((item) => item.run.runId === selectedRunId()));
+  const managedRun = (): StoredRun | undefined => {
+    const id = view() === "runs" ? selectedRunId() : runID() ?? latestRunId(events());
+    if (!id) return;
+    try { return readStoredRun(id, stateHome(props.api)); } catch { return; }
+  };
   const requestRender = () => props.api.renderer.requestRender();
   const setFocusPanel = (value: "tree" | "detail") => { setFocus(value); requestRender(); };
   const back = () => {
@@ -878,6 +912,76 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     setView("tree");
     setFocusPanel("tree");
   };
+  const newRun = () => {
+    const current = managedRun();
+    const parent = current?.rootSessionId ?? rootSessionId();
+    if (!parent) return props.api.ui.toast({ variant: "warning", message: "Open a session or past run before starting a graph." });
+    const graph = current?.graph ?? readSessionGraphName(parent, stateHome(props.api));
+    props.api.ui.dialog.replace(() => props.api.ui.DialogPrompt({
+      title: "Start LangGraph run",
+      placeholder: "Task for the graph",
+      onConfirm(task) {
+        if (!task.trim()) return;
+        props.api.ui.dialog.clear();
+        void askManagementAgent(props.api, parent, `Call langgraph_start with task ${JSON.stringify(task.trim())}${graph ? ` and graph ${JSON.stringify(graph)}` : ""}, then report its runId.`);
+      },
+      onCancel: () => props.api.ui.dialog.clear(),
+    }));
+  };
+  const pause = () => {
+    const run = managedRun();
+    if (!run || run.status !== "running") return props.api.ui.toast({ variant: "warning", message: "Select a running run to pause." });
+    void (async () => {
+      try {
+        const configured = (await loadConnectorDefinition(run.worktree)).graphs[run.graph];
+        const snapshot = await configured?.graph.getState({ configurable: { thread_id: run.runId } });
+        if (!snapshot?.values || Object.keys(snapshot.values as object).length === 0) throw new Error("This run has not reached a durable checkpoint yet.");
+        const current = readStoredRun(run.runId, stateHome(props.api));
+        if (current.status !== "running") throw new Error(`This run is already ${current.status}.`);
+        writeStoredRun({ ...current, status: "pausing" });
+        setRunsVersion((value) => value + 1);
+        props.api.ui.toast({ variant: "warning", message: `Pausing ${run.runId.slice(0, 8)} at its latest checkpoint.` });
+      } catch (error) {
+        props.api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+      }
+    })();
+  };
+  const resume = () => {
+    const run = managedRun();
+    if (!run || !["paused", "interrupted", "pruned"].includes(run.status)) return props.api.ui.toast({ variant: "warning", message: "Select a paused, interrupted, or pruned run to resume." });
+    void askManagementAgent(props.api, run.rootSessionId, `Call langgraph_resume with runId ${run.runId}. Do not do the underlying task yourself.`);
+  };
+  const repair = () => {
+    const run = managedRun();
+    const regionId = selectedRegionId();
+    if (!run || run.graph !== "solution-lod" || !regionId) return props.api.ui.toast({ variant: "warning", message: "Select a solution region to repair." });
+    if (run.status === "running" || run.status === "queued" || run.status === "pausing") return props.api.ui.toast({ variant: "warning", message: "Pause or wait for the run before repairing it." });
+    props.api.ui.dialog.replace(() => props.api.ui.DialogPrompt({
+      title: `Repair ${regionId}`,
+      placeholder: "What was wrong or what should change?",
+      onConfirm(reason) {
+        if (!reason.trim()) return;
+        props.api.ui.dialog.clear();
+        void askManagementAgent(props.api, run.rootSessionId, `Call langgraph_prune with runId ${run.runId}, regionId ${regionId}, and reason ${JSON.stringify(reason.trim())}. Then call langgraph_resume for the same run. Do not do the underlying task yourself.`);
+      },
+      onCancel: () => props.api.ui.dialog.clear(),
+    }));
+  };
+  const cancel = () => {
+    const run = managedRun();
+    if (!run || !["running", "queued", "pausing", "paused", "interrupted"].includes(run.status)) return props.api.ui.toast({ variant: "warning", message: "Select an active, paused, or interrupted run to cancel." });
+    props.api.ui.dialog.replace(() => props.api.ui.DialogConfirm({
+      title: "Cancel LangGraph run",
+      message: `Cancel ${run.runId.slice(0, 8)}? This cannot be resumed without pruning a region.`,
+      onConfirm() {
+        writeStoredRun({ ...run, status: "cancelled" });
+        void releaseVerifierWorkspace(run.runId);
+        setRunsVersion((value) => value + 1);
+        props.api.ui.dialog.clear();
+      },
+      onCancel: () => props.api.ui.dialog.clear(),
+    }));
+  };
   const controls: GraphControls = {
     back,
     cycle: () => setFocusPanel(focus() === "tree" ? "detail" : "tree"),
@@ -895,6 +999,11 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     pageDown: () => { if (focus() === "detail") detailBox?.scrollBy(12); else moveSelection(5); },
     home: () => { if (focus() === "detail") detailBox?.scrollTo(0); else moveSelection(-1_000); },
     end: () => { if (focus() === "detail" && detailBox) detailBox.scrollTo(detailBox.scrollHeight); else moveSelection(1_000); },
+    newRun,
+    pause,
+    resume,
+    repair,
+    cancel,
   };
   const navigation = graphNavigationLayer(controls);
   const disposeNavigation = props.api.keymap.registerLayer({
@@ -927,7 +1036,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
       </box>
       <box flexDirection="row" gap={2} flexShrink={0}>
         <text fg={theme().textMuted}>RUN::{currentRun().at(-1)?.runId ? middleEllipsis(currentRun().at(-1)!.runId!, 12) : "idle"}</text>
-        <text fg={theme().textMuted}>[R] runs</text>
+        <text fg={theme().textMuted}>[R] runs · [N] new · [Space] pause · [U] resume · [E] repair · [X] cancel</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
         <box onMouseUp={() => setFocusPanel("tree")} width="42%" flexShrink={0} border={true} borderColor={borderFor("tree")} title={view() === "runs" ? " RUNS [R] " : " SOLUTION [1] "} flexDirection="column" overflow="hidden">
@@ -962,7 +1071,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={focus() === "detail" ? theme().primary : theme().textMuted}><b>[2] Details</b></text>
         <text fg={view() === "runs" ? theme().primary : theme().textMuted}><b>[R] Runs</b></text>
         <text fg={theme().textMuted}>·</text>
-        <text fg={theme().textMuted}>[Tab] next pane · [Enter] open · [O/P] output/prompt · [↑↓] select · [Q] back</text>
+        <text fg={theme().textMuted}>[Tab] pane · [Enter] open · [O/P] output/prompt · [↑↓] select · [Q] back</text>
       </box>
     </box>
   );
