@@ -34,23 +34,24 @@ opencode
 npm ls -g opencode-langgraph
 ```
 
-For a local development installation, check the version before and after with `package.json`:
+For a local development installation, record the package version and the current commit before updating:
 
 ```sh
 node -p "require('./package.json').version"
+git rev-parse --short HEAD
 ```
 
 then update from the repository root:
 
 ```sh
-git switch main && git pull && npm run build && opencode plugin . --force
+git pull && npm run build && opencode plugin . --force
 ```
 
-and re-run the same `node -p` command to confirm the new version.
+and re-run both commands to confirm the new version and commit.
 
 ### Is automatic updating possible?
 
-No. There is no built-in auto-update: the plugin never replaces its own files while running, so any update requires reinstalling the package (`npm install -g opencode-langgraph@latest` or rebuilding locally) and restarting OpenCode. Automation is possible only from outside—for example, an external scheduler such as cron or launchd that runs the update command on a schedule and then restarts OpenCode.
+No. There is no built-in auto-update: releases are published manually via `npm run release`, the plugin never replaces its own files while running, so any update requires reinstalling the package (`npm install -g opencode-langgraph@latest` or rebuilding locally) and restarting OpenCode. Automation is possible only from outside—for example, an external scheduler such as cron or launchd that runs the update command on a schedule and then restarts OpenCode.
 
 ## Use
 
