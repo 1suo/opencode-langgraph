@@ -1,5 +1,7 @@
 # OpenCode LangGraph
 
+[![npm version](https://img.shields.io/npm/v/opencode-langgraph.svg)](https://www.npmjs.com/package/opencode-langgraph)
+
 `opencode-langgraph` is an explicit, generic connector between [LangGraph](https://docs.langchain.com/oss/javascript/langgraph/overview) and [OpenCode](https://opencode.ai/). OpenCode remains the chat, coding, model, permission, and child-session runtime. LangGraph owns orchestration state, routing, checkpoints, and interrupts.
 
 It includes a production `solution-lod` workflow, while remaining a generic connector for arbitrary user-defined graphs.
