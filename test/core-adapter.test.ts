@@ -8,7 +8,7 @@ import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
 import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, usageLine, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
-import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput } from "../src/opencode/schema-view.js";
+import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, renderSchemaText } from "../src/opencode/schema-view.js";
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { AgentUsage, ConnectorDefinition } from "../src/core/types.js";
@@ -1169,6 +1169,16 @@ describe("activation IO schema views", () => {
     expect(flattenSchemaLines(answer)).toContain("The answer is 4.");
     expect(renderSchemaOutput({ unrelated: true })).toBeUndefined();
     expect(renderSchemaOutput("text only")).toBeUndefined();
+  });
+
+  it("recovers schema views from raw JSON text for runs recorded without structured payloads", () => {
+    const fromPlain = renderSchemaText('{"verdict":"pass","summary":"ok","findings":[],"checks":[{"name":"t","passed":true,"evidence":"e"}],"activations":[]}');
+    expect(flattenSchemaLines(fromPlain!)).toContain("[VERIFICATION]");
+    expect(flattenSchemaLines(fromPlain!)).toContain("[PASS]");
+    const fromFenced = renderSchemaText(' preamble\n```json\n{"status":"completed","summary":"done","changedFiles":["a.ts"],"checks":[],"activations":[]}\n```\n');
+    expect(flattenSchemaLines(fromFenced!)).toContain("+ a.ts");
+    expect(renderSchemaText("plain prose output")).toBeUndefined();
+    expect(renderSchemaText(undefined)).toBeUndefined();
   });
 
   it("renders activation input projections by semantics and rejects unknown shapes", () => {

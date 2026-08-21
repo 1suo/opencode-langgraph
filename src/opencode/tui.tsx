@@ -7,7 +7,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import type { AgentUsage, ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot, UsageStreamingEstimate } from "../core/types.js";
 import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
-import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, type SchemaLine, type SchemaTone } from "./schema-view.js";
+import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, renderSchemaText, type SchemaLine, type SchemaTone } from "./schema-view.js";
 import { releaseVerifierWorkspace } from "./verifier-workspace.js";
 
 function sessionId(api: TuiPluginApi): string | undefined {
@@ -312,7 +312,7 @@ export function renderStructuredEvent(event: PluginRunEvent): string {
   const lines = [
     `${event.node.replaceAll("_", " ").toUpperCase()}  [${event.status.toUpperCase()}]  ${shortAgent(event.agent)}  ${event.model}`,
   ];
-  const schemaOutput = event.structured !== undefined ? renderSchemaOutput(event.structured) : undefined;
+  const schemaOutput = renderSchemaOutput(event.structured) ?? renderSchemaText(event.text);
   if (schemaOutput) lines.push("", "OUTPUT", ...flattenSchemaLines(schemaOutput).split("\n"));
   else if (event.text) {
     const text = event.text.replace(/\s+/g, " ").trim();
@@ -495,16 +495,20 @@ function SchemaLinesView(props: { lines: SchemaLine[]; theme: Theme }) {
   return (
     <box flexDirection="column">
       <For each={props.lines}>{(line) => (
-        <text wrapMode="word">
-          <For each={line.spans}>{(span) => span.bold ? <text fg={schemaToneColor(span.tone, props.theme)}><b>{span.text}</b></text> : <text fg={schemaToneColor(span.tone, props.theme)}>{span.text}</text>}</For>
-        </text>
+        <box flexDirection="row">
+          <For each={line.spans}>{(span) => (
+            span.bold
+              ? <text fg={schemaToneColor(span.tone, props.theme)}><b>{span.text}</b></text>
+              : <text fg={schemaToneColor(span.tone, props.theme)}>{span.text}</text>
+          )}</For>
+        </box>
       )}</For>
     </box>
   );
 }
 
 function ActivationDetailView(props: { activation: SemanticActivation; event?: PluginRunEvent; promptEvent?: PluginRunEvent; tab: "output" | "prompt"; onTab: (tab: "output" | "prompt") => void; theme: Theme }) {
-  const outputLines = createMemo(() => props.event?.structured !== undefined ? renderSchemaOutput(props.event.structured) : undefined);
+  const outputLines = createMemo(() => renderSchemaOutput(props.event?.structured) ?? renderSchemaText(props.event?.text));
   const inputLines = createMemo(() => renderSchemaInput(props.promptEvent?.prompt?.input));
   const promptFallback = () => effectivePrompt(props.promptEvent);
   return (

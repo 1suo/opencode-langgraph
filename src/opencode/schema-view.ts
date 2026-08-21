@@ -258,3 +258,17 @@ export function renderSchemaInput(promptInput: string | undefined): SchemaLine[]
 export function flattenSchemaLines(lines: SchemaLine[]): string {
   return lines.map((line) => line.spans.filter(Boolean).map((span) => span.text).join("")).join("\n").trimEnd();
 }
+
+/** Render an activation output from its raw text: direct JSON, fenced JSON, or nothing. */
+export function renderSchemaText(text: string | undefined): SchemaLine[] | undefined {
+  if (!text) return undefined;
+  const candidates = [text.trim(), text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim() ?? ""];
+  for (const candidate of candidates) {
+    if (!candidate.startsWith("{") && !candidate.startsWith("[")) continue;
+    try {
+      const lines = renderSchemaOutput(JSON.parse(candidate));
+      if (lines) return lines;
+    } catch { /* try next candidate */ }
+  }
+  return undefined;
+}
