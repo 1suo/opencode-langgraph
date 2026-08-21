@@ -19,7 +19,7 @@ Source of truth:
 The graph turns one OpenCode root message into a repository-grounded **answer** or a **verified mutation** by progressively resolving the solution at the level of detail (LOD — level of detail) actually required by the task:
 
 - Small questions collapse quickly to an answer.
-- Large changes decompose into a tree of regions, each resolved only as finely as needed, and are implemented only after a region is *certified terminal* under a bounded implementation contract.
+- Large changes decompose into a tree of regions, each resolved only as finely as needed. Refinement always splits; a region is implemented only once the controller *computes* it implementable (exactly one explicit success criterion, or the depth floor).
 
 Two structures are deliberately orthogonal:
 
@@ -205,8 +205,8 @@ All role contracts (OpenCode agent, system prompt, tool policy, model default, m
 |---|---|---|---|---|
 | `inspect` | `langgraph-inspector` | read/grep/glob/codesearch (no shell, no edit) | 32 / 160k | Facts; promotes `unformed → superposed` |
 | `synthesize` | `langgraph-synthesizer` | none | 8 / 96k | Complete candidate alternatives, constraints, a selection (never declares work ready) |
-| `refine` | `langgraph-refiner` | none | 8 / 96k | Either a certified terminal implementation contract, or covering children |
-| `implement` | `build` | edit tools (no question/task) | 32 / 160k | One bounded change under the certified contract |
+| `refine` | `langgraph-refiner` | none | 8 / 96k | Covering next-step children, each with its own criterion (no terminal outcome) |
+| `implement` | `build` | edit tools (no question/task) | 32 / 160k | One computed-implementable change region |
 | `verify` | `langgraph-verifier` | read tools + bash (no edit) | 16 / 96k | `pass | repair | reopen | fail` verdict with findings mapped to regions |
 | `present` | `plan` | none | 4 / 48k | The rendered answer for a read-only region |
 
@@ -219,7 +219,7 @@ Models default to `"inherit"` (the parent OpenCode message's model) and are per-
 `RegionStatus` transitions (driven by controller code in `propagateNetwork`, `ensureRunnableWork`, and the completion reducers — models never set status directly):
 
 ```text
-                 inspect                synthesize (select)        refine (terminal)
+                 inspect                synthesize (select)        refine (split)
   unformed ────────────────► superposed ────────────────► unrefined ────────────────► actionable
      │                          │    ▲                        │                        ││
      │                          │    │ contradiction          │ refine (split)         │implement (lease)
@@ -260,7 +260,7 @@ Durable facts are stored once in `evidence` and passed by id. (Known measured be
 - A domain with every candidate eliminated → region `contradiction`.
 - Exactly one viable candidate → forced collapse ("only viable candidate").
 - Multiple non-equivalent selected candidates → `contradiction` ("multiple incompatible alternatives").
-- After a consistent selection: non-equivalent siblings are eliminated, `selectedCandidateIds` stabilize, and the region status becomes `collapsed` (children exist), `actionable` (certified contract exists), or `unrefined` — **selection never implies actionability**.
+- After a consistent selection: non-equivalent siblings are eliminated, `selectedCandidateIds` stabilize, and the region status becomes `collapsed` (children exist), `actionable` (controller-computed: exactly one explicit criterion, or depth floor), or `unrefined` — **selection never implies actionability**.
 - Waiting activations whose `wakeCondition.revisionAfter < revision` are re-queued; any change bumps `network.revision`.
 
 `validateSolutionDelta` mirrors the merge so that a delta which would eliminate every candidate with none selected is rejected *at validation time* with guidance and retried; a truly dead region is recovered by reopening the parent, not by an empty domain.
