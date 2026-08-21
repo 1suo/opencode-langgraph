@@ -96,6 +96,7 @@ export type SolutionRoleModelAssignments = Partial<Record<SolutionPresetRole, Mo
 export interface SolutionLodPresetOptions {
   models?: Partial<Record<SolutionPresetRole, SolutionPresetModel>>;
   roleLimits?: Partial<Record<SolutionPresetRole, AgentCallLimits>>;
+  maxParallelActivations?: number;
 }
 
 export type ConnectorConfig = ConnectorDefinition | ConnectorPresetConfig;

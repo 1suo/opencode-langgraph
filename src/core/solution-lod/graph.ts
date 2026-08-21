@@ -3,18 +3,26 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { Annotation, END, Send, START, StateGraph } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { z, type ZodType } from "zod";
 import { DurableFileSaver } from "../durable-checkpointer.js";
 import type { AgentCallResult, AgentRuntime, AgentUsage, ConnectorGraph, GraphProgressSnapshot, SolutionSemanticSnapshot } from "../types.js";
-import { completeImplementation, completePresentation, completeVerification, ensureRunnableWork, initialNetwork, markActivation, mergeSolutionDelta, nextQueuedActivation, setRegionStatus, validateSolutionDelta } from "./reducer.js";
-import { DEFAULT_SOLUTION_ROLE_LIMITS, ImplementationOutputSchema, PresentationOutputSchema, SolutionDeltaSchema, VerificationOutputSchema, type Activation, type Capability, type SolutionDelta, type SolutionLodState, type SolutionNetwork, type SolutionRoleLimits } from "./types.js";
+import { applyBatchRecords, ensureRunnableWork, initialNetwork, markActivation, selectActivationBatch, setRegionStatus, validateSolutionDelta } from "./reducer.js";
+import { DEFAULT_SOLUTION_ROLE_LIMITS, ImplementationOutputSchema, PresentationOutputSchema, SolutionDeltaSchema, VerificationOutputSchema, type Activation, type ActivationTaskInput, type ActivationTaskResult, type ActiveBatchEntry, type Capability, type SolutionDelta, type SolutionLodState, type SolutionNetwork, type SolutionRoleLimits } from "./types.js";
+
+const resultsReducer = (left: ActivationTaskResult[], right: ActivationTaskResult[]): ActivationTaskResult[] => {
+  // An empty write from `merge` atomically clears the append-only log; task writes always carry exactly one record.
+  if (!right.length) return [];
+  const byActivation = new Map(left.map((item) => [item.activationId, item]));
+  for (const item of right) byActivation.set(item.activationId, item);
+  return [...byActivation.values()];
+};
 
 const SolutionState = Annotation.Root({
-  stateVersion: Annotation<3>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
-  activeActivationId: Annotation<string | undefined>, network: Annotation<SolutionNetwork>, usage: Annotation<AgentUsage>, callsUsed: Annotation<number>, startedAt: Annotation<number>, worktreeAcquired: Annotation<boolean>, result: Annotation<string>,
+  stateVersion: Annotation<4>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
+  activeActivationId: Annotation<string | undefined>, activeBatch: Annotation<ActiveBatchEntry[]>({ reducer: (_left: ActiveBatchEntry[], right: ActiveBatchEntry[]) => right, default: () => [] }), network: Annotation<SolutionNetwork>, results: Annotation<ActivationTaskResult[]>({ reducer: resultsReducer, default: () => [] }), usage: Annotation<AgentUsage>, callsUsed: Annotation<number>, startedAt: Annotation<number>, worktreeAcquired: Annotation<boolean>, result: Annotation<string>,
 });
 
 const EMPTY_USAGE: AgentUsage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -28,9 +36,12 @@ export function defaultSolutionCheckpointer(): DurableFileSaver {
   const saver = new DurableFileSaver(directory); durableSavers.set(directory, saver); return saver;
 }
 
+export const DEFAULT_MAX_PARALLEL_ACTIVATIONS = 3;
+
 export interface SolutionLodOptions {
   agents: Record<Capability, string>;
   roleLimits?: Partial<SolutionRoleLimits>;
+  maxParallelActivations?: number;
   checkpointer?: BaseCheckpointSaver;
 }
 
@@ -121,7 +132,7 @@ function semantic(network: SolutionNetwork): SolutionSemanticSnapshot {
 
 function progress(state: SolutionLodState): GraphProgressSnapshot {
   return {
-    phase: state.phase, activeNodeId: state.network.activations.find((item) => item.id === state.activeActivationId)?.regionId,
+    phase: state.phase, activeNodeId: state.network.activations.find((item) => item.id === state.activeActivationId)?.regionId ?? state.activeBatch[0]?.regionId,
     callsUsed: state.callsUsed, summary: state.result || state.network.regions.find((item) => item.id === "r1")?.objective, usage: state.usage, semantic: semantic(state.network),
     nodes: state.network.regions.map((region) => ({ id: region.id, parentId: region.parentId, title: region.objective, level: `L${region.lod}`, depth: region.lod, status: region.status, evidence: region.evidenceIds.length, agents: region.activationIds.map((id) => state.network.activations.find((item) => item.id === id)?.capability).filter((item): item is Capability => Boolean(item)) })),
   };
@@ -140,66 +151,83 @@ function finalResult(state: SolutionLodState): string {
 
 export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<SolutionLodState> {
   const limits = Object.fromEntries((Object.keys(DEFAULT_SOLUTION_ROLE_LIMITS) as Capability[]).map((role) => [role, { ...DEFAULT_SOLUTION_ROLE_LIMITS[role], ...(options.roleLimits?.[role] ?? {}) }])) as unknown as SolutionRoleLimits;
+  const width = Math.max(1, Math.floor(options.maxParallelActivations ?? DEFAULT_MAX_PARALLEL_ACTIVATIONS));
+  const dispatchBatch = (state: SolutionLodState): Send[] => state.activeBatch.map((entry) => {
+    const activation = state.network.activations.find((item) => item.id === entry.activationId);
+    if (!activation) throw new Error(`Batch entry ${entry.activationId} references a missing activation`);
+    const task: ActivationTaskInput = { kind: "activation-task", activation, snapshot: { stateVersion: 4, runId: state.runId, originalTask: state.originalTask, conversationContext: state.conversationContext, directory: state.directory, worktree: state.worktree, phase: state.phase, network: state.network } };
+    return new Send("activate", task);
+  });
+  const taskState = (task: ActivationTaskInput): SolutionLodState => ({ stateVersion: 4, runId: task.snapshot.runId, originalTask: task.snapshot.originalTask, conversationContext: task.snapshot.conversationContext, directory: task.snapshot.directory, worktree: task.snapshot.worktree, phase: task.snapshot.phase, activeBatch: [], network: task.snapshot.network, results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" });
   const builder = new StateGraph(SolutionState)
     .addNode("schedule", (state: SolutionLodState) => {
       const scheduled = ensureRunnableWork(state.network);
-      if (scheduled.done) return { network: scheduled.network, activeActivationId: undefined, phase: "completed", result: finalResult({ ...state, network: scheduled.network }) };
-      if (scheduled.blocked) return { network: scheduled.network, activeActivationId: undefined, phase: "blocked", result: `The solution network is blocked: ${scheduled.blocked}` };
-      const activation = nextQueuedActivation(scheduled.network); if (!activation) return { network: scheduled.network, phase: "blocked", result: "The solution network produced no runnable activation." };
-      let network = markActivation(scheduled.network, activation.id, "running");
-      if (activation.capability === "implement") network = setRegionStatus(network, activation.regionId, "implementing");
-      return { network, activeActivationId: activation.id, phase: `${activation.capability}:${activation.regionId}` };
+      if (scheduled.done) return { network: scheduled.network, activeActivationId: undefined, activeBatch: [] as ActiveBatchEntry[], phase: "completed", result: finalResult({ ...state, network: scheduled.network }) };
+      if (scheduled.blocked) return { network: scheduled.network, activeActivationId: undefined, activeBatch: [] as ActiveBatchEntry[], phase: "blocked", result: `The solution network is blocked: ${scheduled.blocked}` };
+      const batch = selectActivationBatch(scheduled.network, width);
+      if (!batch.length) return { network: scheduled.network, activeActivationId: undefined, activeBatch: [] as ActiveBatchEntry[], phase: "blocked", result: "The solution network produced no runnable activation." };
+      let network = scheduled.network;
+      const manifest: ActiveBatchEntry[] = [];
+      for (const activation of batch) {
+        network = markActivation(network, activation.id, "running");
+        if (activation.capability === "implement") network = setRegionStatus(network, activation.regionId, "implementing");
+        manifest.push({ activationId: activation.id, regionId: activation.regionId, capability: activation.capability, basisRevision: activation.basisRevision });
+      }
+      const singleton = batch.length === 1 ? batch[0] : undefined;
+      return { network, activeActivationId: singleton?.capability === "implement" ? singleton.id : undefined, activeBatch: manifest, phase: singleton ? `${singleton.capability}:${singleton.regionId}` : `batch:${batch.length}` };
     })
     .addNode("acquire", async (_state: SolutionLodState, config?: RunnableConfig) => { const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined; if (acquire) await acquire(); return { worktreeAcquired: true }; })
-    .addNode("activate", async (state: SolutionLodState, config?: RunnableConfig) => {
-      const activation = state.network.activations.find((item) => item.id === state.activeActivationId); if (!activation) throw new Error("Activate requires a selected activation");
+    .addNode("activate", async (input: ActivationTaskInput | SolutionLodState, config?: RunnableConfig) => {
+      const task = input as ActivationTaskInput;
+      if (task?.kind !== "activation-task") throw new Error("Activate requires a dispatched activation task");
+      const state = taskState(task);
+      const activation = task.activation;
+      const startedAt = Date.now();
       const snapshotWorkspace = config?.configurable?.langgraphSnapshotWorkspace as ((worktree: string) => Map<string, string>) | undefined;
       const snapshot = snapshotWorkspace ?? statusPaths;
       const before = activation.capability === "implement" ? snapshot(state.worktree) : undefined;
+      const record = (partial: Pick<ActivationTaskResult, "outcome"> & Partial<ActivationTaskResult>): ActivationTaskResult => ({ activationId: activation.id, regionId: activation.regionId, capability: activation.capability, basisRevision: activation.basisRevision, startedAt, finishedAt: Date.now(), usage: { ...EMPTY_USAGE }, networkDelta: null, ...partial });
       try {
         const schema = activation.capability === "implement" ? ImplementationOutputSchema : activation.capability === "verify" ? VerificationOutputSchema : activation.capability === "present" ? PresentationOutputSchema : SolutionDeltaSchema;
         const result = await runtime(config).call({ agent: options.agents[activation.capability], node: `${activation.capability}:${activation.regionId}`, state, limits: limits[activation.capability], schema: z.toJSONSchema(schema) as Record<string, unknown>, validateStructured: (value) => { const parsed = schema.parse(value); if (schema === SolutionDeltaSchema) validateSolutionDelta(state, activation.regionId, parsed as SolutionDelta); return parsed; }, prompt: JSON.stringify(projectActivationContext(state, activation)) });
-        const usage = addUsage(state.usage, result.usage); const callsUsed = state.callsUsed + 1;
+        const base = { sessionId: result.sessionId, usage: result.usage ?? { ...EMPTY_USAGE } };
         if (result.budgetStop) {
           const error = `Agent scheduling quantum reached: ${result.budgetStop.metric}`;
           const changedFiles = before ? changedBetween(before, snapshot(state.worktree)) : [];
-          let network = markActivation(state.network, activation.id, "failed", result.sessionId, error);
-          if (activation.capability === "implement" && changedFiles.length) {
-            network = completeImplementation(network, activation.id, { status: "blocked", summary: error, changedFiles, checks: [], blocker: error, activations: [] }, changedFiles);
-            network = markActivation(network, activation.id, "failed", result.sessionId, error);
-          } else if (activation.capability === "implement") network = setRegionStatus(network, activation.regionId, "actionable");
-          return { network, usage, callsUsed, activeActivationId: undefined, phase: "activation-deferred" };
+          return { results: [record({ ...base, outcome: "deferred", error, changedFiles })] };
         }
-        let network: SolutionNetwork;
-        if (activation.capability === "implement") network = completeImplementation(state.network, activation.id, structured(result, ImplementationOutputSchema), changedBetween(before!, snapshot(state.worktree)));
-        else if (activation.capability === "verify") network = completeVerification(state.network, activation.id, structured(result, VerificationOutputSchema));
-        else if (activation.capability === "present") network = completePresentation(state.network, activation.id, structured(result, PresentationOutputSchema).answer);
-        else network = markActivation(mergeSolutionDelta(state, activation.id, structured(result, SolutionDeltaSchema)), activation.id, "completed", result.sessionId);
-        return { network, usage, callsUsed, activeActivationId: undefined, phase: "propagating" };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        let network = markActivation(state.network, activation.id, "failed", activation.sessionId, message);
         if (activation.capability === "implement") {
           const changedFiles = changedBetween(before!, snapshot(state.worktree));
-          if (changedFiles.length) {
-            network = completeImplementation(network, activation.id, { status: "blocked", summary: `Implementation output failed but workspace mutation was retained: ${message}`, changedFiles, checks: [], blocker: message, activations: [] }, changedFiles);
-            network = markActivation(network, activation.id, "failed", activation.sessionId, message);
-          } else network = setRegionStatus(network, activation.regionId, "actionable");
+          return { results: [record({ ...base, outcome: "applied", changedFiles, networkDelta: { kind: "implementation", output: structured(result, ImplementationOutputSchema), changedFiles } })] };
         }
-        return { network, callsUsed: state.callsUsed + 1, activeActivationId: undefined, phase: "activation-failed" };
+        if (activation.capability === "verify") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "verification", output: structured(result, VerificationOutputSchema) } })] };
+        if (activation.capability === "present") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "presentation", answer: structured(result, PresentationOutputSchema).answer } })] };
+        return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "delta", delta: structured(result, SolutionDeltaSchema) } })] };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const changedFiles = before ? changedBetween(before, snapshot(state.worktree)) : undefined;
+        return { results: [record({ outcome: "error", error: message, changedFiles })] };
       }
+    })
+    .addNode("merge", (state: SolutionLodState) => {
+      const records = state.results;
+      const application = applyBatchRecords(state.network, records);
+      const batchUsage = records.reduce((total, item) => addUsage(total, item.usage), { ...EMPTY_USAGE });
+      const phase = application.failed.length ? "activation-failed" : application.deferred.length ? "activation-deferred" : "propagating";
+      return { network: application.network, usage: addUsage(state.usage, batchUsage), callsUsed: state.callsUsed + records.length, results: [] as ActivationTaskResult[], activeBatch: [] as ActiveBatchEntry[], activeActivationId: undefined, phase };
     })
     .addNode("finish", (state: SolutionLodState) => ({ result: state.result || finalResult(state) }))
     .addEdge(START, "schedule")
-    .addConditionalEdges("schedule", (state: SolutionLodState) => state.result ? "finish" : state.network.activations.find((item) => item.id === state.activeActivationId)?.capability === "implement" && !state.worktreeAcquired ? "acquire" : "activate", { finish: "finish", acquire: "acquire", activate: "activate" })
-    .addEdge("acquire", "activate")
-    .addEdge("activate", "schedule")
+    .addConditionalEdges("schedule", (state: SolutionLodState) => state.result ? "finish" : state.activeActivationId && !state.worktreeAcquired ? "acquire" : dispatchBatch(state), { finish: "finish", acquire: "acquire", activate: "activate" })
+    .addConditionalEdges("acquire", (state: SolutionLodState) => dispatchBatch(state), ["activate"])
+    .addEdge("activate", "merge")
+    .addEdge("merge", "schedule")
     .addEdge("finish", END);
   return {
     graph: builder.compile({ checkpointer: options.checkpointer ?? defaultSolutionCheckpointer() }),
-    initial: ({ task, conversationContext = "", directory, worktree, runId }) => ({ stateVersion: 3, runId, originalTask: task, conversationContext, directory, worktree, phase: "forming-root-domain", network: initialNetwork(task), usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: Date.now(), worktreeAcquired: false, result: "" }),
+    initial: ({ task, conversationContext = "", directory, worktree, runId }) => ({ stateVersion: 4, runId, originalTask: task, conversationContext, directory, worktree, phase: "forming-root-domain", activeBatch: [], network: initialNetwork(task), results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: Date.now(), worktreeAcquired: false, result: "" }),
     result: (state) => state.result,
     progress,
-    display: { schedule: { phase: "collapse" }, acquire: { phase: "lease" }, activate: { phase: "activate" }, finish: { phase: "result" } },
+    display: { schedule: { phase: "collapse" }, acquire: { phase: "lease" }, activate: { phase: "activate" }, merge: { phase: "propagate" }, finish: { phase: "result" } },
   };
 }

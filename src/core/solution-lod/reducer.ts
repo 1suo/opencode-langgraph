@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Activation, Capability, ConditionalRegionDefinition, ImplementationOutput, SolutionCandidate, SolutionDelta, SolutionLodState, SolutionNetwork, SolutionRegion, VerificationOutput } from "./types.js";
+import type { Activation, ActivationTaskResult, Capability, ConditionalRegionDefinition, ImplementationOutput, SolutionCandidate, SolutionDelta, SolutionLodState, SolutionNetwork, SolutionRegion, VerificationOutput } from "./types.js";
 
 const normalize = (value: string) => value.trim().replace(/\s+/g, " ");
 const slug = (value: string) => normalize(value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || "candidate";
@@ -319,13 +319,103 @@ export function reopenRegion(networkInput: SolutionNetwork, regionId: string, re
   network.regions = network.regions.filter((item) => !descendants.has(item.id));
   const survivingRegionIds = new Set(network.regions.map((item) => item.id));
   network.candidates = network.candidates.filter((item) => survivingRegionIds.has(item.regionId));
-  network.activations = network.activations.filter((item) => survivingRegionIds.has(item.regionId));
+  network.activations = network.activations
+    .filter((item) => survivingRegionIds.has(item.regionId) || item.status === "queued" || item.status === "running" || item.status === "waiting")
+    .map((item) => survivingRegionIds.has(item.regionId) ? item : { ...item, status: "superseded" as Activation["status"], error: item.error ?? `Superseded: region ${item.regionId} was removed from the current solution.` });
   network.constraints = network.constraints.filter((item) => survivingRegionIds.has(item.subject) || network.candidates.some((candidate) => candidate.id === item.subject) || network.evidence.some((evidence) => evidence.id === item.subject));
   network.revision++; return network;
 }
 
 export function nextQueuedActivation(network: SolutionNetwork): Activation | undefined {
   return network.activations.filter((item) => item.status === "queued").sort((left, right) => left.basisRevision - right.basisRevision || Number(left.id.slice(1)) - Number(right.id.slice(1)))[0];
+}
+
+const MUTATING_CAPABILITIES: Capability[] = ["implement", "verify"];
+
+/**
+ * Select the next activation batch. Mutating capabilities (implement/verify) always run
+ * as a singleton; read-only capabilities (inspect/synthesize/present) are batched on
+ * pairwise distinct regions up to `width`. A width of 1 reproduces sequential execution.
+ */
+export function selectActivationBatch(network: SolutionNetwork, width: number): Activation[] {
+  const queued = network.activations.filter((item) => item.status === "queued").sort((left, right) => left.basisRevision - right.basisRevision || Number(left.id.slice(1)) - Number(right.id.slice(1)));
+  if (!queued.length) return [];
+  if (MUTATING_CAPABILITIES.includes(queued[0].capability)) return [queued[0]];
+  const batch: Activation[] = [];
+  const claimedRegions = new Set<string>();
+  for (const activation of queued) {
+    if (batch.length >= width) break;
+    if (MUTATING_CAPABILITIES.includes(activation.capability)) continue;
+    if (claimedRegions.has(activation.regionId)) continue;
+    batch.push(activation);
+    claimedRegions.add(activation.regionId);
+  }
+  return batch;
+}
+
+export interface BatchApplication {
+  network: SolutionNetwork;
+  applied: string[];
+  deferred: string[];
+  failed: string[];
+  superseded: string[];
+}
+
+/**
+ * Apply one batch of per-task records deterministically: records are ordered by
+ * (basisRevision, activationId) regardless of completion order, existing reducers apply
+ * them sequentially, and one deferred propagateNetwork pass runs after the whole batch.
+ * A record whose basis is outdated and whose application lands its region in a
+ * contradiction is rolled back and recorded as superseded — superseded outcomes never
+ * consume the failed-activation retry limit.
+ */
+export function applyBatchRecords(networkInput: SolutionNetwork, records: ActivationTaskResult[]): BatchApplication {
+  const ordered = [...records].sort((left, right) => left.basisRevision - right.basisRevision || Number(left.activationId.slice(1)) - Number(right.activationId.slice(1)));
+  let current = networkInput;
+  const application: BatchApplication = { network: networkInput, applied: [], deferred: [], failed: [], superseded: [] };
+  for (const record of ordered) {
+    const before = current;
+    if (!current.activations.some((item) => item.id === record.activationId)) { application.superseded.push(record.activationId); continue; }
+    const stale = current.revision !== record.basisRevision;
+    let refused = false;
+    try {
+      if (record.outcome === "applied" && record.networkDelta) {
+        const delta = record.networkDelta;
+        if (delta.kind === "delta") current = markActivation(mergeSolutionDelta(stateForNetwork(current), record.activationId, delta.delta), record.activationId, "completed", record.sessionId);
+        else if (delta.kind === "implementation") current = completeImplementation(current, record.activationId, delta.output, delta.changedFiles);
+        else if (delta.kind === "verification") current = completeVerification(current, record.activationId, delta.output);
+        else current = completePresentation(current, record.activationId, delta.answer);
+      } else {
+        const message = record.error ?? "Activation task failed.";
+        current = markActivation(current, record.activationId, "failed", record.sessionId, message);
+        if (record.capability === "implement") {
+          const changedFiles = record.changedFiles ?? [];
+          if (changedFiles.length) {
+            const summary = record.outcome === "deferred" ? message : `Implementation output failed but workspace mutation was retained: ${message}`;
+            current = completeImplementation(current, record.activationId, { status: "blocked", summary, changedFiles, checks: [], blocker: message, activations: [] }, changedFiles);
+            current = markActivation(current, record.activationId, "failed", record.sessionId, message);
+          } else current = setRegionStatus(current, record.regionId, "actionable");
+        }
+      }
+    } catch {
+      refused = true;
+    }
+    const contradicted = stale && record.outcome === "applied" && current.regions.find((item) => item.id === record.regionId)?.status === "contradiction";
+    if (refused || contradicted) {
+      current = markActivation(before, record.activationId, "superseded", record.sessionId, refused ? "Superseded: the activation's region disappeared from the current solution." : "Superseded: the state revision moved past this activation's basis and its result now contradicts the newer state.");
+      application.superseded.push(record.activationId);
+      continue;
+    }
+    if (record.outcome === "applied") application.applied.push(record.activationId);
+    else if (record.outcome === "deferred") application.deferred.push(record.activationId);
+    else application.failed.push(record.activationId);
+  }
+  application.network = propagateNetwork(current);
+  return application;
+}
+
+function stateForNetwork(network: SolutionNetwork): SolutionLodState {
+  return { stateVersion: 4, runId: "", originalTask: "", conversationContext: "", directory: "", worktree: "", phase: "", activeBatch: [], network, results: [], usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" };
 }
 
 export function ensureRunnableWork(input: SolutionNetwork): { network: SolutionNetwork; done: boolean; blocked?: string } {

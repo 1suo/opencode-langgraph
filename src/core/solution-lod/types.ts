@@ -85,10 +85,57 @@ export interface Activation {
   contextRefs: string[];
   wakeCondition?: { ref: string; revisionAfter: number };
   senderActivationId?: string;
-  status: "queued" | "running" | "waiting" | "completed" | "failed";
+  status: "queued" | "running" | "waiting" | "completed" | "failed" | "superseded";
   basisRevision: number;
   sessionId?: string;
   error?: string;
+}
+
+/** One entry of the manifest `schedule` writes for the batch it dispatched. */
+export interface ActiveBatchEntry {
+  activationId: string;
+  regionId: string;
+  capability: Capability;
+  basisRevision: number;
+}
+
+/** The network effect of one finished activation task, or null when the task errored. */
+export type ActivationNetworkDelta =
+  | { kind: "delta"; delta: SolutionDelta }
+  | { kind: "implementation"; output: ImplementationOutput; changedFiles: string[] }
+  | { kind: "verification"; output: VerificationOutput }
+  | { kind: "presentation"; answer: string };
+
+/** The append-only per-task record a parallel `activate` task writes to `results`. */
+export interface ActivationTaskResult {
+  activationId: string;
+  regionId: string;
+  capability: Capability;
+  basisRevision: number;
+  startedAt: number;
+  finishedAt: number;
+  sessionId?: string;
+  usage: AgentUsage;
+  outcome: "applied" | "deferred" | "error";
+  error?: string;
+  changedFiles?: string[];
+  networkDelta: ActivationNetworkDelta | null;
+}
+
+/** The unified snapshot a `Send` carries into one parallel `activate` task. */
+export interface ActivationTaskInput {
+  kind: "activation-task";
+  activation: Activation;
+  snapshot: {
+    stateVersion: 4;
+    runId: string;
+    originalTask: string;
+    conversationContext: string;
+    directory: string;
+    worktree: string;
+    phase: string;
+    network: SolutionNetwork;
+  };
 }
 
 export interface SolutionNetwork {
@@ -194,7 +241,7 @@ export type VerificationOutput = z.infer<typeof VerificationOutputSchema>;
 export const PresentationOutputSchema = z.object({ answer: z.string().min(1) });
 
 export interface SolutionLodState extends Record<string, unknown> {
-  stateVersion: 3;
+  stateVersion: 4;
   runId: string;
   originalTask: string;
   conversationContext: string;
@@ -202,7 +249,9 @@ export interface SolutionLodState extends Record<string, unknown> {
   worktree: string;
   phase: string;
   activeActivationId?: string;
+  activeBatch: ActiveBatchEntry[];
   network: SolutionNetwork;
+  results: ActivationTaskResult[];
   usage: AgentUsage;
   callsUsed: number;
   startedAt: number;
