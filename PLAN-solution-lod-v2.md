@@ -37,7 +37,7 @@ Deliberate cuts: no value-registry object, no typed domains, no weights, no entr
 Scope rules (validator-enforced; error text teaches format via the existing retry-with-guidance loop):
 
 1. Variable visible only in the owner's subtree; names globally unique (duplicate slug → rejection). Ancestry governs *visibility* only.
-2. **Acyclicity is defined and enforced on the primal variable graph**, never inferred from region ancestry: nodes = decision variables; an edge joins two variables whenever one candidate's stance set or one constraint mentions both. Invariant: G stays acyclic (forest), enforced incrementally at merge via union-find — an edge joining two already-connected components is rejected with a teaching error. On forests, the two directional sweeps are complete; the dense/random regime shown hopeless by Chan/Ng/Peng STOC 2024 stays out by construction and by checked invariant.
+2. **Acyclicity is defined and enforced on the primal variable graph**, never inferred from region ancestry: nodes = decision variables; an edge joins two variables whenever one candidate's stance set or one constraint mentions both. Invariant: G stays acyclic (forest), enforced incrementally at merge via union-find — an edge joining two already-connected components is rejected with a teaching error. The forest restriction makes propagation bounded and inspectable; it does not by itself make the limited rules in D2 globally complete. The dense/random regime shown hopeless by Chan/Ng/Peng STOC 2024 stays out by construction and by checked invariant.
 3. Stances may only reference visible variables. `prefers` never prunes — informational, projected to models.
 4. **Canonical labels**: value labels slug-normalize (`normalize()` + slug, same as candidate keys). A newly authored raw label whose slug collides with an existing label of the same variable is rejected unless byte-identical after normalization — the model must reuse the canonical spelling. Variable declarations may carry optional seed labels (informational; they do not close the domain — previously unseen slugs remain legal).
 
@@ -88,8 +88,8 @@ Pipeline D2 + TRANSITIONS consolidation in reducer.ts. Pure functions throughout
 `ensureRunnableWork`: propagate → mechanical resolve → queue model activations only for undecidable regions; MRV by viable count then depth. `projectActivationContext` gains `variableStates`. Prompt rewrite: nearest-neighbor directions wording. sourceKind plumbed into schemas/TUI badges inside existing region pane — no new panes.
 
 ### Step 5 — Proof harness (~1.5d)
-(a) Brute-force oracle: seeded generator builds random trees (≤5 regions × ≤4 directions), random stances/constraints along tree adjacency; enumerate all assignments; projected consistent sets ≡ propagated domains, N≥500 seeds.
-(b) Zero-model fixtures: end-to-end completion with `runtime.call` throwing (kernel-correctness proof).
+(a) Brute-force soundness oracle: seeded generator builds random forests (≤5 regions × ≤4 directions), random stances/constraints along forest edges, and enumerates all assignments. For every propagated elimination, the eliminated coordinate occurs in no valid assignment under the authored facts; equivalently, every coordinate occurring in a valid assignment remains viable. N≥500 seeds. Equality between propagated and globally consistent domains is neither required nor claimed unless a later, separately specified arc-consistency algorithm earns that stronger contract.
+(b) Zero-model mechanical fixtures: begin from a pre-authored configuration whose remaining transitions are entirely kernel-determined, set `runtime.call` to throw, and verify completion without another model decision. This proves the tested mechanical path does not depend on a hidden LLM call; it is an integration check, not a general proof of kernel correctness.
 (c) Order-independence under shuffled insertion; idempotence (double-propagate ≡ one, revision stable).
 (d) Locality test: projection size bounded by refs.
 (e) Named units: requires-dies-on-remote-refute, binding-prunes-descendants, prefers-never-eliminates, cousin-reference-rejected, shadowed-name-rejected, reopen-resets-owned-variables, sourceKind round-trip.
@@ -97,7 +97,7 @@ Pipeline D2 + TRANSITIONS consolidation in reducer.ts. Pure functions throughout
 ### Step 6 — Docs & evidence (~½d)
 GRAPH/SPEC rewritten to match reality; TODO items closed; real-run captured (TODO.md:108).
 
-Total ~5.5–7.5 days.
+Rough implementation estimate: ~5.5–7.5 engineering days. This is planning input only, not a delivery guarantee or acceptance gate; the per-step green gates determine progress.
 
 ## Part F — Anti-assumption process
 
