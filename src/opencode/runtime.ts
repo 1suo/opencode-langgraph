@@ -24,6 +24,14 @@ function modelId(value: string): { providerID: string; modelID: string } {
 
 const CHARS_PER_TOKEN = 4;
 const ESTIMATE_EMIT_INTERVAL_MS = 1_000;
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60_000;
+
+function envInactivityTimeoutMs(): number | undefined {
+  const raw = process.env.OPENCODE_LANGGRAPH_INACTIVITY_TIMEOUT_MS;
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
 
 function estimateTokens(chars: number): number {
   return Math.ceil(chars / CHARS_PER_TOKEN);
@@ -228,7 +236,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
     this.options.signal.addEventListener("abort", abort, { once: true });
     try {
       const limits = { maxTurns: agent.maxSteps, ...input.limits };
-      const attempts = input.schema ? Math.max(1, Math.min(1 + (input.retryCount ?? 1), limits.maxTurns ?? 2)) : 1;
+      const attempts = input.schema ? Math.min(4, Math.max(2, 1 + (input.retryCount ?? 2))) : 1;
       let usage: AgentUsage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
       const tools: AgentToolTrace[] = [];
       let prompt = `${composedPrompt.input}${composedPrompt.schemaInstruction ? `\n\n${composedPrompt.schemaInstruction}` : ""}`;
@@ -240,7 +248,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
         });
         const output = await this.waitForAnswer(
           sessionId, input.node, input.agent, `${selected.providerID}/${selected.modelID}`, directory,
-          agent.inactivityTimeoutMs ?? 5 * 60_000, agent.maxRuntimeMs ?? 30 * 60_000,
+          agent.inactivityTimeoutMs ?? envInactivityTimeoutMs() ?? DEFAULT_INACTIVITY_TIMEOUT_MS, agent.maxRuntimeMs ?? 30 * 60_000,
           remainingLimits(limits, usage), usage, inputEstimated, baselineUsage, baselineMessageIds, baselinePartIds,
         );
         usage = addUsage(usage, output.usage);
@@ -292,6 +300,7 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
       if (this.options.signal.aborted) throw this.options.signal.reason ?? new Error("LangGraph run aborted");
       const status = await this.options.plugin.client.session.status({ query: { directory }, throwOnError: true });
       const current = status.data[sessionId];
+      if (current && current.type !== "idle") lastActivityAt = Date.now();
       const messages = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true });
       const usage = subtractUsage(sessionUsage(messages.data), baselineUsage);
       const streaming = streamingEstimate(messages.data, inputEstimated);

@@ -11,7 +11,7 @@ function lockRoot(worktree: string): string {
   return path.join(stateBase, "opencode-langgraph", "locks", id);
 }
 
-function processAlive(pid: number): boolean {
+export function processAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

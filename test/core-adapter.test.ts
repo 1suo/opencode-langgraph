@@ -1,21 +1,22 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, isInterrupted } from "@langchain/langgraph";
 import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
 import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, usageLine, type GraphControls } from "../src/opencode/tui.js";
-import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
+import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, reconcileRuns, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, renderSchemaText } from "../src/opencode/schema-view.js";
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { AgentUsage, ConnectorDefinition } from "../src/core/types.js";
-import { applyBatchRecords, completeVerification, ensureRunnableWork, initialNetwork, mergeRefinementOutput, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateRefinementOutput, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
+import { applyBatchRecords, completeImplementation, completeVerification, ensureRunnableWork, initialNetwork, mergeRefinementOutput, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateRefinementOutput, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
-import type { ActivationTaskResult, RefinementOutput, SolutionLodState } from "../src/core/solution-lod/types.js";
+import type { ActivationTaskResult, ImplementationOutput, RefinementOutput, SolutionLodState } from "../src/core/solution-lod/types.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
 import { acquireWorktree } from "../src/opencode/worktree-lock.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "../src/opencode/verifier-workspace.js";
@@ -284,20 +285,50 @@ describe("OpenCode child-session runtime", () => {
   });
 
   it("aborts a child session only after genuine inactivity", async () => {
-    let aborted = false;
-    const client = { session: {
-      create: async () => ({ data: { id: "child" } }), promptAsync: async () => ({ data: undefined }),
-      status: async () => ({ data: { child: { type: "busy" } } }),
-      messages: async () => ({ data: [{ info: { id: "assistant", role: "assistant" }, parts: [{ id: "reasoning", type: "reasoning", text: "unchanged" }] }] }),
-      abort: async () => { aborted = true; return { data: true }; },
-    } };
-    const definition: ConnectorDefinition = {
-      version: 1, models: { current: { backend: "opencode", model: "inherit" } },
-      agents: { worker: { model: "current", systemPrompt: "work", tools: { question: false }, inactivityTimeoutMs: 25, maxRuntimeMs: 500 } }, graphs: {}, defaultGraph: "default",
+    const stub = (status: () => { data: Record<string, { type: string }> }) => {
+      let aborted = false;
+      const client = { session: {
+        create: async () => ({ data: { id: "child" } }), promptAsync: async () => ({ data: undefined }),
+        status,
+        messages: async () => ({ data: [{ info: { id: "assistant", role: "assistant" }, parts: [{ id: "reasoning", type: "reasoning", text: "unchanged" }] }] }),
+        abort: async () => { aborted = true; return { data: true }; },
+      } };
+      const definition: ConnectorDefinition = {
+        version: 1, models: { current: { backend: "opencode", model: "inherit" } },
+        agents: { worker: { model: "current", systemPrompt: "work", tools: { question: false }, inactivityTimeoutMs: 25, maxRuntimeMs: 150 } }, graphs: {}, defaultGraph: "default",
+      };
+      const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+      return { promise: runtime.call({ agent: "worker", node: "work", prompt: "work", state: {} }), aborted: () => aborted };
     };
-    const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
-    await expect(runtime.call({ agent: "worker", node: "work", prompt: "work", state: {} })).rejects.toThrow("was inactive for 25ms");
-    expect(aborted).toBe(true);
+    const idle = stub(async () => ({ data: {} }));
+    await expect(idle.promise).rejects.toThrow("was inactive for 25ms");
+    expect(idle.aborted()).toBe(true);
+    const busy = stub(async () => ({ data: { child: { type: "busy" } } }));
+    const failure = await busy.promise.then(() => { throw new Error("expected the busy session to outlive the inactivity window"); }, (error: Error) => error);
+    expect(failure.message).toContain("exceeded its 150ms maximum runtime");
+    expect(failure.message).not.toContain("was inactive");
+  });
+
+  it("resolves the inactivity timeout from the agent setting, then the environment, then the default", async () => {
+    const previous = process.env.OPENCODE_LANGGRAPH_INACTIVITY_TIMEOUT_MS;
+    const stubClient = () => ({ session: {
+      create: async () => ({ data: { id: "child" } }), promptAsync: async () => ({ data: undefined }),
+      status: async () => ({ data: {} }),
+      messages: async () => ({ data: [{ info: { id: "assistant", role: "assistant" }, parts: [{ id: "reasoning", type: "reasoning", text: "unchanged" }] }] }),
+      abort: async () => ({ data: true }),
+    } });
+    try {
+      process.env.OPENCODE_LANGGRAPH_INACTIVITY_TIMEOUT_MS = "30";
+      const envOnly: ConnectorDefinition = { version: 1, models: { current: { backend: "opencode", model: "inherit" } }, agents: { worker: { model: "current", systemPrompt: "work", tools: {}, maxRuntimeMs: 500 } }, graphs: {}, defaultGraph: "default" };
+      const envRuntime = new OpenCodeAgentRuntime({ plugin: { client: stubClient() } as never, definition: envOnly, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+      await expect(envRuntime.call({ agent: "worker", node: "work", prompt: "work", state: {} })).rejects.toThrow("was inactive for 30ms");
+      const agentWins: ConnectorDefinition = { version: 1, models: { current: { backend: "opencode", model: "inherit" } }, agents: { worker: { model: "current", systemPrompt: "work", tools: {}, inactivityTimeoutMs: 25, maxRuntimeMs: 500 } }, graphs: {}, defaultGraph: "default" };
+      const agentRuntime = new OpenCodeAgentRuntime({ plugin: { client: stubClient() } as never, definition: agentWins, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+      await expect(agentRuntime.call({ agent: "worker", node: "work", prompt: "work", state: {} })).rejects.toThrow("was inactive for 25ms");
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_LANGGRAPH_INACTIVITY_TIMEOUT_MS;
+      else process.env.OPENCODE_LANGGRAPH_INACTIVITY_TIMEOUT_MS = previous;
+    }
   });
 
   it("accounts completed model steps and enforces the configured ceiling only while busy", async () => {
@@ -936,6 +967,51 @@ describe("solution LOD reducer", () => {
     expect(application.network.activations.find((item) => item.id === "a2")?.status).toBe("failed");
     expect(application.network.artifacts.some((item) => item.kind === "file" && item.path === "target.txt")).toBe(true);
   });
+
+  const actionableSingleChoice = () => {
+    const network = initialNetwork("change");
+    network.activations[0].status = "completed";
+    const region = network.regions[0];
+    region.status = "actionable"; region.candidateIds = ["r1:direct"]; region.selectedCandidateIds = ["r1:direct"]; region.acceptanceCriteria = ["works"];
+    network.candidates.push({ id: "r1:direct", regionId: "r1", key: "direct", proposition: "implement it", status: "selected", evidenceIds: [], eliminationReasons: [] });
+    return network;
+  };
+  const blockedImplementCycle = (network: SolutionLodState["network"], changedFiles: string[] = [], checks: ImplementationOutput["checks"] = []): SolutionLodState["network"] => {
+    const id = `a${network.activations.length + 1}`;
+    network.activations.push({ id, capability: "implement", regionId: "r1", request: "implement", expectedDelta: `implement:r1:${network.revision}`, contextRefs: ["r1"], status: "running", basisRevision: network.revision });
+    network.regions[0].activationIds.push(id);
+    network.regions[0].status = "implementing";
+    return completeImplementation(network, id, { status: "blocked", summary: "missing prerequisite", changedFiles: [], checks, blocker: "missing prerequisite", activations: [] }, changedFiles);
+  };
+
+  it("stalls a region after three contentless reopens despite fresh artifact ids each cycle", () => {
+    const sameChecks: ImplementationOutput["checks"] = [{ name: "lint", passed: false, evidence: "same failure" }];
+    let current = actionableSingleChoice();
+    for (let cycle = 0; cycle < 3; cycle++) current = blockedImplementCycle(current, [], sameChecks);
+    expect(current.regions[0]).toMatchObject({ status: "superposed", reopens: 3 });
+    expect(current.artifacts).toHaveLength(3);
+    const stalled = blockedImplementCycle(current, [], sameChecks);
+    expect(stalled.regions[0]).toMatchObject({ status: "stalled", reopens: 3 });
+    expect(stalled.regions[0].contradiction).toBe("Region r1 stalled: 3 reopens without new evidence");
+    const scheduled = ensureRunnableWork(stalled);
+    expect(scheduled.done).toBe(false);
+    expect(scheduled.blocked).toBe("Region r1 stalled: 3 reopens without new evidence");
+    expect(nextQueuedActivation(scheduled.network)).toBeUndefined();
+  });
+
+  it("resets the reopen counter only on genuinely new evidence or artifact content", () => {
+    let current = actionableSingleChoice();
+    for (let cycle = 0; cycle < 3; cycle++) current = blockedImplementCycle(current);
+    expect(current.regions[0].reopens).toBe(3);
+    current = blockedImplementCycle(current, ["target.txt"]);
+    expect(current.regions[0]).toMatchObject({ status: "superposed", reopens: 1 });
+    current = blockedImplementCycle(current, ["target.txt"]);
+    expect(current.regions[0].reopens).toBe(2);
+    current.evidence.push({ id: "e1", text: "fresh repository fact", source: "src/new.ts", kind: "repository", fingerprint: "fresh1" });
+    current.regions[0].evidenceIds.push("e1");
+    current = blockedImplementCycle(current, ["target.txt"]);
+    expect(current.regions[0]).toMatchObject({ status: "superposed", reopens: 1 });
+  });
 });
 
 describe("solution LOD graph", () => {
@@ -957,6 +1033,27 @@ describe("solution LOD graph", () => {
     expect(configured.progress?.(result)).toMatchObject({ phase: "completed", semantic: { kind: "solution-lod-v1" } });
     expect(configured.result?.(result)).toContain("Implemented and verified");
     expect(configured.result?.(result)).not.toContain("stale pre-implementation design");
+  });
+
+  it("stalls a region terminally after three contentless blocked-implement reopens", async () => {
+    const directory = temp("solution-lod-stalled-");
+    fs.writeFileSync(path.join(directory, "target.txt"), "base");
+    const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
+    const calls: string[] = [];
+    const runtime = { call: async (input: { node: string }) => {
+      calls.push(input.node);
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] } };
+      if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
+      if (input.node === "implement:r1") return { text: "", structured: { status: "blocked", summary: "missing prerequisite", changedFiles: [], checks: [], blocker: "missing prerequisite", activations: [] } };
+      throw new Error(`unexpected node ${input.node}`);
+    } };
+    const result = await configured.graph.invoke(configured.initial({ task: "update", directory, worktree: directory, runId: "stalled" }), { recursionLimit: 128, configurable: { thread_id: "stalled", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => {} } });
+    expect(calls.filter((node) => node === "implement:r1")).toHaveLength(4);
+    const region = (result as SolutionLodState).network.regions.find((item) => item.id === "r1")!;
+    expect(region.status).toBe("stalled");
+    expect(region.reopens).toBe(3);
+    expect(configured.progress?.(result)?.phase).toBe("blocked");
+    expect(configured.result?.(result)).toContain("Region r1 stalled: 3 reopens without new evidence");
   });
 
   it("isolates malformed activation output and terminates with retained state", async () => {
@@ -1282,6 +1379,64 @@ describe("worktree queue", () => {
   });
 });
 
+describe("host reconciliation", () => {
+  it("fails running, queued, and pausing runs whose host process exited and leaves live runs untouched", async () => {
+    const stateHome = temp("opencode-langgraph-reconcile-");
+    const project = temp("opencode-langgraph-reconcile-project-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"]);
+    const deadPid = child.pid!;
+    await new Promise<void>((resolve) => child.on("spawn", () => resolve()));
+    child.kill("SIGKILL");
+    await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    try {
+      const base = { rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project };
+      writeStoredRun({ ...base, runId: "dead-running", status: "running", hostPid: deadPid });
+      writeStoredRun({ ...base, runId: "dead-queued", status: "queued", hostPid: deadPid });
+      writeStoredRun({ ...base, runId: "dead-pausing", status: "pausing", hostPid: deadPid });
+      writeStoredRun({ ...base, runId: "absent-host", status: "running" });
+      writeStoredRun({ ...base, runId: "live-running", status: "running", hostPid: process.pid });
+      writeStoredRun({ ...base, runId: "live-pausing", status: "pausing", hostPid: process.pid });
+      writeStoredRun({ ...base, runId: "dead-completed", status: "completed", hostPid: deadPid });
+      writeStoredRun({ ...base, runId: "dead-paused", status: "paused", hostPid: deadPid });
+      reconcileRuns();
+      expect(readStoredRun("dead-running").status).toBe("failed");
+      expect(readStoredRun("dead-queued").status).toBe("failed");
+      expect(readStoredRun("dead-pausing").status).toBe("failed");
+      expect(readStoredRun("absent-host").status).toBe("failed");
+      expect(readStoredRun("live-running")).toMatchObject({ status: "running", hostPid: process.pid });
+      expect(readStoredRun("live-pausing")).toMatchObject({ status: "pausing", hostPid: process.pid });
+      expect(readStoredRun("dead-completed").status).toBe("completed");
+      expect(readStoredRun("dead-paused").status).toBe("paused");
+      const events = readPluginEvents("root", stateHome).filter((event) => event.text === "Host process exited before the run finished");
+      expect(events.map((event) => event.runId).sort()).toEqual(["absent-host", "dead-pausing", "dead-queued", "dead-running"]);
+      for (const event of events) expect(event).toMatchObject({ node: "__end__", status: "failed", graph: "solution-lod" });
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
+  it("reconciles stale runs from a dead host when the server plugin starts", async () => {
+    const stateHome = temp("opencode-langgraph-reconcile-server-");
+    const project = temp("opencode-langgraph-reconcile-server-project-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = stateHome;
+    try {
+      writeStoredRun({ runId: "stale", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "running", hostPid: 2_147_483_647 });
+      writeStoredRun({ runId: "fresh", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "running", hostPid: process.pid });
+      await server({ client: {}, directory: project, worktree: project } as never);
+      expect(readStoredRun("stale").status).toBe("failed");
+      expect(readStoredRun("fresh").status).toBe("running");
+      expect(readPluginEvents("root", stateHome).at(-1)).toMatchObject({ runId: "stale", node: "__end__", status: "failed", text: "Host process exited before the run finished" });
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+});
+
 describe("durable checkpoints", () => {
   it("resumes an interrupt through a separately opened durable saver", async () => {
     const directory = temp("opencode-langgraph-checkpoints-");
@@ -1504,6 +1659,74 @@ describe("OpenCode automatic graph routing", () => {
       const resumed = JSON.parse(resumeOutput);
       expect(resumed.failed).toBe(false);
       expect(resumed.interrupted).toBe(false);
+      expect(readStoredRun(runId).status).toBe("completed");
+      expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("after");
+    } finally {
+      if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+      else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
+    }
+  });
+
+  it("resumes a paused run whose checkpoint lacks input writes by replaying checkpoint values", async () => {
+    const state = temp("opencode-langgraph-tool-state-");
+    const directory = temp("opencode-langgraph-tool-project-");
+    const priorState = process.env.OPENCODE_LANGGRAPH_STATE_HOME;
+    process.env.OPENCODE_LANGGRAPH_STATE_HOME = state;
+    try {
+      fs.writeFileSync(path.join(directory, "target.txt"), "base");
+      let child = 0;
+      const parents = new Map<string, string | undefined>([["root", undefined]]);
+      const titles = new Map<string, string>();
+      const client = { session: {
+        get: async ({ path: requestPath }: { path: { id: string } }) => ({ data: { id: requestPath.id, parentID: parents.get(requestPath.id) } }),
+        create: async ({ body }: { body: { parentID: string; title: string } }) => {
+          const id = `child-${++child}`;
+          parents.set(id, body.parentID);
+          titles.set(id, body.title);
+          return { data: { id } };
+        },
+        promptAsync: async () => ({ data: undefined }),
+        status: async () => ({ data: {} }),
+        messages: async ({ path: requestPath }: { path: { id: string } }) => {
+          if (requestPath.id === "root") return { data: [{ info: { role: "user", model: { providerID: "test", modelID: "model" } }, parts: [{ type: "text", text: "task" }] }] };
+          const title = titles.get(requestPath.id) ?? "";
+          let structured: unknown;
+          if (title.includes("inspect:r1")) {
+            structured = { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] };
+          } else if (title.includes("synthesize:r1")) {
+            structured = { region: { acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] };
+          } else if (title.includes("implement:r1")) {
+            fs.writeFileSync(path.join(directory, "target.txt"), "after");
+            structured = { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] };
+          } else if (title.includes("verify:r1")) {
+            structured = { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] };
+          }
+          return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: JSON.stringify(structured ?? {}) }] }] };
+        },
+        abort: async () => ({ data: true }),
+      } };
+      const hooks = await server({ client, directory, worktree: directory } as never);
+      const runId = "values-run";
+      writeStoredRun({ checkpointVersion: 5, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "paused" });
+
+      const checkpointer = new DurableFileSaver(path.join(state, "opencode-langgraph", "checkpoints"));
+      const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer });
+      // A paused run checkpointed before any input writes were recorded: channel values exist, channel versions do not.
+      // langgraph 1.4.9 throws EmptyInputError for invoke(null) against such a thread, so resume must replay the values.
+      await checkpointer.put(
+        { configurable: { thread_id: runId } },
+        { v: 4, id: "1ef5paused000000000000000000000", ts: new Date().toISOString(), channel_values: configured.initial({ task: "task", directory, worktree: directory, runId }), channel_versions: {}, versions_seen: {} },
+        { source: "loop", step: 0, writes: {}, parents: [] },
+      );
+      const paused = await configured.graph.getState({ configurable: { thread_id: runId } });
+      expect(Object.keys(paused.values as object).length).toBeGreaterThan(0);
+
+      const toolContext = { sessionID: "root", directory, worktree: directory, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
+      const resumeOutput = await (hooks.tool?.langgraph_resume.execute as (args: { runId?: string; answer?: string }, ctx: never) => Promise<string>)({}, toolContext);
+      const resumed = JSON.parse(resumeOutput);
+      expect(resumed.failed).toBe(false);
+      expect(resumed.interrupted).toBe(false);
+      expect(resumed.output).toContain("Implemented and verified");
       expect(readStoredRun(runId).status).toBe("completed");
       expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("after");
     } finally {

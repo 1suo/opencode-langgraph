@@ -7,7 +7,7 @@ import { loadConnectorDefinition, withSolutionRoleModelAssignments } from "../co
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
-import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestProjectRun, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestProjectRun, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, reconcileRuns, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
 import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
 import { reopenRegion } from "../core/solution-lod/reducer.js";
@@ -63,6 +63,7 @@ export function buildConversationContext(messages: ConversationMessage[], curren
 }
 
 export const server: Plugin = async (plugin) => {
+  reconcileRuns();
   const internalMessages = new Set<string>();
   const manualMessages = new Set<string>();
   const cancelledMessages = new Set<string>();
@@ -503,7 +504,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
       input.metadata?.({ title: `LangGraph · ${event.node}`, metadata: { runId, graph: graphName, ...event } });
     },
   });
-  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 5 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, modelAssignments: input.modelAssignments, status: "running" };
+  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 5 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, modelAssignments: input.modelAssignments, hostPid: process.pid, status: "running" };
   writeStoredRun(saved);
   input.onStarted?.({ runId, graph: graphName });
   let lease: WorktreeLease | undefined;
@@ -566,7 +567,7 @@ interface CheckpointResumeOptions {
 async function resumeFromCheckpoint(
   plugin: PluginInput,
   saved: StoredRun,
-  input: null | InstanceType<typeof Command>,
+  input: null | InstanceType<typeof Command> | Record<string, unknown>,
   options: CheckpointResumeOptions = {},
 ): Promise<GraphExecution> {
   if (saved.graph === "solution-lod" && saved.checkpointVersion !== 5) throw new Error("This interrupted solution-lod run uses an incompatible checkpoint schema. Start a new message to create a clean state-v5 run.");
@@ -593,7 +594,15 @@ async function resumeFromCheckpoint(
   const acquire = async () => { if (!lease) lease = await acquireWorktree(saved.worktree, signal); };
   writeStoredRun({ ...saved, status: "running" });
   try {
-    const result = await configured.graph.invoke(input, { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });
+    // langgraph throws EmptyInputError when a null input meets a checkpoint without recorded input writes;
+    // replaying the checkpoint's own values as input drives the resume on every other thread state.
+    let invokeInput: null | InstanceType<typeof Command> | Record<string, unknown> = input;
+    if (input === null) {
+      const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
+      const values = snapshot.values as Record<string, unknown> | undefined;
+      if (values && Object.keys(values).length > 0) invokeInput = values;
+    }
+    const result = await configured.graph.invoke(invokeInput, { recursionLimit: 512, configurable: { thread_id: saved.runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: acquire, langgraphPrepareVerifierWorkspace: prepareVerifierWorkspace, langgraphReleaseVerifierWorkspace: releaseVerifierWorkspace }, signal });
     if (isInterrupted(result)) {
       writeStoredRun({ ...saved, status: "interrupted" });
       const output = JSON.stringify(result.__interrupt__.map((item) => item.value), null, 2);

@@ -119,7 +119,7 @@ export default defineOpenCodeLangGraph({
 
 `initial` also receives an optional `conversationContext`: a bounded text frame of recent user and assistant turns from the root OpenCode session. Keep the current `task` authoritative; use the frame only to resolve references to earlier discussion.
 
-Agent calls time out after five minutes without message, reasoning, or tool progress, with a separate 30-minute absolute ceiling. Optional `maxSteps` bounds completed model turns. The built-in controller treats token, context, cache-read, and cost allowances as automatically expanded scheduling quanta rather than user-facing workflow gates. Custom agents remain step-unlimited unless configured.
+Agent calls time out after fifteen minutes without message, reasoning, or tool progress while idle, with a separate 30-minute absolute ceiling. A busy child session counts as active. Set `inactivityTimeoutMs` per agent to override the default; without an agent setting, the `OPENCODE_LANGGRAPH_INACTIVITY_TIMEOUT_MS` environment variable (milliseconds, must be an integer greater than zero) applies before the 15-minute fallback. Optional `maxSteps` bounds completed model turns. The built-in controller treats token, context, cache-read, and cost allowances as automatically expanded scheduling quanta rather than user-facing workflow gates. Custom agents remain step-unlimited unless configured.
 
 The F8 plan header and execution view report model turns, uncached input, and cache-read tokens in addition to graph calls. Graph calls count orchestration nodes, not the model turns inside an OpenCode child session.
 

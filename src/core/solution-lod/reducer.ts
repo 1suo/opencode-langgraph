@@ -10,7 +10,7 @@ const MAX_LOD = 6;
 export function initialNetwork(task: string): SolutionNetwork {
   return {
     revision: 0, nextRegionId: 2, nextEvidenceId: 1, nextConstraintId: 1, nextActivationId: 2, nextArtifactId: 1,
-    regions: [{ id: "r1", key: "root", edge: "root", lod: 0, objective: task, delivery: "change", allowedVariables: ["solution family"], acceptanceCriteria: [], status: "unformed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: ["a1"], artifactIds: [] }],
+    regions: [{ id: "r1", key: "root", edge: "root", lod: 0, objective: task, delivery: "change", allowedVariables: ["solution family"], acceptanceCriteria: [], status: "unformed", reopens: 0, reopenFingerprint: null, candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: ["a1"], artifactIds: [] }],
     candidates: [], constraints: [], evidence: [], artifacts: [],
     activations: [{ id: "a1", capability: "inspect", regionId: "r1", request: "Find repository facts needed to distinguish the broad solution types. Investigate lower-level details when they affect that choice, but do not turn them into choices yet.", expectedDelta: "coarse-domain:r1", contextRefs: ["r1"], status: "queued", basisRevision: 0 }],
   };
@@ -146,9 +146,9 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
         const children = network.regions.filter((item) => item.parentId === region.id);
         const atomic = region.acceptanceCriteria.length === 1 || region.lod >= MAX_LOD;
         const status = children.length ? "collapsed" : atomic ? "actionable" : "unrefined";
-        if (region.status !== status && !["implementing", "implemented", "verified"].includes(region.status)) { region.status = status; changed = anyChange = true; }
+        if (region.status !== status && !["implementing", "implemented", "verified", "stalled"].includes(region.status)) { region.status = status; changed = anyChange = true; }
       } else {
-        if (domain.length && region.status !== "superposed") { region.status = "superposed"; changed = anyChange = true; }
+        if (domain.length && region.status !== "superposed" && region.status !== "stalled") { region.status = "superposed"; changed = anyChange = true; }
       }
     }
   }
@@ -311,7 +311,7 @@ export function mergeRefinementOutput(networkInput: SolutionNetwork, activationI
       id: `r${network.nextRegionId++}`, key: definition.key, parentId: region.id, parentCandidateId: parentSelection, edge: definition.edge,
       lod: region.lod + 1, objective: definition.objective, delivery: definition.delivery ?? region.delivery,
       allowedVariables: [...definition.allowedVariables], acceptanceCriteria: [...definition.acceptanceCriteria], coveredCriteria: [...definition.coveredCriteria],
-      status: "unformed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [...region.evidenceIds], activationIds: [], artifactIds: [],
+      status: "unformed", reopens: 0, reopenFingerprint: null, candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [...region.evidenceIds], activationIds: [], artifactIds: [],
     });
   }
   region.status = "collapsed";
@@ -345,7 +345,10 @@ export function completeImplementation(networkInput: SolutionNetwork, activation
   for (const check of output.checks) addArtifact(network, region, activationId, { kind: "check", summary: `${check.name}: ${check.evidence}`, passed: check.passed });
   for (const request of output.activations) addActivation(network, { ...request, regionId: request.regionId ?? region.id, contextRefs: request.contextRefs, senderActivationId: activation.id });
   if (output.status === "completed") region.status = "implemented";
-  else { region.status = "superposed"; region.contradiction = output.blocker || output.summary || "Implementation reported a missing prerequisite."; region.selectedCandidateIds = []; for (const candidate of network.candidates.filter((item) => item.regionId === region.id && item.status === "selected")) candidate.status = "possible"; }
+  else if (countReopen(network, region)) {
+    region.status = "superposed"; region.contradiction = output.blocker || output.summary || "Implementation reported a missing prerequisite."; region.selectedCandidateIds = [];
+    for (const candidate of network.candidates.filter((item) => item.regionId === region.id && item.status === "selected")) candidate.status = "possible";
+  }
   network.revision++; return network;
 }
 
@@ -370,12 +373,38 @@ export function completePresentation(networkInput: SolutionNetwork, activationId
   activation.status = "completed"; region.answer = answer; region.status = "implemented"; addArtifact(network, region, activationId, { kind: "answer", summary: answer }); network.revision++; return network;
 }
 
+/** A content fingerprint over the region's evidence and artifact contents: fresh ids carrying identical content keep it stable, so only genuinely new content can reset the reopen counter. */
+function regionContentFingerprint(network: SolutionNetwork, region: SolutionRegion): string {
+  const evidence = [...new Set(region.evidenceIds.map((id) => network.evidence.find((item) => item.id === id)?.fingerprint ?? `missing:${id}`))].sort();
+  const artifacts = [...new Set(region.artifactIds.map((id) => network.artifacts.find((item) => item.id === id)).filter((item): item is SolutionNetwork["artifacts"][number] => Boolean(item)).map((item) => `${item.kind}\0${item.path ?? ""}\0${item.summary}\0${item.passed ?? ""}`))].sort();
+  return createHash("sha256").update(`${evidence.join("\0")}\n${artifacts.join("\0")}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * Count one reopen against a region: identical evidence/artifact content accumulates the counter,
+ * genuinely new content resets it, and the contentless reopen past MAX_ACTIVATION_RETRIES converts
+ * the region to terminal "stalled" instead of reopening. Returns whether the reopen may proceed.
+ */
+function countReopen(network: SolutionNetwork, region: SolutionRegion): boolean {
+  const fingerprint = regionContentFingerprint(network, region);
+  if (fingerprint !== region.reopenFingerprint) { region.reopenFingerprint = fingerprint; region.reopens = 1; return true; }
+  if (region.reopens >= MAX_ACTIVATION_RETRIES) {
+    region.status = "stalled";
+    region.contradiction = `Region ${region.id} stalled: ${region.reopens} reopens without new evidence`;
+    return false;
+  }
+  region.reopens += 1;
+  return true;
+}
+
 export function reopenRegion(networkInput: SolutionNetwork, regionId: string, reason: string): SolutionNetwork {
   const network = cloneNetwork(networkInput); const region = network.regions.find((item) => item.id === regionId); if (!region) return network;
-  region.status = "superposed"; region.contradiction = reason; region.selectedCandidateIds = [];
-  region.coveredCriteria = undefined;
-  for (const candidate of network.candidates.filter((item) => item.regionId === regionId)) candidate.status = "possible";
-  purgeDescendants(network, regionId);
+  if (countReopen(network, region)) {
+    region.status = "superposed"; region.contradiction = reason; region.selectedCandidateIds = [];
+    region.coveredCriteria = undefined;
+    for (const candidate of network.candidates.filter((item) => item.regionId === regionId)) candidate.status = "possible";
+    purgeDescendants(network, regionId);
+  }
   network.revision++; return network;
 }
 
@@ -516,5 +545,7 @@ export function ensureRunnableWork(input: SolutionNetwork, width = 1): { network
     if (nextQueuedActivation(network)) return { network, done: false };
     return { network, done: false, blocked: `No activation can make a novel state delta for ${first.id}.` };
   }
+  const stalled = required.find((region) => region.status === "stalled");
+  if (stalled) return { network, done: false, blocked: `Region ${stalled.id} stalled: ${stalled.reopens} reopens without new evidence` };
   return { network, done: false, blocked: "The solution network has no runnable activation and no completed root." };
 }
