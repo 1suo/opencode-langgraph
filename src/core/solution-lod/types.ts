@@ -3,7 +3,7 @@ import type { AgentCallLimits, AgentUsage } from "../types.js";
 
 export type Capability = "inspect" | "synthesize" | "refine" | "implement" | "verify" | "present";
 export type RegionEdge = "root" | "refines" | "partOf";
-export type RegionStatus = "unformed" | "superposed" | "unrefined" | "collapsed" | "actionable" | "implementing" | "implemented" | "verified" | "contradiction" | "blocked";
+export type RegionStatus = "unformed" | "superposed" | "unrefined" | "collapsed" | "actionable" | "implementing" | "implemented" | "verified" | "contradiction" | "blocked" | "stalled";
 export type CandidateStatus = "possible" | "eliminated" | "selected" | "equivalent";
 
 export interface ChildRegionDefinition {
@@ -38,6 +38,10 @@ export interface SolutionRegion {
   allowedVariables: string[];
   acceptanceCriteria: string[];
   status: RegionStatus;
+  /** Contentless reopens accumulated since the last genuinely new evidence/artifact content. */
+  reopens: number;
+  /** Content fingerprint of the region's evidence and artifacts at the last counted reopen. */
+  reopenFingerprint: string | null;
   candidateIds: string[];
   selectedCandidateIds: string[];
   constraintIds: string[];

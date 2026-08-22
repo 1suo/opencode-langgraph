@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import type { AgentPromptTrace, AgentUsage, GraphProgressSnapshot, SolutionRoleModelAssignments, UsageStreamingEstimate } from "../core/types.js";
+import { processAlive } from "./worktree-lock.js";
 
 export interface PluginRunEvent {
   at: string;
@@ -36,6 +37,7 @@ export interface StoredRun {
   directory: string;
   worktree: string;
   modelAssignments?: SolutionRoleModelAssignments;
+  hostPid?: number;
   status: "queued" | "running" | "pausing" | "paused" | "interrupted" | "completed" | "failed" | "cancelled" | "pruned";
 }
 
@@ -146,6 +148,26 @@ export function adoptHomeGraphState(sessionId: string, worktree: string, stateHo
 export function writeStoredRun(run: StoredRun): void {
   fs.mkdirSync(path.join(root(), "runs"), { recursive: true });
   fs.writeFileSync(path.join(root(), "runs", `${run.runId}.json`), JSON.stringify(run, null, 2));
+}
+
+export function reconcileRuns(): void {
+  for (const run of listAllRuns()) {
+    if (run.status !== "running" && run.status !== "queued" && run.status !== "pausing") continue;
+    if (run.hostPid !== undefined && processAlive(run.hostPid)) continue;
+    writeStoredRun({ ...run, status: "failed" });
+    appendPluginEvent({
+      at: new Date().toISOString(),
+      runId: run.runId,
+      rootSessionId: run.rootSessionId,
+      userMessageId: run.userMessageId,
+      graph: run.graph,
+      node: "__end__",
+      status: "failed",
+      agent: "langgraph",
+      model: "langgraph",
+      text: "Host process exited before the run finished",
+    });
+  }
 }
 
 export function readStoredRun(runId: string, stateHome?: string): StoredRun {
