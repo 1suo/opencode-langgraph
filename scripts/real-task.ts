@@ -63,7 +63,50 @@ console.log(`worktree: ${worktree}`);
 console.log(`runId: ${runId}\n`);
 
 const resume = Boolean(process.env.REAL_TASK_RESUME_RUN_ID);
-const input = resume ? null : configured.initial({ task, conversationContext: "", directory: worktree, worktree, runId });
+let input: unknown;
+if (resume) {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const homedir = join(process.env.HOME ?? "", ".local", "state", "opencode-langgraph", "checkpoints");
+  const file = readdirSync(homedir).map((name) => join(homedir, name)).find((path) => {
+    try { return JSON.parse(readFileSync(path, "utf8")).threadId === runId; } catch { return false; }
+  });
+  if (!file) throw new Error(`No checkpoint found for run ${runId}`);
+  const scrub = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(scrub);
+    if (value && typeof value === "object") {
+      if ("lc" in value) return (value as { type?: string }).type === "undefined" ? undefined : value;
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrub(item)]));
+    }
+    return value;
+  };
+  const checkpoint = JSON.parse(readFileSync(file, "utf8"));
+  let network: unknown;
+  for (const entry of Object.values(checkpoint.writes ?? {}).reverse()) {
+    for (const tup of Object.values(entry ?? {}) as Array<Array<{ __langgraphBytes?: string } | unknown>>) {
+      const raw = tup?.[2] as { __langgraphBytes?: string } | undefined;
+      const parsed = raw?.__langgraphBytes ? JSON.parse(Buffer.from(raw.__langgraphBytes, "base64").toString("utf8")) : null;
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.regions) && parsed.regions.length && parsed.regions[0].objective !== undefined) { network = parsed; break; }
+    }
+    if (network) break;
+  }
+  if (!network) throw new Error(`Checkpoint for ${runId} contains no network channel`);
+  const cleaned = scrub(network) as Record<string, unknown>;
+  for (const region of cleaned.regions as Array<Record<string, unknown>>) region.coveredCriteria = region.coveredCriteria ?? [];
+  // Crash recovery: activations captured mid-flight have no live session behind them.
+  // Mark them failed so their signatures free and the scheduler can requeue the work.
+  for (const activation of (cleaned.activations ?? []) as Array<{ status?: string; error?: string }>) {
+    if (activation.status === "queued" || activation.status === "running") { activation.status = "failed"; activation.error = "Recovered from an interrupted run; no live session survived."; }
+  }
+  input = {
+    stateVersion: 7, runId, originalTask: task, conversationContext: "", directory: worktree, worktree,
+    phase: "resuming", activeBatch: [], network: cleaned, results: [],
+    usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+    callsUsed: Array.isArray(cleaned.activations) ? cleaned.activations.length : 0, startedAt: Date.now(), result: "",
+  };
+} else {
+  input = configured.initial({ task, conversationContext: "", directory: worktree, worktree, runId });
+}
 const result = await configured.graph.invoke(input as never, {
   recursionLimit: 512,
   configurable: {
