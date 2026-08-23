@@ -67,7 +67,16 @@ export interface SolutionEvidence {
   /** Inference starts as a hypothesis; only confirmed evidence may justify pruning. */
   status?: "hypothesis" | "confirmed" | "rejected";
   validationKind?: "repository-evidence" | "tool-evidence" | "user-confirmation";
+  validationEvidenceRefs?: string[];
+  validationReason?: string;
   fingerprint: string;
+}
+
+export interface ClaimValidation {
+  claimRef: string;
+  verdict: "confirmed" | "rejected" | "unresolved";
+  evidenceRefs: string[];
+  reason: string;
 }
 
 export type ConstraintKind = "requires" | "excludes" | "supports" | "refutes" | "equivalent";
@@ -226,9 +235,13 @@ export const SolutionDeltaSchema = z.object({
   }).optional().describe("Use only to clarify the current goal or its success criteria."),
   evidence: z.array(z.object({
     text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference"),
-    status: z.enum(["hypothesis", "confirmed", "rejected"]).optional().describe("Inference is unconfirmed unless explicitly validated; repository, tool, and user evidence are confirmed by default."),
-    validationKind: z.enum(["repository-evidence", "tool-evidence", "user-confirmation"]).optional(),
-  })).default([]).describe("Claims used in this result. State each plainly, identify its source, and leave inference as a hypothesis until validated."),
+  })).default([]).describe("New claims used in this result. Inference always enters as an unconfirmed hypothesis. Only inspection may report repository/tool observations, which enter as confirmed evidence. Model output may not create user evidence; cite the immutable task reference instead."),
+  validations: z.array(z.object({
+    claimRef: z.string().min(1).describe("Existing hypothesis id being checked."),
+    verdict: z.enum(["confirmed", "rejected", "unresolved"]),
+    evidenceRefs: z.array(z.string()).default([]).describe("Confirmed repository/tool/user evidence proving confirmed or rejected. Use existing ids or sources supplied in this result."),
+    reason: z.string().min(1),
+  })).optional().describe("Kernel-checked validation results for existing hypotheses. Confirmed/rejected require independent evidence; unresolved has no effect."),
   variables: z.array(z.object({
     name: z.string().min(1).describe("A short stable name for a new shared choice that several moves depend on, e.g. 'http-client'. Declare it only when moves genuinely differ on it; reuse the established name instead of inventing a variant."),
     seedLabels: z.array(z.string()).default([]).describe("Options already known for this choice, stated exactly. Informational; new options may still appear later."),
@@ -236,7 +249,7 @@ export const SolutionDeltaSchema = z.object({
   candidates: z.array(z.object({
     key: z.string().min(1).describe("A short stable name for this alternative."),
     proposition: z.string().min(1).describe("The complete approach this alternative proposes."),
-    outcome: z.enum(["possible", "eliminated", "selected"]).default("possible").describe("Whether this alternative remains possible, is rejected, or is chosen. Interchangeability is derived from 'equivalent' constraints, never declared here."),
+    outcome: z.enum(["possible", "eliminated", "selected"]).default("possible").describe("Proposed disposition. Use 'eliminated' only together with a refutes constraint backed by the exact task reference or confirmed evidence; keep sourceKind=model-inference for your interpretation of the task. The kernel stores the proposal as possible and derives any elimination. Interchangeability is derived from 'equivalent' constraints, never declared here."),
     reasons: z.array(z.string()).default([]).describe("For a rejected alternative, explain why it should not be chosen. Do not put supporting facts here."),
     evidenceRefs: z.array(z.string()).default([]).describe("References to facts that justify the stated outcome."),
     stances: z.array(z.object({

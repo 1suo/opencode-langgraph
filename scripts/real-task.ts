@@ -1,5 +1,5 @@
 import { createOpencodeServer, createOpencodeClient } from "@opencode-ai/sdk";
-import { loadConnectorDefinition } from "../src/core/config.js";
+import { loadConnectorDefinition, opencodeModel, withSolutionRoleModelAssignments } from "../src/core/config.js";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 
 const task = process.argv[2];
@@ -30,7 +30,16 @@ const client = createOpencodeClient({ baseUrl: server.url });
 const root = await client.session.create({ query: { directory: worktree }, throwOnError: true });
 const rootSessionId = root.data.id;
 
-const definition = await loadConnectorDefinition(worktree);
+const definition = withSolutionRoleModelAssignments(await loadConnectorDefinition(worktree), Object.fromEntries(
+  ([
+    ["inspect", process.env.REAL_TASK_MODEL_THINKING],
+    ["synthesize", process.env.REAL_TASK_MODEL_THINKING],
+    ["refine", process.env.REAL_TASK_MODEL_THINKING],
+    ["implement", process.env.REAL_TASK_MODEL_FAST],
+    ["verify", process.env.REAL_TASK_MODEL_FAST],
+    ["present", process.env.REAL_TASK_MODEL_FAST],
+  ] as const).filter((entry): entry is [typeof entry[0], string] => Boolean(entry[1])).map(([role, model]) => [role, opencodeModel({ model })]),
+));
 const configured = definition.graphs["solution-lod"];
 const runId = `harness-${Date.now()}`;
 

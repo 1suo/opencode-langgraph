@@ -116,7 +116,7 @@ A single append-mostly document holding both orthogonal structures plus bookkeep
 - **Region** (`r1`, `r2`, …): `{key, parentId?, parentCandidateId?, edge: root|refines|partOf, lod, objective, delivery: answer|change, allowedVariables, acceptanceCriteria, status, candidateIds, selectedCandidateIds, constraintIds, evidenceIds, activationIds, artifactIds, answer?, contradiction?, coveredCriteria?}`. The root region `r1` is created by `initialNetwork(task)` with status `unformed` and one queued `inspect` activation `a1`.
 - **Candidate** (`r3:switch-parser` style ids): one mutually exclusive solution family within a region; status `possible | eliminated | selected` (interchangeability is derived from `equivalent` constraints, never authored), with elimination reasons, evidence references, and `stances: [{variableId, relation: requires|excludes|prefers, valueLabel}]` positioning the move on shared choices.
 - **Shared choice** (`v1`, … / DecisionVariable): `{id, name (globally unique slug), ownerRegionId, seedLabels[]}` — visible only in the owner's subtree; values exist as normalized labels inside stances/bindings, no registry. The primal variable graph (edges from co-occurrence within one move's stances or one constraint) must stay an acyclic forest — enforced at merge via union-find.
-- **Constraint**: hard relationship `requires | excludes | equivalent` between candidate endpoints, evidence relationship `supports | refutes` with kind-checked endpoints (`refutes`/`excludes` may also target coordinates `choiceName:option` when backed by ≥1 cited fact), plus `sourceKind: user-task|repo-evidence|model-inference`. Acceptance criteria and permissions are region policy, not constraint edges.
+- **Constraint**: hard relationship `requires | excludes | equivalent` between candidate endpoints, evidence relationship `supports | refutes` with kind-checked endpoints (`refutes`/`excludes` may also target coordinates `choiceName:option` when backed by ≥1 cited confirmed fact), plus provenance `sourceKind: user-task|repo-evidence|model-inference` and resolved `evidenceRefs`. Model deltas may not claim `user-task`; that source is reserved for trusted controller-authored state. Acceptance criteria and permissions are region policy, not constraint edges.
 - **Evidence**: normalized facts deduplicated by a sha256 fingerprint of `(text, source)`; kind `repository | tool | inference | user`. Stored once, passed around by id.
 - **Activation** (`a1`, `a2`, …): `{capability, regionId, request, expectedDelta, contextRefs, senderActivationId?, status: queued|running|completed|failed|superseded, basisRevision, sessionId?, error?}`.
 - **Artifact** (`x1`, …): observed outputs — `file` (with path), `check` (with pass/fail), `answer`.
@@ -186,7 +186,7 @@ Given one activation task:
 2. Applies each record with the capability-specific merge (`mergeSolutionDelta`, `mergeRefinementOutput`, `completeImplementation`, `completeVerification`, `completePresentation`), or marks it `failed`.
 3. Handles **failed implement** specially: retained workspace mutations are reconciled as a blocked implementation with the changed files recorded; otherwise the region returns to `actionable`.
 4. **Supersession:** a record whose region vanished, whose merge throws, or which was computed against an outdated `basisRevision` and whose application lands its region in `contradiction` is rolled back and marked `superseded` — superseded outcomes never consume the retry limit.
-5. Runs **one** deferred `propagateNetwork` pass for the whole batch.
+5. Runs `propagateNetwork` after every attempted record, including failed and rolled-back records, then one final idempotent pass. Derived contradictions and locks therefore cannot remain stale merely because an activation produced no accepted delta.
 6. Accumulates `usage`, increments `callsUsed` by the record count, clears `results` and `activeBatch`, and sets `phase` to `activation-failed` / `activation-deferred` / `propagating`.
 
 Then the unconditional edge returns to `schedule`.
@@ -237,18 +237,18 @@ Controller scheduling in `ensureRunnableWork` follows this lifecycle with priori
 
 ## 7. Context projection
 
-`projectActivationContext(state, activation)` builds the typed JSON payload each activation actually sees. Common part: `userRequest`, `conversation`, `yourAssignment`, the region's `goal` and `successCriteria`, referenced `facts`, `relationships`, and `outputs`, plus `earlierChoices` — the collapsed ancestry of selected propositions (`lineage()` walks parents via `selectedCandidateIds`). Capability-specific additions:
+`projectActivationContext(state, activation)` builds the typed semantic projection, and `compileActivationPrompt` renders it as compact role-native sections. The common part contains the original request, relevant conversation, exact local assignment, goal and criteria, confirmed facts, unresolved claims, referenced relationships/outputs, stable `{regionId,candidateId,choice}` lineage entries, and visible `variableStates`. Each variable state carries all binding and unavailability witnesses; conflicting binders are never overwritten into one apparent value. Capability-specific additions:
 
 | Capability | Extra fields |
 |---|---|
 | `inspect` | `questionToAnswer`, `mustNotChooseSolution` (true when the region delivers a change) |
 | `synthesize` | `choiceToMake`, `chooseOnly` (allowed variables), `alternativesAlreadyConsidered` with plain statuses, `ifFactIsMissing` guidance |
-| `refine` | `chosenApproach`, `approachToSettle`, `successCriteriaPositions`, `decideOrSplit` contract |
+| `refine` | `chosenApproach`, `approachToSettle`, numbered `successCriteriaPositions`, one-level child coverage contract |
 | `implement` | `chosenApproach`, `ifBlocked` guidance (missing fact vs. wrong choice) |
 | `verify` | `chosenApproach`, `changeToCheck` |
 | `present` | `answerToWrite` |
 
-Durable facts are stored once in `evidence` and passed by id. (Known measured behavior: the projection currently forwards a region's *entire* accumulated evidence/constraint/artifact sets rather than trimming to strict references, and child regions inherit the parent's evidence ids wholesale — documented in SPEC-graph.md as deliberate follow-up territory, not a correctness bug.)
+Durable facts are stored once in `evidence` and passed by id. Only explicit `contextRefs`, the current candidate slice, visible ancestor-owned variables, and stable selected lineage are projected; unrelated evidence/artifacts and cousin-private variables do not grow the prompt. Inference enters as `hypothesis`. Only an inspector validation backed by independent confirmed repository/tool/user evidence may make it `confirmed` or `rejected`; model-authored status fields have no authority.
 
 ---
 
@@ -269,12 +269,9 @@ Durable facts are stored once in `evidence` and passed by id. (Known measured be
 
 ## 9. Terminality, refinement, and reopening
 
-The controller — never the model — validates terminality (`validateRefinementOutput`):
+The controller — never the model — computes actionability. A selected region with one explicit criterion (or the reported depth floor) becomes actionable; otherwise `validateRefinementOutput` requires one level of uniquely named children, each with its own observable criterion and together covering every numbered parent criterion. Children start `unformed` with no copied evidence and carry `edge: refines` (a later choice) or `partOf` (an independent deliverable).
 
-- `terminal: true` requires a bounded `implementationContract` whose `coveredCriteria` address every supplied success criterion position; the contract replaces/sharpens the region's acceptance criteria and certifies the region `actionable`.
-- `terminal: false` requires `children` with unique keys where each child covers at least one criterion position and the children collectively cover all positions. Children are created `unformed`, inherit the parent's evidence, and carry `edge: refines` (a later choice) or `partOf` (an independent deliverable).
-
-Invalidation is surgical: a new synthesis selection drops the previous refinement's subtree (`purgeDescendants`) and contract; reopening a region (`reopenRegion`, used by verifier verdicts `reopen`/`fail`) does the same, resets candidates to `possible`, and clears the contradiction — while unrelated collapsed regions, all evidence, and observed artifacts survive.
+Invalidation is surgical: a new synthesis selection drops the previous refinement subtree; a verifier `reopen` does the same for the targeted region and resets its candidates. A verifier `fail` blocks rather than reopening. Unrelated collapsed regions, global evidence, and observed artifacts survive.
 
 ---
 
@@ -338,4 +335,4 @@ export default defineOpenCodeLangGraph({
 7. schedule: every live region verified → result = summary + changed files → finish → END
 ```
 
-The read-only path is shorter: either an evidenced `resolvedAnswer` in an inspect/synthesize delta (validated to cite at least one real fact) resolves the region directly to `implemented` with an answer artifact, or `refine` certifies a terminal contract with `delivery: "answer"` and `present` renders it from the recorded facts. Either way `verify` checks the answer and the run completes with the presented answer.
+The read-only path is shorter: an inspector may return an evidenced `resolvedAnswer` while marking the region `delivery: "answer"`; validation requires at least one real fact reference and the merge records an answer artifact. Otherwise a selected answer region is refined until the controller computes an actionable leaf, `present` renders from recorded facts, and `verify` checks it before completion.

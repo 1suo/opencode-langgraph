@@ -51,14 +51,20 @@ const factKills = (network: SolutionNetwork) => {
   const variableIds = new Set(network.variables.map((v) => v.id));
   const evidenceKills = new Set<string>();
   const refutedCoordinates = new Set<string>();
+  const confirmed = (id: string) => {
+    if (id === "task") return true;
+    const evidence = network.evidence.find((item) => item.id === id);
+    if (!evidence || (evidence.status ?? (evidence.kind === "inference" ? "hypothesis" : "confirmed")) !== "confirmed") return false;
+    return evidence.kind !== "inference" || Boolean(evidence.validationEvidenceRefs?.length && evidence.validationEvidenceRefs.every((ref) => network.evidence.some((ground) => ground.id === ref && ground.kind !== "inference")));
+  };
   for (const constraint of network.constraints) {
     if (constraint.kind !== "refutes") continue;
     const colon = constraint.target.indexOf(":");
     if (colon > 0 && variableIds.has(constraint.target.slice(0, colon))) {
       if (!constraint.evidenceRefs?.length) continue;
-      if (!constraint.evidenceRefs.every((ref) => network.evidence.some((e) => e.id === ref))) continue;
+      if (!constraint.evidenceRefs.every(confirmed)) continue;
       refutedCoordinates.add(`${constraint.target.slice(0, colon)}\u0000${constraint.target.slice(colon + 1).trim().toLowerCase()}`);
-    } else if (network.evidence.some((e) => e.id === constraint.subject)) {
+    } else if (confirmed(constraint.subject)) {
       evidenceKills.add(constraint.target);
     }
   }
@@ -70,6 +76,9 @@ const factKills = (network: SolutionNetwork) => {
 interface FastInstance {
   network: SolutionNetwork;
   committedPicks: Array<{ regionId: string; id: string }>;
+  multiLevel: boolean;
+  descendantVariable: boolean;
+  maxDepth: number;
 }
 
 function buildDirect(seed: number): FastInstance {
@@ -78,7 +87,7 @@ function buildDirect(seed: number): FastInstance {
   net.activations[0].status = "completed";
   const varCount = Math.floor(random() * 3);
   for (let i = 0; i < varCount; i++) net.variables.push({ id: `v${i + 1}`, name: `choice-${i}`, ownerRegionId: "r1", seedLabels: [] });
-  const childCount = 2 + Math.floor(random() * 2);
+  const childCount = 1 + Math.floor(random() * 2);
   const committedPicks: Array<{ regionId: string; id: string }> = [];
   for (let ci = 0; ci < childCount; ci++) {
     const rid = `r${ci + 2}`;
@@ -111,6 +120,40 @@ function buildDirect(seed: number): FastInstance {
       net.constraints.push({ id: `cx${ci}`, kind: "excludes", subject: sub.id, target: `${vid}:alpha`, reason: "move-vs-option", sourceActivationId: "a9", sourceKind: "repo-evidence", evidenceRefs: [] });
     }
   }
+  const multiLevel = random() < 0.55;
+  let descendantVariable = false;
+  if (multiLevel) {
+    const extraBudget = 5 - net.regions.length;
+    const extraCount = 1 + Math.floor(random() * Math.max(1, extraBudget));
+    let descendantVariableCount = 0;
+    for (let extra = 0; extra < extraCount; extra++) {
+      const possibleParents = net.regions.filter((region) => region.id !== "r1");
+      const deepest = [...possibleParents].sort((left, right) => right.lod - left.lod || left.id.localeCompare(right.id))[0]!;
+      const parent = random() < 0.7 ? deepest : pick(random, possibleParents)!;
+      const rid = `r${20 + extra}`;
+      const ownsVariable = random() < 0.8;
+      const descendantVariableId = `v${varCount + ++descendantVariableCount}`;
+      if (ownsVariable) {
+        net.variables.push({ id: descendantVariableId, name: `descendant-choice-${extra}`, ownerRegionId: parent.id, seedLabels: ["red", "blue"] });
+        descendantVariable = true;
+      }
+      net.regions.push({ id: rid, key: `descendant-${extra}`, parentId: parent.id, edge: random() < 0.5 ? "refines" : "partOf", lod: parent.lod + 1, objective: rid, delivery: "change", allowedVariables: [], acceptanceCriteria: [], status: "superposed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] });
+      const size = 2 + Math.floor(random() * 2);
+      for (let index = 0; index < size; index++) {
+        const id = `${rid}:c${index}`;
+        const stances: CandidateStance[] = [];
+        if (ownsVariable) stances.push({ variableId: descendantVariableId, relation: index === 0 ? "requires" : "excludes", valueLabel: "red" });
+        if (varCount > 0 && random() < 0.45) stances.push({ variableId: "v1", relation: "requires", valueLabel: index % 2 ? "beta" : "alpha" });
+        net.candidates.push({ id, regionId: rid, key: `c${index}`, proposition: `${rid} option ${index}`, status: "possible", evidenceIds: [], eliminationReasons: [], stances });
+        net.regions.at(-1)!.candidateIds.push(id);
+      }
+      if (random() < 0.2) {
+        const selected = pick(random, net.candidates.filter((candidate) => candidate.regionId === rid))!;
+        selected.status = "selected"; selected.declaredStatus = "selected";
+        committedPicks.push({ regionId: rid, id: selected.id });
+      }
+    }
+  }
   let ec = 0;
   const rc = Math.floor(random() * varCount * 2);
   for (let i = 0; i < rc && varCount > 0; i++) {
@@ -128,7 +171,7 @@ function buildDirect(seed: number): FastInstance {
     else net.constraints.push({ id: `cs${i}`, kind: "supports", subject: eid, target: t.id, reason: "support", sourceActivationId: "a9", sourceKind: "model-inference", evidenceRefs: [eid] });
   }
   assertAcyclicPrimalGraph(net); // throws on coupling cycles — caught by generateInstance for retry
-  return { network: net, committedPicks };
+  return { network: net, committedPicks, multiLevel, descendantVariable, maxDepth: Math.max(...net.regions.map((region) => region.lod)) };
 }
 
 // ─── Declarative joint enumeration (shared by both tiers) ───────────────────
@@ -287,10 +330,10 @@ describe("soundness oracle — fast tier (declarative joint enumeration)", () =>
   const SEEDS = Number(process.env.NEOLIT_ORACLE_SEEDS ?? 500);
   it(`never eliminates a candidate or coordinate some valid assignment uses (${SEEDS} seeds)`, () => {
     let eliminationsSeen = 0, skipped = 0;
-    const constraintKinds = new Set<string>(); const provenanceKinds = new Set<string>();
+    const constraintKinds = new Set<string>(); const provenanceKinds = new Set<string>(); let multiLevelSeen = 0; let descendantVariablesSeen = 0; let depthThreeSeen = 0; let depthFourSeen = 0;
     for (let seed = 1; seed <= SEEDS; seed++) {
       let network: SolutionNetwork | null = null; let committedPicks: Array<{ regionId: string; id: string }> = [];
-      for (let attempt = 0; attempt < 4; attempt++) { try { const inst = buildDirect(seed * 11 + attempt); if (inst) { network = inst.network; committedPicks = inst.committedPicks; break; } } catch { /* coupling cycle — retry */ } }
+      for (let attempt = 0; attempt < 4; attempt++) { try { const inst = buildDirect(seed * 11 + attempt); if (inst) { network = inst.network; committedPicks = inst.committedPicks; if (inst.multiLevel) multiLevelSeen++; if (inst.descendantVariable) descendantVariablesSeen++; if (inst.maxDepth >= 3) depthThreeSeen++; if (inst.maxDepth >= 4) depthFourSeen++; break; } } catch { /* coupling cycle — retry */ } }
       if (!network) continue;
       for (const constraint of network.constraints) { constraintKinds.add(constraint.kind); provenanceKinds.add(constraint.sourceKind); }
       const propagated = propagateNetwork(structuredClone(network));
@@ -315,6 +358,10 @@ describe("soundness oracle — fast tier (declarative joint enumeration)", () =>
     expect(eliminationsSeen, "expected meaningful coverage").toBeGreaterThan(SEEDS / 10);
     expect([...constraintKinds].sort()).toEqual(["equivalent", "excludes", "refutes", "requires", "supports"]);
     expect([...provenanceKinds].sort()).toEqual(["model-inference", "repo-evidence", "user-task"]);
+    expect(multiLevelSeen).toBeGreaterThan(SEEDS / 5);
+    expect(descendantVariablesSeen).toBeGreaterThan(SEEDS / 10);
+    expect(depthThreeSeen).toBeGreaterThan(SEEDS / 25);
+    expect(depthFourSeen).toBeGreaterThan(0);
   });
 
   it("is order-independent across every insertion dimension", () => {

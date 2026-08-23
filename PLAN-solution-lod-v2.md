@@ -28,7 +28,9 @@ DecisionVariable { id: "v<n>", name: slug, ownerRegionId }
 Stance { variableId, relation: "requires" | "excludes" | "prefers", valueLabel }
 
 // SolutionCandidate gains:  stances: Stance[]
-// SolutionConstraint gains: sourceKind: "user-task" | "repo-evidence" | "model-inference"
+// Stored SolutionConstraint gains provenance:
+// sourceKind: "user-task" | "repo-evidence" | "model-inference".
+// Model deltas may not assert user-task; that value is reserved for trusted controller state.
 // First-class composite refs: `${variableId}:${valueLabel}` — legal targets of refutes/excludes.
 ```
 
@@ -107,7 +109,7 @@ Types from Part B; validator extensions; pre-v7 checkpoints rejected (establishe
 2. Define `DecisionVariable`, `CandidateStance`, canonical coordinate syntax, `sourceKind`, and `evidenceRefs` once in types. Store seed labels as canonical informational labels without closing the domain.
 3. Build one preview network for semantic validation: merge proposed evidence aliases, variable declarations, candidate ids, stances, and coordinate names into the preview before validating any constraint or selection. Merge must consume exactly what validation accepted; it may not silently skip an unknown endpoint.
 4. Enforce global normalized variable-name uniqueness, owner-subtree visibility, canonical option spelling, candidate-key collision rejection, and legal endpoint matrices. Every rejection includes the accepted spelling/form.
-5. Validate provenance: every `evidenceRef` resolves to existing or same-delta evidence; coordinate eliminations require evidence; `repo-evidence` must cite repository/tool/user evidence rather than a free-floating model inference. Preserve `sourceKind` and resolved evidence ids through storage.
+5. Validate provenance: every `evidenceRef` resolves to existing or same-delta evidence; coordinate eliminations require evidence; `repo-evidence` must cite repository/tool/user evidence rather than a free-floating model inference; reject model-authored `user-task` claims even when they cite the task token. Preserve trusted `sourceKind` and resolved evidence ids through storage.
 6. Decode v7 strictly enough that missing required variable/stance/provenance arrays cannot be mistaken for a valid new checkpoint. Defaults belong at model-output parsing where intended, not at durable-state trust boundaries.
 
 Gate: v6 rejection/v7 resume tests; same-delta variable + stance + coordinate-constraint round trip; duplicate/shadow/cousin/canonical-label tests; invalid endpoint and unresolved-provenance tests; serialize/deserialize equality for every v7 field.
@@ -181,7 +183,7 @@ Gate: MRV/depth/id ordering test; stale-queue test; conflicting-binding projecti
 
 ### Step 5 — Proof harness (~1.5d)
 (a) Brute-force soundness oracle: seeded generator builds random forests (≤5 regions × ≤4 directions), random stances/constraints along forest edges, and enumerates all assignments. For every propagated elimination, the eliminated coordinate occurs in no valid assignment under the authored facts; equivalently, every coordinate occurring in a valid assignment remains viable. N≥500 seeds. Equality between propagated and globally consistent domains is neither required nor claimed unless a later, separately specified arc-consistency algorithm earns that stronger contract.
-(b) Zero-model mechanical fixtures: begin from a pre-authored configuration whose remaining transitions are entirely kernel-determined, set `runtime.call` to throw, and verify completion without another model decision. This proves the tested mechanical path does not depend on a hidden LLM call; it is an integration check, not a general proof of kernel correctness.
+(b) Zero-model boundary fixtures: replay an explicitly pre-verified checkpoint to terminal reporting, and separately start from a nonterminal actionable configuration at the exploration limit and prove that it blocks without invoking `runtime.call`. Reducer fixtures may prove propagation and scheduling of the next required capability without a model. Mutation completion is intentionally not claimed: implementation and verification are model/tool transitions, so a nonterminal mutation cannot honestly complete with a throwing runtime unless their results are smuggled into the fixture.
 (c) Order-independence under shuffled insertion; idempotence (double-propagate ≡ one, revision stable).
 (d) Locality test: projection size bounded by refs.
 (e) Named units: requires-dies-on-remote-refute, binding-prunes-descendants, prefers-never-eliminates, cousin-reference-rejected, shadowed-name-rejected, reopen-resets-owned-variables, sourceKind round-trip.
@@ -193,11 +195,11 @@ Gate: MRV/depth/id ordering test; stale-queue test; conflicting-binding projecti
 3. Run at least 500 fixed seeds in the normal suite. Add a larger optional stress count behind an environment flag; deterministic normal tests must remain fast enough for every step gate.
 4. Add permutation tests that shuffle regions, candidates, stances, constraints, and evidence insertion independently. Compare canonical derived snapshots, structured witnesses, terminal statuses, and revisions.
 5. Add full idempotence tests: `propagate(propagate(x))` equals `propagate(x)` in all derived data and revision. Include singleton collapse, remote refutation, conflicting bindings, equivalent candidates, and empty domains.
-6. Add zero-model fixtures starting from explicitly pre-authored mechanically decidable configurations. Set `runtime.call` to throw immediately and assert no call occurs, the expected kernel transitions finish, and the fixture does not smuggle in a precomputed terminal result.
+6. Add zero-model boundary fixtures with a throwing runtime: terminal replay may start only from an explicitly pre-verified checkpoint; a nonterminal actionable mutation must stop at an inspectable limit/blocker without a call. Separately test reducer-only propagation/scheduling. Do not claim zero-model mutation completion or fabricate implementation/verification records to obtain it.
 7. Add locality/property tests with hundreds of irrelevant cousin facts, artifacts, variables, and constraints. Assert projected content and serialized size change only for allowed own-slice, ancestry-binding, and explicit-reference additions.
 8. Complete the named regression matrix: duplicate-edge-is-legal, three-variable-clique-cycle, same-delta coordinate, coordinate-excludes, remote-refute, descendant-binding prune, prefers survival, cousin rejection, normalized-name collision, owner-variable invalidation, stale coordinate cleanup, structured contradiction witnesses, stale queued activation, and full `sourceKind` round trip.
 
-Gate: 500-seed oracle green, all permutation/idempotence/zero-model/locality/named tests green, failures print reproducible seeds, full suite/typecheck green, and no test asserts a stronger completeness property than the kernel promises.
+Gate: 500-seed oracle green, all permutation/idempotence/zero-model-boundary/locality/named tests green, failures print reproducible seeds, full suite/typecheck green, and no test asserts a stronger completeness property than the kernel promises.
 
 ### Step 6 — Docs & evidence (~½d)
 GRAPH/SPEC rewritten to match reality; TODO items closed; real-run captured (TODO.md:108).

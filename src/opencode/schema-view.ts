@@ -74,6 +74,12 @@ function synthesisLines(value: Record<string, unknown>): SchemaLine[] {
     if (asStrings(region.allowedVariables).length) lines.push(L(t("FREE CHOICES ", "muted"), t(asStrings(region.allowedVariables).map((choice) => clip(choice, 40)).join(" · "))));
   }
   evidenceLines(lines, value.evidence);
+  const validations = asArray(value.validations);
+  section(lines, "CLAIM VALIDATIONS", validations.length);
+  for (const validation of validations.slice(0, 8)) {
+    const verdict = str(validation.verdict) || "unresolved";
+    lines.push(L(t("  "), badge(verdict.toUpperCase(), verdict === "confirmed" ? "success" : verdict === "rejected" ? "error" : "warning"), t(` ${clip(validation.claimRef, 24)}`), validation.reason ? dim(`  · ${clip(validation.reason)}`) : dim("")));
+  }
   const candidates = asArray(value.candidates);
   section(lines, "CANDIDATES", candidates.length);
   for (const candidate of candidates.slice(0, 10)) {
@@ -189,7 +195,15 @@ const STATUS_STYLE: Record<string, { glyph: string; tone: SchemaTone }> = {
 export function renderSchemaInput(promptInput: string | undefined): SchemaLine[] | undefined {
   if (!promptInput) return undefined;
   let parsed: unknown;
-  try { parsed = JSON.parse(promptInput); } catch { return undefined; }
+  try { parsed = JSON.parse(promptInput); } catch {
+    if (!promptInput.startsWith("LOCAL OPERATION\n")) return undefined;
+    const lines: SchemaLine[] = [L(badge("ACTIVATION INPUT", "primary"))];
+    for (const block of promptInput.split("\n\n").slice(0, 24)) {
+      const [heading, ...body] = block.split("\n");
+      lines.push(L(t(`${clip(heading, 48)} `, "muted"), t(clip(body.join(" "), 240), heading === "LOCAL OPERATION" ? "accent" : "text", heading === "LOCAL OPERATION")));
+    }
+    return lines.slice(0, MAX_LINES);
+  }
   const value = asObject(parsed);
   if (!value || typeof value.userRequest !== "string" || !(typeof value.yourAssignment === "string" || typeof value.goal === "string")) return undefined;
   const lines: SchemaLine[] = [L(badge("ACTIVATION INPUT", "primary"))];

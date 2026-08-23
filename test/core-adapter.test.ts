@@ -238,7 +238,8 @@ describe("OpenCode child-session runtime", () => {
     await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" } })).resolves.toMatchObject({ structured: { decision: "go" }, sessionId: "child" });
     expect(prompts).toHaveLength(2);
     expect(prompts[1].body.parts[0].text).toContain("Your previous JSON failed validation");
-    expect(prompts[1].body.parts[0].text).toContain("ORIGINAL INPUT\ngo?");
+    expect(prompts[1].body.parts[0].text).toContain("ADMISSIBLE CORRECTION");
+    expect(prompts[1].body.parts[0].text).not.toContain("ORIGINAL INPUT");
   });
 
   it("retries valid JSON that fails the typed output contract", async () => {
@@ -257,9 +258,28 @@ describe("OpenCode child-session runtime", () => {
     };
     await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" }, validateStructured })).resolves.toMatchObject({ structured: { decision: "go" } });
     expect(prompts).toHaveLength(2);
-    expect(prompts[1].body.parts[0].text).toContain("ORIGINAL INPUT\ngo?");
-    expect(prompts[1].body.parts[0].text).toContain("VALIDATION ERROR\ndecision must be go");
+    expect(prompts[1].body.parts[0].text).toContain("FAILED PRECONDITION\ndecision must be go");
+    expect(prompts[1].body.parts[0].text).not.toContain("ORIGINAL INPUT");
     expect(prompts[1].body.parts[0].text).toContain('PREVIOUS INVALID OUTPUT\n{"decision":"stop"}');
+  });
+
+  it("serializes object-shaped validation failures into retry guidance", async () => {
+    const prompts: any[] = [];
+    const wrong = { info: { id: "wrong", role: "assistant" }, parts: [{ id: "wrong-text", type: "text", text: '{"decision":"stop"}' }] };
+    const repaired = { info: { id: "good", role: "assistant" }, parts: [{ id: "good-text", type: "text", text: '{"decision":"go"}' }] };
+    const client = { session: {
+      create: async () => ({ data: { id: "child" } }), promptAsync: async (value: unknown) => { prompts.push(value); }, status: async () => ({ data: {} }),
+      messages: async () => ({ data: prompts.length < 2 ? [wrong] : [wrong, repaired] }), abort: async () => ({ data: true }),
+    } };
+    const definition: ConnectorDefinition = { version: 1, models: { current: { backend: "opencode", model: "inherit" } }, agents: { planner: { model: "current", systemPrompt: "decide", tools: {}, maxSteps: 2 } }, graphs: {}, defaultGraph: "default" };
+    const runtime = new OpenCodeAgentRuntime({ plugin: { client } as never, definition, parentSessionId: "root", parentModel: { providerID: "p", modelID: "m" }, directory: "/repo", worktree: "/repo", signal: new AbortController().signal });
+    const validateStructured = (value: unknown) => {
+      if ((value as { decision?: string }).decision !== "go") throw { code: "INVALID_DECISION", message: "decision must be go" };
+      return value;
+    };
+    await expect(runtime.call({ agent: "planner", node: "decide", prompt: "go?", state: {}, schema: { type: "object" }, validateStructured })).resolves.toMatchObject({ structured: { decision: "go" } });
+    expect(prompts[1].body.parts[0].text).toContain('FAILED PRECONDITION\n{"code":"INVALID_DECISION","message":"decision must be go"}');
+    expect(prompts[1].body.parts[0].text).not.toContain("[object Object]");
   });
 
   it("keeps a child session alive while tool activity advances", async () => {
@@ -802,8 +822,26 @@ describe("solution LOD reducer", () => {
     current.network.constraints.push({ id: "c7", kind: "refutes", subject: "e7", target: "v1:node-fetch", reason: "conflicts with repo standard", sourceActivationId: "a1", sourceKind: "repo-evidence", evidenceRefs: ["e7"] });
     current.network.regions[0].evidenceIds.push("e7");
     current.network.activations[0].contextRefs.push("e7");
-    const projection = projectActivationContext(current, current.network.activations[0]) as { sharedChoices: Array<{ name: string; committedTo?: string; ruledOut: string[] }> };
-    expect(projection.sharedChoices).toEqual([{ name: "http-client", declaredAt: "r1", knownOptions: ["undici", "node-fetch"], committedTo: undefined, ruledOut: ["node-fetch"] }]);
+    const projection = projectActivationContext(current, current.network.activations[0]) as { variableStates: unknown[] };
+    expect(projection.variableStates).toEqual([{
+      id: "v1", name: "http-client", declaredAt: "r1", knownLabels: ["undici", "node-fetch"], binding: undefined, bindingWitnesses: [], bindingConflict: undefined,
+      unavailableLabels: ["node-fetch"], unavailabilityWitnesses: [{ valueLabel: "node-fetch", constraintId: "c7", relationship: "refutes", evidenceRefs: ["e7"], reason: "conflicts with repo standard" }],
+    }]);
+  });
+
+  it("projects every conflicting binding witness instead of overwriting one", () => {
+    const current = state();
+    current.network.variables.push({ id: "v1", name: "runtime", ownerRegionId: "r1", seedLabels: ["node", "bun"] });
+    current.network.candidates.push(
+      { id: "r1:node", regionId: "r1", key: "node", proposition: "Node", status: "selected", declaredStatus: "selected", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "node" }] },
+      { id: "r1:bun", regionId: "r1", key: "bun", proposition: "Bun", status: "selected", declaredStatus: "selected", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "bun" }] },
+    );
+    current.network.regions[0].candidateIds = ["r1:node", "r1:bun"];
+    current.network.regions[0].selectedCandidateIds = ["r1:node", "r1:bun"];
+    const projection = projectActivationContext(current, current.network.activations[0]) as { variableStates: Array<{ binding?: string; bindingConflict?: string[]; bindingWitnesses: Array<{ candidateId: string }> }> };
+    expect(projection.variableStates[0].binding).toBeUndefined();
+    expect(projection.variableStates[0].bindingConflict).toEqual(["bun", "node"]);
+    expect(projection.variableStates[0].bindingWitnesses.map((item) => item.candidateId)).toEqual(["r1:bun", "r1:node"]);
   });
 
   it("projects only referenced context and the collapsed ancestry", () => {
@@ -839,7 +877,7 @@ describe("solution LOD reducer", () => {
     expect(projection).toMatchObject({
       goal: "change",
       successCriteria: ["target behavior works"],
-      chosenApproach: ["Extend the existing implementation"],
+      chosenApproach: [{ regionId: "r1", candidateId: "r1:direct", choice: "Extend the existing implementation" }],
     });
     expect(projection).not.toHaveProperty("decisionsAlreadyMade");
     expect(projection).not.toHaveProperty("region");
@@ -872,15 +910,25 @@ describe("solution LOD reducer", () => {
     expect(compileActivationPrompt(current, activation)).toBe(before);
   });
 
-  it("keeps the local semantic contract stable across user-request paraphrases", () => {
+  it("preserves user wording while keeping the same local operation contract", () => {
     const left = state(); const right = state();
     left.originalTask = "Add a cache without changing deployment";
     right.originalTask = "Introduce caching while preserving the deployment topology";
-    expect(compileActivationPrompt(left, left.network.activations[0])).toBe(compileActivationPrompt(right, right.network.activations[0]));
+    const leftPrompt = compileActivationPrompt(left, left.network.activations[0]);
+    const rightPrompt = compileActivationPrompt(right, right.network.activations[0]);
+    expect(leftPrompt).toContain(left.originalTask);
+    expect(rightPrompt).toContain(right.originalTask);
+    expect(leftPrompt).toContain("inspect: Find repository facts needed");
+    expect(rightPrompt).toContain("inspect: Find repository facts needed");
   });
 
   it("compiles a bounded operational contract for every role", () => {
     const current = state();
+    current.network.regions[0].acceptanceCriteria = ["criterion zero"];
+    current.network.candidates.push({ id: "r1:a", regionId: "r1", key: "a", proposition: "Existing approach", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [] });
+    current.network.regions[0].candidateIds.push("r1:a");
+    current.network.artifacts.push({ id: "x1", regionId: "r1", kind: "file", path: "src/a.ts", summary: "implemented output", activationId: "a0" });
+    current.network.activations[0].contextRefs.push("x1");
     for (const capability of ["inspect", "synthesize", "refine", "implement", "verify", "present"] as const) {
       const compiled = compileActivationPrompt(current, { ...current.network.activations[0], capability });
       expect(compiled).toContain(`LOCAL OPERATION\n${capability}:`);
@@ -888,6 +936,10 @@ describe("solution LOD reducer", () => {
       expect(compiled).toContain("DATA BOUNDARY");
       expect(compiled).toContain("Return exactly one JSON value");
       expect(compiled.length).toBeLessThan(3500);
+      expect(flattenSchemaLines(renderSchemaInput(compiled)!)).toContain(capability);
+      if (capability === "synthesize") expect(compiled).toContain("CURRENT ALTERNATIVES\n[{\"referenceId\":\"r1:a\"");
+      if (capability === "refine") { expect(compiled).toContain("NUMBERED PARENT CRITERIA"); expect(compiled).toContain("ONE-LEVEL DECOMPOSITION CONTRACT"); }
+      if (capability === "implement" || capability === "verify" || capability === "present") expect(compiled).toContain("implemented output");
     }
   });
 
@@ -1007,6 +1059,24 @@ describe("solution LOD reducer", () => {
     expect(network.candidates[0]).toMatchObject({ id: "r1:auth-service", proposition: "Auth service, refined" });
   });
 
+  it("deduplicates constraints by operative identity instead of paraphrased reason text", () => {
+    const current = state();
+    const network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] },
+      evidence: [{ text: "API already exports x", source: "src/api.ts:1", kind: "repository" }],
+      candidates: [{ key: "reuse", proposition: "Reuse the API", outcome: "possible", reasons: [], evidenceRefs: [] }],
+      constraints: [
+        { kind: "supports", subject: "src/api.ts:1", target: "reuse", reason: "The export exists", sourceKind: "repo-evidence", evidenceRefs: ["src/api.ts:1"] },
+        { kind: "supports", subject: "src/api.ts:1", target: "reuse", reason: "Existing API export supports reuse", sourceKind: "repo-evidence", evidenceRefs: ["src/api.ts:1"] },
+        { kind: "supports", subject: "src/api.ts:1", target: "reuse", reason: "Reuse is supported by that export", sourceKind: "repo-evidence", evidenceRefs: ["src/api.ts:1"] },
+      ],
+      select: [], activations: [],
+    });
+    expect(network.constraints).toHaveLength(1);
+    expect(network.constraints[0]).toMatchObject({ kind: "supports", subject: "e1", target: "r1:reuse", evidenceRefs: ["e1"] });
+    expect(network.regions[0].constraintIds).toEqual([network.constraints[0].id]);
+  });
+
   it("batches queued read-only activations on pairwise distinct regions and keeps mutating work singleton", () => {
     const network = initialNetwork("task");
     for (const id of ["r2", "r3"]) network.regions.push({ id, key: id, parentId: "r1", edge: "partOf", lod: 1, objective: id, delivery: "change", allowedVariables: [], acceptanceCriteria: [], status: "unformed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] });
@@ -1031,6 +1101,45 @@ describe("solution LOD reducer", () => {
     expect(application.applied).toEqual(["a1", "a2"]);
     expect(application.network.evidence.map((item) => item.text)).toEqual(["first", "second"]);
     expect(application.network.activations.filter((item) => ["a1", "a2"].includes(item.id)).map((item) => item.status)).toEqual(["completed", "completed"]);
+  });
+
+  it("propagates a failed activation record and clears a stale commitment-conflict lock", () => {
+    const network = initialNetwork("task");
+    network.activations[0].status = "running";
+    network.variables.push({ id: "v1", name: "runtime", ownerRegionId: "r1", seedLabels: ["node", "bun"] });
+    network.candidates.push(
+      { id: "r1:node", regionId: "r1", key: "node", proposition: "Use Node", status: "selected", declaredStatus: "selected", evidenceIds: [], declaredEvidenceIds: [], eliminationReasons: [], declaredEliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "node" }] },
+      { id: "r1:bun", regionId: "r1", key: "bun", proposition: "Use Bun", status: "eliminated", declaredStatus: "possible", evidenceIds: [], declaredEvidenceIds: [], eliminationReasons: ["refuted"], declaredEliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "bun" }] },
+    );
+    network.regions[0].candidateIds = ["r1:node", "r1:bun"];
+    network.regions[0].selectedCandidateIds = ["r1:node"];
+    network.regions[0].status = "contradiction";
+    network.regions[0].contradiction = "Commitments conflict on shared choice: stale";
+    const failed: ActivationTaskResult = {
+      activationId: "a1", regionId: "r1", capability: "inspect", basisRevision: 0, startedAt: 0, finishedAt: 1,
+      usage: { turns: 1, input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, outcome: "error", error: "invalid output", networkDelta: null,
+    };
+    const application = applyBatchRecords(network, [failed]);
+    expect(application.failed).toEqual(["a1"]);
+    expect(application.network.regions[0].contradiction).toBeUndefined();
+    expect(application.network.regions[0].status).not.toBe("contradiction");
+  });
+
+  it("does not retain a conflict lock when confirmed evidence kills one binder in the same propagation", () => {
+    const network = initialNetwork("task");
+    network.variables.push({ id: "v1", name: "runtime", ownerRegionId: "r1", seedLabels: ["node", "bun"] });
+    network.evidence.push({ id: "e1", text: "Bun is unavailable", source: "tool", kind: "tool", fingerprint: "bun-unavailable" });
+    network.candidates.push(
+      { id: "r1:node", regionId: "r1", key: "node", proposition: "Use Node", status: "selected", declaredStatus: "selected", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "node" }] },
+      { id: "r1:bun", regionId: "r1", key: "bun", proposition: "Use Bun", status: "selected", declaredStatus: "selected", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "bun" }] },
+    );
+    network.constraints.push({ id: "c1", kind: "refutes", subject: "e1", target: "r1:bun", reason: "runtime unavailable", sourceActivationId: "a1", sourceKind: "repo-evidence", evidenceRefs: ["e1"] });
+    network.regions[0].candidateIds = ["r1:node", "r1:bun"];
+    network.regions[0].selectedCandidateIds = ["r1:node", "r1:bun"];
+    const propagated = propagateNetwork(network);
+    expect(propagated.candidates.find((item) => item.id === "r1:bun")?.status).toBe("eliminated");
+    expect(propagated.regions[0].contradiction).toBeUndefined();
+    expect(propagated.regions[0].selectedCandidateIds).toEqual(["r1:node"]);
   });
 
   it("marks a record superseded when its region disappeared from the current solution", () => {
@@ -1252,7 +1361,7 @@ describe("solution LOD reducer", () => {
     // Singleton region force-selects the move; inertness means it is not eliminated.
     expect(propagateNetwork(inactive.network).candidates.find((candidate) => candidate.id === "r2:move")?.status).not.toBe("eliminated");
     expect(() => validateSolutionDelta(build(), "r1", {
-      region: {}, evidence: [{ text: "fact", source: "y:1", kind: "repository" }], candidates: [{ key: "idle2", proposition: "Idle", outcome: "possible", reasons: [], evidenceRefs: [] }], constraints: [
+      region: {}, evidence: [], candidates: [{ key: "idle2", proposition: "Idle", outcome: "possible", reasons: [], evidenceRefs: [] }], constraints: [
         { kind: "excludes", subject: "idle2", target: "http-client:undici", reason: "uncited exclusion", sourceKind: "model-inference", evidenceRefs: [] },
       ], select: [], activations: [],
     })).toThrow(/at least one cited fact/);
@@ -1315,6 +1424,48 @@ describe("solution LOD reducer", () => {
       constraints: [{ kind: "refutes", subject: "task", target: "runtime:node20", reason: "hypothesis", sourceKind: "model-inference", evidenceRefs: ["e9"] }], select: [], activations: [],
     })).toThrow(/unresolved claim/);
   });
+
+  it("does not let an inspector self-confirm inference metadata", () => {
+    const current = state();
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: {}, variables: [], candidates: [], constraints: [], select: [], activations: [],
+      evidence: [{ text: "Maybe Node 20 only", source: "model", kind: "inference", status: "confirmed" }],
+    } as never);
+    expect(merged.evidence[0]).toMatchObject({ kind: "inference", status: "hypothesis" });
+  });
+
+  it("validates a hypothesis only through independent evidence and preserves the proof", () => {
+    const current = state();
+    current.network.evidence.push({ id: "e9", text: "Node 20 only", source: "model", kind: "inference", status: "hypothesis", validationKind: "repository-evidence", fingerprint: "h9" });
+    const delta = {
+      region: {}, variables: [], candidates: [], constraints: [], select: [], activations: [],
+      evidence: [{ text: "engines requires Node 20", source: "package.json:8", kind: "repository" as const }],
+      validations: [{ claimRef: "e9", verdict: "confirmed" as const, evidenceRefs: ["package.json:8"], reason: "package engines field" }],
+    };
+    expect(() => validateSolutionDelta(current, "r1", "inspect", delta)).not.toThrow();
+    const merged = mergeSolutionDelta(current, "a1", delta);
+    const proofId = merged.evidence.find((item) => item.source === "package.json:8")!.id;
+    expect(merged.evidence.find((item) => item.id === "e9")).toMatchObject({ status: "confirmed", validationEvidenceRefs: [proofId], validationReason: "package engines field" });
+  });
+
+  it("rejects model-forged user authority", () => {
+    const current = state();
+    expect(() => validateSolutionDelta(current, "r1", "synthesize", {
+      region: {}, evidence: [], variables: [], candidates: [{ key: "x", proposition: "X", outcome: "possible", reasons: [], evidenceRefs: [] }],
+      constraints: [{ kind: "refutes", subject: "task", target: "x", reason: "user allegedly forbade it", sourceKind: "user-task", evidenceRefs: ["task"] }], select: [], activations: [],
+    })).toThrow(/cannot assert user-task authority/);
+  });
+
+  it("prevents tool-free synthesis and refinement from fabricating confirmed observations", () => {
+    const current = state();
+    expect(() => validateSolutionDelta(current, "r1", "synthesize", {
+      region: {}, variables: [], evidence: [{ text: "alleged file fact", source: "src/x.ts:1", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [],
+    })).toThrow(/tool-free role cannot create confirmed/);
+    expect(() => validateRefinementOutput(current, "r1", {
+      evidence: [{ text: "alleged tool result", source: "command", kind: "tool" }], activations: [],
+      children: [{ key: "child", objective: "Do work", edge: "partOf", allowedVariables: [], acceptanceCriteria: ["works"], coveredCriteria: [0] }],
+    })).toThrow(/Refinement is tool-free/);
+  });
 });
 
 describe("solution LOD graph", () => {
@@ -1323,8 +1474,10 @@ describe("solution LOD graph", () => {
     fs.writeFileSync(path.join(directory, "target.txt"), "before");
     const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
     const calls: string[] = [];
-    const runtime = { call: async (input: { node: string }) => {
+    const retryCounts = new Map<string, number | undefined>();
+    const runtime = { call: async (input: { node: string; retryCount?: number }) => {
       calls.push(input.node);
+      retryCounts.set(input.node, input.retryCount);
       if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", allowedVariables: ["solution family"], acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: ["e1"] }] } };
       if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: ["e1"] }], constraints: [], select: ["direct"], answer: "stale pre-implementation design", activations: [] } };
       if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] } }; }
@@ -1333,6 +1486,8 @@ describe("solution LOD graph", () => {
     } };
     const result = await configured.graph.invoke(configured.initial({ task: "update", directory, worktree: directory, runId: "run" }), { recursionLimit: 64, configurable: { thread_id: "run", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => {} } });
     expect(calls).toEqual(["inspect:r1", "synthesize:r1", "implement:r1", "verify:r1"]);
+    expect(retryCounts.get("synthesize:r1")).toBe(2);
+    expect(retryCounts.get("inspect:r1")).toBeUndefined();
     expect(configured.progress?.(result)).toMatchObject({ phase: "completed", semantic: { kind: "solution-lod-v2" } });
     expect(configured.result?.(result)).toContain("Implemented and verified");
     expect(configured.result?.(result)).not.toContain("stale pre-implementation design");

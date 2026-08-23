@@ -91,7 +91,7 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
 
 ## 6. Tests and release evidence
 
-- [ ] Test propagation order independence and idempotence with small generated
+- [x] Test propagation order independence and idempotence with generated
   networks.
 - [ ] Test valid, cyclic, cross-region, and impossible requirements; symmetric
   exclusion; equivalence; and every retained constraint kind.
@@ -122,24 +122,23 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
   boundary (`assertAcyclicPrimalGraph`) before propagation; the generator covers
   authored selections, conflicting commitments, equivalence classes, pairwise
   requires/excludes, cited coordinate refutes/excludes, supports, and all three
-  provenance kinds. Multi-level trees and descendant-owned variables remain a
-  documented follow-up.
+  provenance kinds, multi-level trees, and descendant-owned variables, with
+  explicit coverage thresholds.
 - [x] Coordinate excludes implemented end to end: authoritative-commitment
   trigger (declared selections only — derived singletons made the rule
   order-dependent), cross-region pruning of requiring moves, uncited rejection
   at validation, named active/inactive/prune tests, oracle enforcement added.
-- [x] 500 seeds standard; every failure prints seed + context and auto-dumps the
-  full serializable input (`unsound-case.json` / `novalid-case.json` /
-  `oif-case.json`). Replay = rerun with the printed seed. A shrinking minimizer
-  was declined as YAGNI for a seeded deterministic suite at this instance size.
+- [x] 500 seeds standard; soundness failures print seed + context and dump the
+  full serializable input to `unsound-case.json`. Replay = rerun with the printed
+  seed. A shrinking minimizer remains optional for this bounded deterministic suite.
 - [x] All seven insertion dimensions permuted independently (including stance
   order within candidates); order-independence compares a canonical snapshot of
   revision, variables, candidate dispositions/reasons/evidence, region statuses,
   forced picks, and contradiction text — plus idempotence re-check per seed.
 - [x] Full-state idempotence restored (`propagate²` deep-equals `propagate`,
-  revision stable) plus six named cases: singleton collapse, remote refutation,
-  equivalent co-selection, contested-binding lock, coordinate exclusion from an
-  authored commitment, and empty-domain contradiction.
+  revision stable) across the 500-seed generated suite; named regressions cover
+  singleton collapse, remote refutation, equivalent co-selection, stale and
+  contested-binding locks, coordinate exclusion, and empty-domain contradiction.
 - [x] Nonterminal variant landed: an actionable unverified configuration reaches
   the exploration-limit terminal through the real graph with a throwing runtime
   (blocked phase, frontier inspectable). Literal "complete work with zero model
@@ -149,16 +148,19 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
   exact referenced content, absence of unrelated content, and serialized payload
   bounded under one-third of full-network size. Cousin variables/constraints
   remain covered by the pre-existing absence assertions.
-- [x] Named matrix completed: duplicate primal edge legal; transitive triangle
+- [x] Current named matrix completed: duplicate primal edge legal; transitive triangle
   rejected; same-delta declaration+stance works; purge removes descendant-owned
-  variables; empty-domain and contested-commitment witnesses verified; stale
+  variables; deterministic contradiction text verified; stale
   superseded work cannot block legal activations; `sourceKind` round-trips
-  merge → storage → validation; semantic snapshot exposes it (TUI badge render
-  remains follow-up).
+  through trusted internal merge/storage, while model-authored `user-task`
+  authority is rejected; semantic snapshots and the region pane expose
+  provenance and evidence references. Structured contradiction objects remain
+  the separate Step 3.6 task in the execution plan.
 - [x] Titles aligned with evidence: graph fixture renamed to terminal-state
   replay of a fully verified checkpoint; soundness describe now states its
   declarative joint-enumeration method explicitly.
-- [x] Step 5 complete: 122/122 vitest + clean tsc with the 500-seed declarative
+- [x] Step 5 proof harness complete for the current string-witness kernel: 131/131
+  vitest + clean tsc with the 500-seed declarative
   oracle, seven-dimension permutation, canonical-snapshot order-independence,
   full idempotence + named cases, exhaustion and terminal-replay graph fixtures,
   scaled locality property, completed named matrix, and hardened kernel fixes
@@ -172,11 +174,11 @@ propagation semantics; merge-boundary suite (15 seeds) tests real schema
 parse + mergeSolutionDelta acceptance. Named matrix covers clique cycles,
 parallel edges, owner-variable invalidation, stale-coordinate cleanup,
 exact structured witnesses, contested-binding locks, coordinate-excludes
-semantics, sourceKind round-trips, and locality at scale. Three genuine
-kernel bugs found and fixed: excludes-vs-refuted semantics, dead-binder
-stickiness, mid-pass read/write skew (non-confluence). Structural-release
-gap also fixed: structurally unsatisfiable commitments no longer fire
-coordinate-excludes on their way out.
+semantics, sourceKind round-trips, and locality at scale. Kernel bugs found
+and fixed include excludes-vs-refuted semantics, dead-binder stickiness,
+mid-pass read/write skew (non-confluence), and structural release: both
+structurally unsatisfiable commitments and commitments killed by coordinate
+facts stop firing coordinate-excludes on their way out.
 
 ## 7. Refactor and polish
 
@@ -324,19 +326,20 @@ coordinate-excludes on their way out.
   for diagnostics, but do not require an agent to infer operational meaning from
   controller field names.
 - [x] Introduce an explicit lifecycle for claims (`hypothesis`, `confirmed`,
-  `rejected`) together with authority and validation kind. A hypothesis must have
+  `rejected`) together with authority and validation proof references. A hypothesis must have
   no pruning or selection effect; confirmation must satisfy the evidence policy
   for that claim type; rejection must prevent the claim from silently returning
   as an established fact.
 - [x] Compile claim state into consequences appropriate to the receiving role.
   Inspectors receive the exact validation question, admissible evidence, and
-  `confirmed|refuted|unresolved` response contract; synthesizers are told that an
+  `confirmed|rejected|unresolved` response contract; synthesizers are told that an
   unresolved claim cannot eliminate an alternative; implementers receive only
   relevant confirmed requirements and explicitly necessary unresolved risks.
-- [x] Preserve stable IDs through every prompt and response. Require proposed
-  eliminations, selections, validations, and reopen requests to reference the
-  candidate, constraint/claim, and evidence IDs they depend on; reject missing,
-  invisible, stale, or type-ineligible references before merging output.
+- [x] Preserve stable references through every prompt and response. Existing
+  candidates, constraints, claims, evidence, lineage choices, and reopen targets
+  carry stable IDs; new alternatives use local stable keys that the validator
+  resolves before merge. Reject missing, invisible, stale, or type-ineligible
+  references before merging output.
 - [x] Project provenance completely. Every supplied relationship must carry its
   `sourceKind` and supporting evidence references, and every supplied fact must
   retain its authority/status, so agents can distinguish user requirements,
@@ -374,16 +377,31 @@ coordinate-excludes on their way out.
   operation, the failed precondition, and the admissible correction without
   repeating the whole prompt or allowing the model to reinterpret established
   semantics.
-- [x] Add prompt-contract fixtures for every role covering ambiguous terminology,
+- [x] Propagate after every activation attempt, including failure/supersession,
+  and regression-test that a failed final batch cannot preserve a stale
+  commitment-conflict lock.
+- [x] Serialize non-`Error` failures as JSON throughout runtime, graph, server,
+  validation, tool trace, and TUI paths; never teach a retry with
+  `[object Object]`.
+- [x] Give synthesis three total structured-output attempts and teach the exact
+  `outcome=eliminated` + evidenced `refutes` form in the schema and local prompt.
+- [x] Deduplicate constraints by operative `{kind, endpoints}` identity rather
+  than free-form reason wording; merge proof references/provenance so repeated
+  paraphrases do not inflate prompts or stored networks.
+- [x] Replace the fixed depth-2 fuzz add-on with randomized LOD trees up to depth
+  4 (within the five-region oracle bound), descendant-owned variables, and
+  explicit depth-3/depth-4 coverage gates. The new coverage found and fixed a
+  deep dead-binder coordinate-exclusion bug.
+- [ ] Add prompt-contract fixtures for every role covering ambiguous terminology,
   unresolved versus confirmed claims, preference versus defeater, stale IDs,
   missing citations, forbidden scope, evidence-driven reopen, and adversarial
   repository text that resembles instructions. Assert structured decisions and
   kernel effects, not exact prose.
-- [x] Add paraphrase and irrelevant-context robustness tests: vary only the user
+- [ ] Add paraphrase and irrelevant-context robustness tests: vary only the user
   wording while holding semantic state constant and require equivalent structured
   proposals; inject large unrelated state and require identical decisions and a
   bounded prompt size.
-- [x] Instrument prompt size, validation-rejection and repair attempts,
+- [ ] Instrument prompt size, validation-rejection and repair attempts,
   unsupported disposition attempts, unresolved-claim misuse, and semantic
   consistency across equivalent inputs. Use these measurements to justify each
   template addition and remove wording that adds cost without improving behavior.

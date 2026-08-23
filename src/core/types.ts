@@ -158,9 +158,9 @@ export interface SolutionSemanticSnapshot {
   kind: "solution-lod-v2";
   revision: number;
   regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[] }>;
-  candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[] }>;
-  constraints: Array<{ id: string; kind: string; subject: string; target: string; reason: string; sourceKind?: string }>;
-  evidence: Array<{ id: string; text: string; source: string; kind: string }>;
+  candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[]; stances?: Array<{ variableId: string; relation: string; valueLabel: string }> }>;
+  constraints: Array<{ id: string; kind: string; subject: string; target: string; reason: string; sourceKind?: string; evidenceRefs?: string[] }>;
+  evidence: Array<{ id: string; text: string; source: string; kind: string; status?: string; validationEvidenceRefs?: string[]; validationReason?: string }>;
   activations: Array<{ id: string; capability: string; regionId: string; request: string; expectedDelta: string; senderActivationId?: string; status: string; error?: string }>;
   artifacts: Array<{ id: string; regionId: string; kind: string; path?: string; summary: string; passed?: boolean; activationId: string }>;
 }

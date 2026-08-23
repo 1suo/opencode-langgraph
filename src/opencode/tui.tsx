@@ -5,6 +5,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import path from "node:path";
 import { accessSync, constants, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
+import { errorMessage } from "../core/error-message.js";
 import type { AgentUsage, ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot, UsageStreamingEstimate } from "../core/types.js";
 import { adoptHomeGraphState, listAllRuns, readHomeGraphState, readLatestProjectEvents, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readSessionGraphState, readStoredRun, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphModelAssignments, writeSessionGraphName, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, renderSchemaText, type SchemaLine, type SchemaTone } from "./schema-view.js";
@@ -568,13 +569,14 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
         <For each={candidates()}>{(candidate) => <box flexDirection="column">
           <text fg={statusTone(candidate.status, props.theme)}>  {candidate.status === "selected" ? "◆" : candidate.status === "eliminated" ? "×" : "◇"} {candidate.proposition}</text>
           <Show when={candidate.eliminationReasons.length}><text fg={props.theme.error}>    └─ {candidate.eliminationReasons.join("; ")}</text></Show>
+          <Show when={candidate.stances?.length}><text fg={props.theme.textMuted}>    {candidate.stances?.map((stance) => `${stance.relation} ${stance.variableId}=${stance.valueLabel}`).join(" · ")}</text></Show>
         </box>}</For>
       </Show>
       <Show when={constraints().length}><text fg={props.theme.textMuted}>CONSTRAINTS</text></Show>
-      <For each={constraints()}>{(constraint) => <text fg={props.theme.warning}>  {constraint.kind} {constraint.subject} → {constraint.target}{constraint.reason ? ` · ${constraint.reason}` : ""}</text>}</For>
+      <For each={constraints()}>{(constraint) => <text fg={props.theme.warning}>  [{constraint.sourceKind ?? "unknown"}{constraint.evidenceRefs?.length ? `:${constraint.evidenceRefs.join(",")}` : ""}] {constraint.kind} {constraint.subject} → {constraint.target}{constraint.reason ? ` · ${constraint.reason}` : ""}</text>}</For>
       <Show when={evidence().length}><text fg={props.theme.textMuted}>EVIDENCE</text></Show>
       <Show when={evidence().length > 6}><text fg={props.theme.textMuted}>  ⋮ {evidence().length - 6} earlier facts omitted</text></Show>
-      <For each={evidence().slice(-6)}>{(fact) => <text fg={props.theme.info} wrapMode="word">  {fact.id} {fact.text} · {fact.source}</text>}</For>
+      <For each={evidence().slice(-6)}>{(fact) => <text fg={props.theme.info} wrapMode="word">  {fact.id} [{fact.kind}/{fact.status ?? (fact.kind === "inference" ? "hypothesis" : "confirmed")}] {fact.text} · {fact.source}{fact.validationEvidenceRefs?.length ? ` · proven by ${fact.validationEvidenceRefs.join(",")}` : ""}</text>}</For>
     </box>
   )}</Show>;
 }
@@ -737,7 +739,7 @@ async function showRoleModelSelector(api: TuiPluginApi, sessionID: string | unde
       },
     }));
   } catch (error) {
-    api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+    api.ui.toast({ variant: "error", message: errorMessage(error) });
   }
 }
 
@@ -784,7 +786,7 @@ async function showGraphSelector(api: TuiPluginApi, sessionID: string | undefine
       },
     }));
   } catch (error) {
-    api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+    api.ui.toast({ variant: "error", message: errorMessage(error) });
   }
 }
 
@@ -865,7 +867,7 @@ async function askManagementAgent(api: TuiPluginApi, parentSessionId: string, te
     await api.client.session.promptAsync({ sessionID: id, directory: projectPath(api), agent: "langgraph-presenter", parts: [{ type: "text", text }] });
     api.ui.toast({ variant: "success", message: "LangGraph management action started." });
   } catch (error) {
-    api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+    api.ui.toast({ variant: "error", message: errorMessage(error) });
   }
 }
 
@@ -979,7 +981,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         setRunsVersion((value) => value + 1);
         props.api.ui.toast({ variant: "warning", message: `Pausing ${run.runId.slice(0, 8)} at its latest checkpoint.` });
       } catch (error) {
-        props.api.ui.toast({ variant: "error", message: error instanceof Error ? error.message : String(error) });
+        props.api.ui.toast({ variant: "error", message: errorMessage(error) });
       }
     })();
   };

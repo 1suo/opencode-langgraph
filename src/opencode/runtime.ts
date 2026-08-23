@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
 import type { AgentBudgetStop, AgentCall, AgentCallLimits, AgentCallResult, AgentPromptTrace, AgentRuntime, AgentToolTrace, AgentUsage, ConnectorDefinition, UsageStreamingEstimate } from "../core/types.js";
+import { errorMessage } from "../core/error-message.js";
 import { registerPermissionHandler } from "./permissions.js";
 
 export interface OpenCodeRuntimeOptions {
@@ -107,7 +108,7 @@ function toolTraces(parts: Part[]): AgentToolTrace[] {
       input: state.input, output: state.output as string | undefined,
       metadata: state.metadata as Record<string, unknown> | undefined,
     });
-    if (state.status === "error") traces.push({ tool: part.tool, status: "error", input: state.input, error: String(state.error ?? "Tool failed") });
+    if (state.status === "error") traces.push({ tool: part.tool, status: "error", input: state.input, error: errorMessage(state.error ?? "Tool failed") });
   }
   return traces;
 }
@@ -266,20 +267,20 @@ export class OpenCodeAgentRuntime implements AgentRuntime {
           this.options.onEvent?.({ node: input.node, status: "completed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: output.text, state: input.state, structured, sessionId, usage: measured });
           return { ...output, structured, ...(measured ? { usage: measured } : {}), ...(tools.length ? { tools } : {}), sessionId };
         } catch (error) {
-          if (attempt + 1 >= attempts) throw new Error(`${input.node} returned invalid structured output after ${attempts} attempts: ${error instanceof Error ? error.message : String(error)}`);
+          if (attempt + 1 >= attempts) throw new Error(`${input.node} returned invalid structured output after ${attempts} attempts: ${errorMessage(error)}`);
           this.options.onEvent?.({ node: input.node, status: "active", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: `Invalid structured output; retrying (${attempt + 1}/${attempts - 1})`, state: input.state, sessionId, usage });
           const current = await this.options.plugin.client.session.messages({ path: { id: sessionId }, query: { directory }, throwOnError: true });
           baselineUsage = sessionUsage(current.data);
           baselineMessageIds = new Set(current.data.flatMap((message) => message.info.id ? [message.info.id] : []));
           baselinePartIds = new Set(current.data.flatMap((message) => message.parts.map((part) => part.id)));
-          const validationError = error instanceof Error ? error.message : String(error);
+          const validationError = errorMessage(error);
           const invalidOutput = output.text.slice(0, 4_000);
-          prompt = `Your previous JSON failed validation. Correct only the output; keep the same task and return one complete JSON value.\n\nVALIDATION ERROR\n${validationError}\n\nORIGINAL INPUT\n${composedPrompt.input}\n\nPREVIOUS INVALID OUTPUT\n${invalidOutput}\n\nOUTPUT CONTRACT\n${composedPrompt.schemaInstruction}`;
+          prompt = `Your previous JSON failed validation.\n\nFAILED PRECONDITION\n${validationError}\n\nADMISSIBLE CORRECTION\nKeep the same task and every valid prior decision. Correct only the rejected structure, then return one complete JSON value matching the original schema with no prose.\n\nPREVIOUS INVALID OUTPUT\n${invalidOutput}`;
         }
       }
       throw new Error(`${input.node} returned no structured output`);
     } catch (error) {
-      this.options.onEvent?.({ node: input.node, status: this.options.signal.aborted ? "interrupted" : "failed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: error instanceof Error ? error.message : String(error), state: input.state, sessionId });
+      this.options.onEvent?.({ node: input.node, status: this.options.signal.aborted ? "interrupted" : "failed", agent: input.agent, model: `${selected.providerID}/${selected.modelID}`, text: errorMessage(error), state: input.state, sessionId });
       throw error;
     } finally {
       this.options.signal.removeEventListener("abort", abort);

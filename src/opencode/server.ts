@@ -4,6 +4,7 @@ import { Command, isInterrupted } from "@langchain/langgraph";
 import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { loadConnectorDefinition, withSolutionRoleModelAssignments } from "../core/config.js";
+import { errorMessage } from "../core/error-message.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
@@ -249,7 +250,7 @@ async function postGraphResult(plugin: PluginInput, internalMessages: Set<string
 }
 
 async function postGraphFailure(plugin: PluginInput, internalMessages: Set<string>, sessionID: string, parentMessageID: string, model: { providerID: string; modelID: string } | undefined, error: unknown): Promise<void> {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   await postRootMessage(plugin, internalMessages, sessionID, parentMessageID, model, `LangGraph failed: ${message}. Report this failure clearly and suggest /graph for node details. Do not claim the task completed.`);
 }
 
@@ -536,7 +537,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
     writeStoredRun({ ...saved, status: failed ? "failed" : "completed" });
     return { runId, graph: graphName, output, interrupted: false, failed };
   } catch (error) {
-    const text = error instanceof Error ? error.message : String(error);
+    const text = errorMessage(error);
     const stopped = signal.aborted ? readStoredRun(runId).status : "failed";
     emit({ at: new Date().toISOString(), runId, rootSessionId: input.rootSessionId, graph: graphName, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });
     writeStoredRun({ ...saved, status: stopped === "pausing" ? "paused" : signal.aborted ? "cancelled" : "failed" });
@@ -616,7 +617,7 @@ async function resumeFromCheckpoint(
     emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: failed ? "failed" : "completed", agent: "langgraph", model: "langgraph", text: output, state: result, progress: finalProgress });
     return { runId: saved.runId, graph: saved.graph, output, interrupted: false, failed };
   } catch (error) {
-    const text = error instanceof Error ? error.message : String(error);
+    const text = errorMessage(error);
     const stopped = signal.aborted ? readStoredRun(saved.runId).status : "failed";
     writeStoredRun({ ...saved, status: stopped === "pausing" ? "paused" : signal.aborted ? "cancelled" : "failed" });
     emit({ at: new Date().toISOString(), runId: saved.runId, rootSessionId: saved.rootSessionId, graph: saved.graph, node: "__end__", status: signal.aborted ? "interrupted" : "failed", agent: "langgraph", model: "langgraph", text });

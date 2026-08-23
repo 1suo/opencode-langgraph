@@ -1,6 +1,7 @@
 import { accessSync, constants } from "node:fs";
 import path from "node:path";
 import type { ConnectorDefinition } from "./types.js";
+import { errorMessage } from "./error-message.js";
 
 export type DiagnosticCode = "CONFIG" | "REFERENCE" | "GRAPH" | "TERMINATION" | "MODEL" | "COMMAND";
 export interface Diagnostic { code: DiagnosticCode; severity: "error" | "warning"; path: string; message: string }
@@ -32,7 +33,7 @@ export async function validateConnector(definition: ConnectorDefinition): Promis
   for (const [name, configured] of Object.entries(definition.graphs)) {
     if (!configured.graph.checkpointer) diagnostics.push({ code: "GRAPH", severity: "error", path: `graphs.${name}`, message: "Graph must be compiled with a checkpointer for interrupts and resume" });
     try { configured.graph.validate(); } catch (error) {
-      diagnostics.push({ code: "GRAPH", severity: "error", path: `graphs.${name}`, message: error instanceof Error ? error.message : String(error) });
+      diagnostics.push({ code: "GRAPH", severity: "error", path: `graphs.${name}`, message: errorMessage(error) });
       continue;
     }
     try {
@@ -46,7 +47,7 @@ export async function validateConnector(definition: ConnectorDefinition): Promis
       while (queue.length) for (const source of reverse.get(queue.shift()!) ?? []) if (!terminating.has(source)) { terminating.add(source); queue.push(source); }
       for (const node of nodes.filter((id) => id !== "__start__" && id !== "__end__" && !terminating.has(id))) diagnostics.push({ code: "TERMINATION", severity: "error", path: `graphs.${name}.${node}`, message: "Reachable node has no declared path to END" });
     } catch (error) {
-      diagnostics.push({ code: "GRAPH", severity: "error", path: `graphs.${name}`, message: `Cannot inspect graph: ${error instanceof Error ? error.message : String(error)}` });
+      diagnostics.push({ code: "GRAPH", severity: "error", path: `graphs.${name}`, message: `Cannot inspect graph: ${errorMessage(error)}` });
     }
   }
   return diagnostics;

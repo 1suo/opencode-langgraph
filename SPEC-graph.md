@@ -44,7 +44,7 @@ The static LangGraph is an engine loop:
 schedule → acquire-if-mutating → activate → merge/propagate → schedule
 ```
 
-Each activation specifies a capability, region, exact request, expected delta, stable context references, optional wake condition, sender, state revision, and status. Agents may propose downstream activations. Controller code validates region and context references and suppresses the same capability/region/delta at the same state revision.
+Each activation specifies a capability, region, exact request, expected delta, stable context references, sender, basis revision, and status. Agents may propose downstream activations. Controller code validates region and context references and suppresses the same capability/region/delta at the same state revision.
 
 Each activation sees only the downstream request forms currently legal for that role. It cannot create sessions, choose models, invent roles, or bypass the controller. Keeping the prompt local avoids presenting a degenerative model with irrelevant workflow choices.
 
@@ -67,11 +67,11 @@ refined with children → solve children
 single explicit criterion or depth floor (actionable) → implement
 ```
 
-All capability contracts live in `src/core/solution-lod/roles.ts`. The shared invariant prompt forbids finer variables before collapse. Graph nodes supply typed projected payloads; configuration chooses models and scheduling quanta.
+All capability contracts live in `src/core/solution-lod/roles.ts`. Graph nodes compile dependency-scoped semantic projections into role-native prompt sections; configuration chooses models and scheduling quanta.
 
 ## Context and failure semantics
 
-An activation receives the original message, compact preceding conversation, collapsed ancestry, current domain, and explicitly referenced evidence, constraints, and artifacts. Children no longer copy the parent's complete evidence set. Durable facts are stored once and passed by IDs.
+An activation receives the original message, compact preceding conversation, stable-ID selected lineage, the current candidate slice, visible shared-variable states with every binding/unavailability witness, and explicitly referenced evidence, constraints, and artifacts. Children do not copy the parent's evidence set. Durable facts are stored once and passed by IDs.
 
 Structured schemas enforce shape without small arbitrary prose limits. Invalid JSON, schema errors, timeouts, or a scheduling quantum stop fail the activation locally. The solution state remains available and another novel capability may run. Repeating failed work against an unchanged revision is forbidden. If no capability can produce a novel delta, the run returns a precise blocked result rather than looping.
 
@@ -80,7 +80,7 @@ Structured schemas enforce shape without small arbitrary prose limits. Invalid J
 These are confirmed properties of the current projection code, not aspirational:
 
 - Activation payloads resolve `contextRefs` rather than unconditionally unioning the region's accumulated evidence and artifacts.
-- `decisionsAlreadyMade` and `selectedApproach` were the same `lineage()` array emitted twice in the implement payload; the duplication is removed — implement now receives only `selectedApproach`, other capabilities receive `decisionsAlreadyMade`.
+- Selected lineage is emitted once as `{regionId,candidateId,choice}` records so downstream agents can cite or request reopening of the exact premise.
 - Child regions begin with an empty evidence-reference set and receive facts through explicit activation references.
 - Facts are stored once and deduplicated by fingerprint; the accumulation is by reference, not by byte-for-byte duplication.
 - The implement quantum is a step-count cap (`maxTurns`) plus an inactivity watchdog, not a token cap. `inactive for 300000ms` means the child session's message fingerprint did not change for five minutes — it does not by itself prove context overflow; it can equally mean a stalled or silently waiting session.
@@ -101,13 +101,11 @@ The static graph is an engine loop, not a pipeline of model calls. Each node has
 
 - `schedule` (pure controller): returns `{ network, activeActivationId, phase }` for the next activation, or `{ network, activeActivationId: undefined, phase: "completed"|"blocked", result }` when no runnable work remains. It never calls a model.
 - `acquire` (before every mutating `implement`, including after resume): takes a process-local worktree lease without persisting lease ownership in checkpoint state. It never calls a model.
-- `activate` (the only model-calling node): given one activation, calls `runtime.call({ agent, node, state, schema, prompt })` and returns a reduced state delta:
-  - a structured success delta (or `answer` for `present`) → `{ network, usage, callsUsed, activeActivationId: undefined, phase: "propagating" }`;
-  - a scheduling-quantum stop (budget) → the region stays actionable, `{ network, usage, callsUsed, activeActivationId: undefined, phase: "activation-deferred" }`;
-  - a throw (schema/validation/timeout) → the activation is marked failed, `{ network, callsUsed, activeActivationId: undefined, phase: "activation-failed" }`.
+- `activate` (the only model-calling node): given one activation, calls `runtime.call({ agent, node, state, schema, prompt })` and returns one `ActivationTaskResult` record containing a validated delta, a deferred budget stop, or a serialized local error.
+- `merge` (pure controller): deterministically orders the batch records, applies each record, and propagates after every attempt so failed output cannot leave stale derived locks. It then clears the result log and returns to scheduling.
 - `finish` (pure controller): returns `{ result }` from the final state. It never calls a model.
 
-`mergeSolutionDelta`, `mergeRefinementOutput`, and the WFC propagation run inside `activate`/`schedule` respectively; models never mutate controller bookkeeping directly. A synthesis delta that would leave every candidate in a region eliminated with none selected is rejected at validation (`validateSolutionDelta`) and retried with guidance — elimination requires genuine defeaters, and a truly dead region is recovered by reopening the parent, not by an empty domain. A refinement output that claims terminality without a bounded contract, splits without children, or fails criterion coverage is rejected at validation (`validateRefinementOutput`) and retried with guidance. Recovery deltas (`synthesis:*`, `refinement:*`, `contradiction:*`, `implement:*`, `verification:*`, `inspection:*`) carry the network revision, so a changed basis always reschedules while an unchanged one dedupes. Every intermediate `{ network, phase, ... }` is checkpointed, so any of these outputs is a valid restart point for the inspect/prune/resume workflow below.
+`mergeSolutionDelta`, `mergeRefinementOutput`, and propagation run only in controller code; models never mutate bookkeeping directly. Inference always enters as a hypothesis, model-authored evidence status is ignored, claim validation requires independent proof, and model deltas cannot assert `user-task` provenance. A proposed eliminated outcome is stored as possible and becomes eliminated only if the accepted refutation rules derive it. Invalid structured output is retried in the same child session with only the failed precondition, admissible correction, and prior invalid output; synthesis receives up to three total attempts. Every intermediate state is checkpointed for inspect/prune/resume.
 
 ## Inspect and relaunch workflow
 
@@ -125,7 +123,7 @@ All of inspect/prune/resume operate on the same durable per-thread checkpoint th
 F8 opens the semantic run view:
 
 - the primary pane is the solution LOD tree with relation, LOD, status, viable-domain count, contributing capabilities, and selection;
-- the region pane shows candidates, elimination reasons, the certified implementation contract, constraints, evidence, activations, and artifacts;
+- the region pane shows candidates, stances, elimination reasons, constraint provenance/evidence references, evidence status/proof, activations, and artifacts;
 - `G` shows the distinct activation/message network;
 - activation details render input and output by schema semantics — outcome badges (`[CHOSEN]`, `[REJECTED]`), constraint-kind badges (`[REFUTES]`, `requires`, …), refinement contracts with criterion coverage, verification verdicts, check pass/fail, file lists — each tone-mapped to theme colors; unparseable payloads fall back to raw text;
 - output, effective prompt, and raw state remain diagnostic views.
