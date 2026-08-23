@@ -1724,7 +1724,12 @@ describe("activation IO schema views", () => {
         { key: "barrel", proposition: "Barrel file", outcome: "selected", reasons: [], evidenceRefs: [] },
         { key: "inline", proposition: "Inline exports", outcome: "eliminated", reasons: ["duplicates imports"], evidenceRefs: [] },
       ],
-      constraints: [{ kind: "refutes", subject: "task", target: "inline", reason: "conflicts with the public api" }],
+      constraints: [
+        { kind: "refutes", subject: "task", target: "inline", sourceKind: " repo-evidence ", evidenceRefs: [" e1 ", " ", 7, "e2"], reason: "conflicts with the public api" },
+        { kind: "excludes", subject: "draft", target: "public", evidenceRefs: [" u1 "] },
+        { kind: "requires", subject: "model", target: "evidence", sourceKind: "model-inference", evidenceRefs: ["", " "] },
+        { kind: "supports", subject: "user", target: "task", sourceKind: "user-task" },
+      ],
       select: ["barrel"],
       activations: [{ capability: "inspect", regionId: "r2", request: "check package exports", expectedDelta: "exports-fact", contextRefs: [] }],
     });
@@ -1737,8 +1742,10 @@ describe("activation IO schema views", () => {
     expect(flat).toContain("◆ [CHOSEN] Barrel file");
     expect(flat).toContain("× [REJECTED] Inline exports");
     expect(flat).toContain("↳ duplicates imports");
-    expect(flat).toContain("[REFUTES] task → inline");
-    expect(flat).toContain("· conflicts with the public api");
+    expect(flat).toContain("[repo-evidence:e1,e2] [REFUTES] task → inline  · conflicts with the public api");
+    expect(flat).toContain("[unknown:u1] [EXCLUDES] draft → public");
+    expect(flat).toContain("[model-inference] [REQUIRES] model → evidence");
+    expect(flat).toContain("[user-task] [SUPPORTS] user → task");
     expect(flat).toContain("SELECTION barrel");
     expect(flat).toContain("→ inspect r2");
     expect(spans(lines!, "[CHOSEN]").spans.some((span) => span.tone === "success")).toBe(true);

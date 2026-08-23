@@ -92,8 +92,11 @@ function synthesisLines(value: Record<string, unknown>): SchemaLine[] {
   const constraints = asArray(value.constraints);
   section(lines, "RELATIONSHIPS", constraints.length);
   for (const constraint of constraints.slice(0, 12)) {
+    const sourceKind = str(constraint.sourceKind).trim() || "unknown";
+    const evidenceRefs = asStrings(constraint.evidenceRefs).map((reference) => reference.trim()).filter(Boolean);
+    const provenanceToken = `[${sourceKind}${evidenceRefs.length ? `:${evidenceRefs.join(",")}` : ""}]`;
     const kind = str(constraint.kind) || "related";
-    lines.push(L(t("  "), badge(kind.toUpperCase(), KIND_TONE[kind] ?? "text"), t(` ${clip(constraint.subject, 40)} → ${clip(constraint.target, 40)}`), constraint.reason ? dim(`  · ${clip(constraint.reason)}`) : dim("")));
+    lines.push(L(t(`  ${provenanceToken} `), badge(kind.toUpperCase(), KIND_TONE[kind] ?? "text"), t(` ${clip(constraint.subject, 40)} → ${clip(constraint.target, 40)}`), constraint.reason ? dim(`  · ${clip(constraint.reason)}`) : dim("")));
   }
   moreLines(lines, Math.max(0, constraints.length - 12), "relationships");
   const select = asStrings(value.select);
