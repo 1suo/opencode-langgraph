@@ -8,9 +8,9 @@ import { errorMessage } from "../core/error-message.js";
 import { assertValidConnector, validateConnector } from "../core/validate.js";
 import { OpenCodeAgentRuntime } from "./runtime.js";
 import { forwardPermissionEvent } from "./permissions.js";
-import { adoptHomeGraphState, appendPluginEvent, readHomeGraphState, readLatestProjectRun, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, reconcileRuns, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
+import { adoptHomeGraphState, appendPluginEvent, readLatestProjectRun, readLatestStoredRun, readSessionGraphName, readSessionGraphState, readStoredRun, reconcileRuns, writeStoredRun, type PluginRunEvent, type StoredRun } from "./store.js";
 import { acquireWorktree, type WorktreeLease } from "./worktree-lock.js";
-import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
+import { CONNECTOR_PRESENTER, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
 import { reopenRegion } from "../core/solution-lod/reducer.js";
 import type { GraphProgressSnapshot } from "../core/types.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace } from "./verifier-workspace.js";
@@ -78,15 +78,8 @@ export const server: Plugin = async (plugin) => {
   return {
     event: ({ event }) => forwardPermissionEvent(event),
     tool: {
-      langgraph_start: tool({
-        description: "Start a LangGraph run in the current project and return its runId as soon as it is saved. The run continues in the background. Use this instead of invoking the OpenCode CLI or /run-graph. Keep the runId and call langgraph_inspect to monitor it. Start the next run only after the current one completes, fails, or is cancelled.",
-        args: { task: tool.schema.string(), graph: tool.schema.string().optional() },
-        execute: async (args: { task: string; graph?: string }, context) => startRun(plugin, context.sessionID, args.task, args.graph, {
-          directory: context.directory, worktree: context.worktree, ask: context.ask, metadata: context.metadata,
-        }),
-      }),
       langgraph_inspect: tool({
-        description: "Read a run's saved status, current work, solution regions, agent activations, usage, and result. This changes nothing. Pass the runId returned by langgraph_start. With no ID it reads this session's latest run; rootSessionId selects another session and projectScope selects this project's latest run.",
+        description: "Read a run's saved status, current work, solution regions, agent activations, usage, and result. This changes nothing. Pass no argument to read this session's latest run; rootSessionId selects another session and projectScope selects this project's latest run.",
         args: { runId: tool.schema.string().optional(), rootSessionId: tool.schema.string().optional(), projectScope: tool.schema.boolean().optional() },
         execute: async (args: { runId?: string; rootSessionId?: string; projectScope?: boolean }, context) => inspectRun(context.sessionID, args.runId, { rootSessionId: args.rootSessionId, worktree: args.projectScope ? context.worktree : undefined }),
       }),
@@ -101,12 +94,12 @@ export const server: Plugin = async (plugin) => {
         execute: async (args: { runId?: string; answer?: string }, context) => resumeRun(plugin, context.sessionID, args.runId, args.answer),
       }),
       langgraph_cancel: tool({
-        description: "Cancel a running, queued, or interrupted LangGraph run. Pass the runId returned by langgraph_start. The run remains inspectable but cannot be resumed unless a region is pruned first.",
+        description: "Cancel a running, queued, or interrupted LangGraph run. The run remains inspectable but cannot be resumed unless a region is pruned first.",
         args: { runId: tool.schema.string().optional() },
         execute: async (args: { runId?: string }, context) => cancelRun(context.sessionID, args.runId),
       }),
       langgraph_pause: tool({
-        description: "Cooperatively pause a running LangGraph run at its latest durable checkpoint. Pass the runId returned by langgraph_start, then use langgraph_resume to continue. A node interrupted after external side effects may be replayed on resume.",
+        description: "Cooperatively pause a running LangGraph run at its latest durable checkpoint. Then use langgraph_resume to continue. A node interrupted after external side effects may be replayed on resume.",
         args: { runId: tool.schema.string().optional() },
         execute: async (args: { runId?: string }, context) => pauseRun(context.sessionID, args.runId),
       }),
@@ -150,6 +143,7 @@ export const server: Plugin = async (plugin) => {
       if (input.messageID && internalMessages.delete(input.messageID)) return;
       if (cancelledMessages.delete(input.sessionID)) return;
       const manual = manualMessages.delete(input.sessionID);
+      if (!manual) return;
       const session = await plugin.client.session.get({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
       if (session.data.parentID) return;
       const graphState = readSessionGraphState(input.sessionID) ?? adoptHomeGraphState(input.sessionID, plugin.worktree);
@@ -161,22 +155,6 @@ export const server: Plugin = async (plugin) => {
       if (!task) return;
       const rootMessageID = input.messageID ?? output.message.id;
       const parentModel = input.model ?? output.message.model;
-      const interrupted = readLatestStoredRun(input.sessionID);
-      if (!manual && (interrupted?.status === "interrupted" || interrupted?.status === "paused")) {
-        output.message.agent = PRESENTER_AGENT;
-        output.parts.push({ id: `prt_${randomUUID().replaceAll("-", "")}`, messageID: rootMessageID, sessionID: input.sessionID, type: "text", synthetic: true, text: "The LangGraph connector is resuming the paused graph with this answer. Reply briefly that it is resuming; do not perform the task yourself." });
-        const controller = new AbortController();
-        registerController(input.sessionID, controller);
-        void executeResume(plugin, interrupted, task, parentModel, controller.signal)
-          .then((result) => postGraphResult(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, result))
-          .catch((error) => {
-            const status = readLatestStoredRun(input.sessionID)?.status;
-            if (status !== "paused" && status !== "cancelled") return postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error);
-          })
-          .finally(() => unregisterController(input.sessionID, controller));
-        return;
-      }
-      if (!manual && graphState?.enabled !== true) return;
       const history = await plugin.client.session.messages({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
       const conversationContext = buildConversationContext(history.data as ConversationMessage[], rootMessageID, task);
       output.message.agent = PRESENTER_AGENT;
@@ -201,14 +179,6 @@ export const server: Plugin = async (plugin) => {
           if (status !== "paused" && status !== "cancelled") return postGraphFailure(plugin, internalMessages, input.sessionID, rootMessageID, parentModel, error);
         })
         .finally(() => unregisterController(input.sessionID, controller));
-    },
-    "experimental.chat.system.transform": async (input, output) => {
-      if (!input.sessionID) return;
-      const graphState = readSessionGraphState(input.sessionID) ?? readHomeGraphState(plugin.worktree);
-      if (graphState?.enabled !== true) return;
-      const session = await plugin.client.session.get({ path: { id: input.sessionID }, query: { directory: plugin.directory }, throwOnError: true });
-      if (session.data.parentID) return;
-      output.system.push(CONNECTOR_ROOT_SYSTEM_PROMPT);
     },
   };
 };
@@ -292,55 +262,6 @@ async function inspectRun(sessionID: string, runId?: string, options?: { rootSes
     return JSON.stringify({ runId: saved.runId, graph: saved.graph, rootSessionId: saved.rootSessionId, storedStatus: saved.status, phase: "no-checkpoint-yet", note: "This run has not reached its first checkpoint yet (queued or still acquiring the worktree). There is nothing to inspect or prune until it does." }, null, 2);
   }
   return runSummary(saved, values, configured.progress?.(values as never));
-}
-
-async function startRun(plugin: PluginInput, sessionID: string, task: string, graph: string | undefined, context: {
-  directory: string;
-  worktree: string;
-  ask?: ExecuteGraphInput["ask"];
-  metadata?: ExecuteGraphInput["metadata"];
-}): Promise<string> {
-  const latest = readLatestStoredRun(sessionID);
-  if (latest && (latest.status === "queued" || latest.status === "running" || latest.status === "pausing" || latest.status === "paused" || latest.status === "interrupted")) {
-    throw new Error(`LangGraph run ${latest.runId} is ${latest.status}. Inspect, resume, or cancel it before starting another run from this session.`);
-  }
-  const runId = randomUUID();
-  const graphState = readSessionGraphState(sessionID) ?? readHomeGraphState(context.worktree);
-  const parentModel = await rootSessionModel(plugin, sessionID);
-  let started = false;
-  let resolveStarted!: (value: { runId: string; graph: string }) => void;
-  let rejectStarted!: (reason: unknown) => void;
-  const persisted = new Promise<{ runId: string; graph: string }>((resolve, reject) => {
-    resolveStarted = resolve;
-    rejectStarted = reject;
-  });
-  void executeGraph(plugin, {
-    task,
-    rootSessionId: sessionID,
-    userMessageId: `tool:${runId}`,
-    directory: context.directory,
-    worktree: executionWorktree(context.directory, context.worktree),
-    parentModel,
-    graph: graph ?? graphState?.graph,
-    modelAssignments: graphState?.modelAssignments,
-    ask: context.ask,
-    metadata: context.metadata,
-    runId,
-    onStarted: (value) => {
-      started = true;
-      resolveStarted(value);
-    },
-  }).catch((error) => {
-    if (!started) rejectStarted(error);
-    else {
-      try {
-        const current = readStoredRun(runId);
-        if (current.status === "running" || current.status === "queued") writeStoredRun({ ...current, status: "failed" });
-      } catch { /* run storage was removed externally */ }
-    }
-  });
-  const value = await persisted;
-  return JSON.stringify({ ...value, status: "running", next: `Call langgraph_inspect with runId ${value.runId}.` }, null, 2);
 }
 
 async function pauseRun(sessionID: string, runId?: string): Promise<string> {
