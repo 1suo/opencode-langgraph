@@ -28,13 +28,13 @@ Agent routing is not WFC, and hierarchy depth is not automatically a LOD.
 
 ## Terminality and refinement
 
-Actionability is computed by the controller, never declared by a model. Refinement has no terminal outcome: it must split the work into children that collectively cover the parent's acceptance criteria, with each child addressing at least one criterion, every name unique, and each child carrying its own concrete criterion. A region becomes actionable only when the controller derives it: exactly one explicit success criterion, or the depth floor. A new synthesis choice drops the previous refinement's subtree. Reopening a region does the same for its descendants.
+Actionability is computed by the controller, never set directly by a model. Refinement splits multi-criterion work into children that collectively cover the parent's acceptance criteria, with every name unique and every child carrying a concrete criterion. A single-criterion region is the current bounded leaf rule; `MAX_LOD` remains a termination guard. A new synthesis choice drops the previous refinement's subtree. Reopening does the same and returns an underspecified region to inspection.
 
 ## Solution state
 
-Checkpoints are versioned; schema 5 contains regions, candidates, typed constraints, normalized evidence, activations, and observed artifacts. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Interrupted runs recorded under older schemas are rejected.
+Checkpoints are versioned; schema 7 adds shared decision variables, candidate stances, and constraint provenance; it separates authored candidate dispositions from recomputed solver state and removes durable lease state. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Interrupted runs recorded under older schemas are rejected.
 
-Constraint kinds are `requires`, `excludes`, `supports`, `refutes`, `equivalent`, `acceptance`, and `permission`. Controller code propagates them to a fixed point, detects empty domains, and performs forced collapse. Models propose deltas; they do not mutate controller bookkeeping, and no delta can set a region's status directly.
+Hard constraint kinds are `requires`, `excludes`, and `equivalent`; evidence relations are `supports` and `refutes`. Acceptance criteria and permissions are policy fields rather than inert edges. Endpoints are validated by kind. Controller code recomputes derived domains to a fixed point, makes exclusion symmetric, detects impossible requirements and empty domains, and performs forced collapse.
 
 ## Activation network
 
@@ -46,7 +46,7 @@ schedule → acquire-if-mutating → activate → merge/propagate → schedule
 
 Each activation specifies a capability, region, exact request, expected delta, stable context references, optional wake condition, sender, state revision, and status. Agents may propose downstream activations. Controller code validates region and context references and suppresses the same capability/region/delta at the same state revision.
 
-Every activation sees the complete capability catalog with each capability's admission condition and output contract. It can request a capability but cannot create sessions, choose models, invent roles, or bypass the controller. This gives agents awareness of their possible downstream connections without uncontrolled recursive spawning.
+Each activation sees only the downstream request forms currently legal for that role. It cannot create sessions, choose models, invent roles, or bypass the controller. Keeping the prompt local avoids presenting a degenerative model with irrelevant workflow choices.
 
 The built-in capabilities are:
 
@@ -71,7 +71,7 @@ All capability contracts live in `src/core/solution-lod/roles.ts`. The shared in
 
 ## Context and failure semantics
 
-An activation receives the original message, compact preceding conversation, collapsed ancestry, current domain, and only referenced evidence, constraints, and artifacts. Durable facts are stored once and passed by IDs.
+An activation receives the original message, compact preceding conversation, collapsed ancestry, current domain, and explicitly referenced evidence, constraints, and artifacts. Children no longer copy the parent's complete evidence set. Durable facts are stored once and passed by IDs.
 
 Structured schemas enforce shape without small arbitrary prose limits. Invalid JSON, schema errors, timeouts, or a scheduling quantum stop fail the activation locally. The solution state remains available and another novel capability may run. Repeating failed work against an unchanged revision is forbidden. If no capability can produce a novel delta, the run returns a precise blocked result rather than looping.
 
@@ -79,13 +79,13 @@ Structured schemas enforce shape without small arbitrary prose limits. Invalid J
 
 These are confirmed properties of the current projection code, not aspirational:
 
-- An activation's projected payload includes the region's **entire** accumulated evidence, constraint, and artifact sets. `projectActivationContext` builds `refs` as a union that unconditionally contains `region.evidenceIds`, `region.constraintIds`, and `region.artifactIds`, so the "only referenced facts" filter never actually trims.
+- Activation payloads resolve `contextRefs` rather than unconditionally unioning the region's accumulated evidence and artifacts.
 - `decisionsAlreadyMade` and `selectedApproach` were the same `lineage()` array emitted twice in the implement payload; the duplication is removed — implement now receives only `selectedApproach`, other capabilities receive `decisionsAlreadyMade`.
-- Child regions copy their parent's `evidenceIds` wholesale, so depth-2 implement payloads inherit the root fact base on top of their own.
+- Child regions begin with an empty evidence-reference set and receive facts through explicit activation references.
 - Facts are stored once and deduplicated by fingerprint; the accumulation is by reference, not by byte-for-byte duplication.
 - The implement quantum is a step-count cap (`maxTurns`) plus an inactivity watchdog, not a token cap. `inactive for 300000ms` means the child session's message fingerprint did not change for five minutes — it does not by itself prove context overflow; it can equally mean a stalled or silently waiting session.
 
-Remaining full-region projection and parent-evidence inheritance are the current measured cost of the simple projection. Trimming facts by reference is a deliberate follow-up, not a correctness fix.
+Candidate-domain relationships remain local to the current region; evidence and artifacts are sparse by explicit reference.
 
 Workspace status and file content hashes are captured around mutating activations. Actual changes are recorded even when an agent's final output is malformed or interrupted. Pre-existing dirty files remain distinct from files changed during the activation.
 
@@ -100,7 +100,7 @@ A change region moves through unrefined (selected), collapsed (split), actionabl
 The static graph is an engine loop, not a pipeline of model calls. Each node has a fixed output contract:
 
 - `schedule` (pure controller): returns `{ network, activeActivationId, phase }` for the next activation, or `{ network, activeActivationId: undefined, phase: "completed"|"blocked", result }` when no runnable work remains. It never calls a model.
-- `acquire` (only when the next activation is a mutating `implement`): returns `{ worktreeAcquired: true }` after taking the worktree lease, or waits. It never calls a model.
+- `acquire` (before every mutating `implement`, including after resume): takes a process-local worktree lease without persisting lease ownership in checkpoint state. It never calls a model.
 - `activate` (the only model-calling node): given one activation, calls `runtime.call({ agent, node, state, schema, prompt })` and returns a reduced state delta:
   - a structured success delta (or `answer` for `present`) → `{ network, usage, callsUsed, activeActivationId: undefined, phase: "propagating" }`;
   - a scheduling-quantum stop (budget) → the region stays actionable, `{ network, usage, callsUsed, activeActivationId: undefined, phase: "activation-deferred" }`;

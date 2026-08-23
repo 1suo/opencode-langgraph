@@ -9,8 +9,8 @@ import type { RunnableConfig } from "@langchain/core/runnables";
 import { z, type ZodType } from "zod";
 import { DurableFileSaver } from "../durable-checkpointer.js";
 import type { AgentCallResult, AgentRuntime, AgentUsage, ConnectorGraph, GraphProgressSnapshot, SolutionSemanticSnapshot } from "../types.js";
-import { applyBatchRecords, ensureRunnableWork, initialNetwork, markActivation, selectActivationBatch, setRegionStatus, validateRefinementOutput, validateSolutionDelta } from "./reducer.js";
-import { DEFAULT_SOLUTION_ROLE_LIMITS, ImplementationOutputSchema, PresentationOutputSchema, RefinementOutputSchema, SolutionDeltaSchema, VerificationOutputSchema, type Activation, type ActivationTaskInput, type ActivationTaskResult, type ActiveBatchEntry, type Capability, type RefinementOutput, type SolutionDelta, type SolutionLodState, type SolutionNetwork, type SolutionRoleLimits } from "./types.js";
+import { applyBatchRecords, depthFloorRegionIds, ensureRunnableWork, initialNetwork, markActivation, selectActivationBatch, setRegionStatus, validateImplementationOutput, validateRefinementOutput, validateSolutionDelta, validateVerificationOutput } from "./reducer.js";
+import { DEFAULT_SOLUTION_ROLE_LIMITS, ImplementationOutputSchema, PresentationOutputSchema, RefinementOutputSchema, SolutionDeltaSchema, VerificationOutputSchema, type Activation, type ActivationTaskInput, type ActivationTaskResult, type ActiveBatchEntry, type Capability, type ImplementationOutput, type RefinementOutput, type SolutionDelta, type SolutionLodState, type SolutionNetwork, type SolutionRoleLimits, type VerificationOutput } from "./types.js";
 
 const resultsReducer = (left: ActivationTaskResult[], right: ActivationTaskResult[]): ActivationTaskResult[] => {
   // An empty write from `merge` atomically clears the append-only log; task writes always carry exactly one record.
@@ -21,8 +21,8 @@ const resultsReducer = (left: ActivationTaskResult[], right: ActivationTaskResul
 };
 
 const SolutionState = Annotation.Root({
-  stateVersion: Annotation<5>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
-  activeActivationId: Annotation<string | undefined>, activeBatch: Annotation<ActiveBatchEntry[]>({ reducer: (_left: ActiveBatchEntry[], right: ActiveBatchEntry[]) => right, default: () => [] }), network: Annotation<SolutionNetwork>, results: Annotation<ActivationTaskResult[]>({ reducer: resultsReducer, default: () => [] }), usage: Annotation<AgentUsage>, callsUsed: Annotation<number>, startedAt: Annotation<number>, worktreeAcquired: Annotation<boolean>, result: Annotation<string>,
+  stateVersion: Annotation<7>, runId: Annotation<string>, originalTask: Annotation<string>, conversationContext: Annotation<string>, directory: Annotation<string>, worktree: Annotation<string>, phase: Annotation<string>,
+  activeActivationId: Annotation<string | undefined>, activeBatch: Annotation<ActiveBatchEntry[]>({ reducer: (_left: ActiveBatchEntry[], right: ActiveBatchEntry[]) => right, default: () => [] }), network: Annotation<SolutionNetwork>, results: Annotation<ActivationTaskResult[]>({ reducer: resultsReducer, default: () => [] }), usage: Annotation<AgentUsage>, callsUsed: Annotation<number>, startedAt: Annotation<number>, result: Annotation<string>,
 });
 
 const EMPTY_USAGE: AgentUsage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -42,6 +42,7 @@ export interface SolutionLodOptions {
   agents: Record<Capability, string>;
   roleLimits?: Partial<SolutionRoleLimits>;
   maxParallelActivations?: number;
+  maxActivations?: number;
   checkpointer?: BaseCheckpointSaver;
 }
 
@@ -70,7 +71,42 @@ function lineage(network: SolutionNetwork, regionId: string) {
 export function projectActivationContext(state: SolutionLodState, activation: Activation): Record<string, unknown> {
   const region = state.network.regions.find((item) => item.id === activation.regionId);
   if (!region) throw new Error(`Activation ${activation.id} references missing region ${activation.regionId}`);
-  const refs = new Set([...activation.contextRefs, ...region.evidenceIds, ...region.constraintIds, ...region.artifactIds]);
+  const ancestry = new Set<string>();
+  { let cursor = state.network.regions.find((item) => item.id === region.id); while (cursor) { ancestry.add(cursor.id); cursor = cursor.parentId ? state.network.regions.find((item) => item.id === cursor?.parentId) : undefined; } }
+  const variableNameOf = new Map(state.network.variables.map((item) => [item.id, item.name]));
+  const visibleVariables = state.network.variables.filter((item) => ancestry.has(item.ownerRegionId));
+  const boundTo = new Map<string, string>();
+  for (const candidate of state.network.candidates) {
+    if (candidate.status !== "selected") continue;
+    for (const stance of candidate.stances ?? []) {
+      if (stance.relation !== "requires") continue;
+      const name = variableNameOf.get(stance.variableId);
+      if (name) boundTo.set(name, stance.valueLabel);
+    }
+  }
+  const refutedOptions = new Map<string, Set<string>>();
+  for (const constraint of state.network.constraints) {
+    if (constraint.kind !== "refutes" || !constraint.evidenceRefs?.length) continue;
+    const index = constraint.target.indexOf(":");
+    if (index <= 0) continue;
+    const variable = state.network.variables.find((item) => item.id === constraint.target.slice(0, index));
+    if (!variable || !ancestry.has(variable.ownerRegionId)) continue;
+    if (!constraint.evidenceRefs.every((ref) => state.network.evidence.some((item) => item.id === ref))) continue;
+    const subjectCandidate = state.network.candidates.find((item) => item.id === constraint.subject);
+    if (subjectCandidate && subjectCandidate.status !== "selected") continue;
+    const option = constraint.target.slice(index + 1).trim();
+    if (!option) continue;
+    if (!refutedOptions.has(variable.name)) refutedOptions.set(variable.name, new Set());
+    refutedOptions.get(variable.name)!.add(option);
+  }
+  const sharedChoices = visibleVariables.map((variable) => ({
+    name: variable.name,
+    declaredAt: variable.ownerRegionId,
+    knownOptions: [...(variable.seedLabels ?? [])],
+    committedTo: boundTo.get(variable.name),
+    ruledOut: [...(refutedOptions.get(variable.name) ?? [])],
+  }));
+  const refs = new Set(activation.contextRefs);
   const facts = state.network.evidence.filter((item) => refs.has(item.id)).map(({ id, text, source }) => ({ referenceId: id, fact: text, source }));
   const relationships = state.network.constraints
     .filter((item) => refs.has(item.id) || item.subject === region.id || region.candidateIds.includes(item.subject) || region.candidateIds.includes(item.target))
@@ -83,18 +119,25 @@ export function projectActivationContext(state: SolutionLodState, activation: Ac
     yourAssignment: activation.request,
     goal: region.objective,
     successCriteria: region.acceptanceCriteria,
+    sharedChoices,
     facts,
     relationships,
     outputs,
+    decisionBoundary: { mayChoose: region.allowedVariables, mustNotChoose: ["details outside mayChoose", "a replacement for an earlier choice"] },
   };
   const plainStatus = { possible: "still possible", eliminated: "rejected", selected: "chosen", equivalent: "interchangeable" } as const;
-  const approachesAlreadyConsidered = state.network.candidates.filter((item) => item.regionId === region.id).map(({ id, proposition, status, eliminationReasons, evidenceIds }) => ({
+  const approachesAlreadyConsidered = state.network.candidates.filter((item) => item.regionId === region.id).map(({ id, key, proposition, status, eliminationReasons, evidenceIds, stances }) => ({
     referenceId: id, approach: proposition, status: plainStatus[status], reasonsRejected: eliminationReasons, supportingFactIds: evidenceIds,
+    positionsOnSharedChoices: (function () {
+      const names: Array<{ choice: string; relation: string; option: string }> = [];
+      for (const stance of stances ?? []) { const name = variableNameOf.get(stance.variableId); if (name) names.push({ choice: name, relation: stance.relation, option: stance.valueLabel }); }
+      return names;
+    })(),
   }));
-  if (activation.capability === "inspect") return { ...common, earlierChoices, questionToAnswer: activation.request, mustNotChooseSolution: region.delivery === "change" };
-  if (activation.capability === "synthesize") return { ...common, earlierChoices, choiceToMake: region.objective, chooseOnly: region.allowedVariables, alternativesAlreadyConsidered: approachesAlreadyConsidered, ifFactIsMissing: "request inspection of one named repository fact" };
-  if (activation.capability === "refine") return { ...common, chosenApproach: earlierChoices, approachToSettle: region.objective, successCriteriaPositions: region.acceptanceCriteria.map((criterion, position) => ({ position, criterion })), nextStepsContract: { split: "supply the children that carry the work forward: each resolves one later decision or delivers one independent piece; together they must cover every criterion position, and each child needs at least one concrete success criterion of its own", leafNote: "whether the remainder is small enough to implement is computed from the criteria counts; do not try to declare the work done" }, ifFactIsMissing: "request inspection of one named repository fact" };
-  if (activation.capability === "implement") return { ...common, chosenApproach: earlierChoices, ifBlocked: { missingFact: "request inspection of one named repository fact", wrongChoice: "request reconsideration only when evidence contradicts an earlier choice" } };
+  if (activation.capability === "inspect") return { ...common, earlierChoices, questionToAnswer: activation.request, permittedNextRequest: [], mustNotChooseSolution: true, outputRule: "omit region.objective entirely — never restate the goal" };
+  if (activation.capability === "synthesize") return { ...common, earlierChoices, choiceToMake: region.objective, chooseOnly: region.allowedVariables, alternativesAlreadyConsidered: approachesAlreadyConsidered, permittedNextRequest: ["inspect one named missing repository fact"], ifFactIsMissing: "request inspection of one named repository fact" };
+  if (activation.capability === "refine") return { ...common, earlierChoices, chosenApproach: earlierChoices, approachToSettle: region.objective, successCriteriaPositions: region.acceptanceCriteria.map((criterion, position) => ({ position, criterion })), nextStepsContract: { split: "supply the children that carry the work forward: each resolves one later decision or delivers one independent piece; together they must cover every criterion position, and each child needs at least one concrete success criterion of its own", leafNote: "whether the remainder is small enough to implement is computed from the criteria counts; do not try to declare the work done" }, ifFactIsMissing: "request inspection of one named repository fact" };
+  if (activation.capability === "implement") return { ...common, chosenApproach: earlierChoices, permittedNextRequest: ["inspect one named missing fact", "reconsider one evidence-refuted earlier choice"], ifBlocked: { missingFact: "request inspection of one named repository fact", wrongChoice: "request reconsideration only when evidence contradicts an earlier choice" } };
   if (activation.capability === "verify") return { ...common, earlierChoices, changeToCheck: region.objective };
   return { ...common, earlierChoices, answerToWrite: region.objective };
 }
@@ -120,10 +163,10 @@ function changedBetween(before: Map<string, string>, after: Map<string, string>)
 
 function semantic(network: SolutionNetwork): SolutionSemanticSnapshot {
   return {
-    kind: "solution-lod-v1", revision: network.revision,
+    kind: "solution-lod-v2", revision: network.revision,
     regions: network.regions.map((region) => ({ id: region.id, key: region.key, parentId: region.parentId, edge: region.edge, lod: region.lod, objective: region.objective, status: region.status, viable: region.candidateIds.filter((id) => network.candidates.find((candidate) => candidate.id === id)?.status !== "eliminated").length, total: region.candidateIds.length, selectedCandidateIds: region.selectedCandidateIds, candidateIds: region.candidateIds, constraintIds: region.constraintIds, evidenceIds: region.evidenceIds, activationIds: region.activationIds, artifactIds: region.artifactIds })),
     candidates: network.candidates.map(({ id, regionId, proposition, status, eliminationReasons, evidenceIds }) => ({ id, regionId, proposition, status, eliminationReasons, evidenceIds })),
-    constraints: network.constraints.map(({ id, kind, subject, target, reason }) => ({ id, kind, subject, target, reason })),
+      constraints: network.constraints.map(({ id, kind, subject, target, reason, sourceKind }) => ({ id, kind, subject, target, reason, sourceKind })),
     evidence: network.evidence.map(({ id, text, source, kind }) => ({ id, text, source, kind })),
     activations: network.activations.map(({ id, capability, regionId, request, expectedDelta, senderActivationId, status, error }) => ({ id, capability, regionId, request, expectedDelta, senderActivationId, status, error })),
     artifacts: network.artifacts.map(({ id, regionId, kind, path, summary, passed, activationId }) => ({ id, regionId, kind, path, summary, passed, activationId })),
@@ -139,28 +182,34 @@ function progress(state: SolutionLodState): GraphProgressSnapshot {
 }
 
 function finalResult(state: SolutionLodState): string {
+  const floorNote = (() => {
+    const floors = depthFloorRegionIds(state.network);
+    return floors.length ? `\n\nNote: ${floors.length} region${floors.length === 1 ? "" : "s"} (${floors.join(", ")}) became implementable via the refinement-depth floor rather than single-criterion actionability.` : "";
+  })();
   const answers = state.network.regions.filter((item) => item.delivery === "answer" && item.answer).map((item) => item.answer!);
-  if (answers.length) return answers.join("\n\n");
+  if (answers.length) return answers.join("\n\n") + floorNote;
   const verified = state.network.regions.filter((item) => item.status === "verified" && item.delivery === "change");
   if (verified.length) {
     const files = [...new Set(verified.flatMap((region) => region.artifactIds).map((id) => state.network.artifacts.find((item) => item.id === id)).filter((item) => item?.kind === "file").map((item) => item!.path!))];
-    return `Implemented and verified ${verified.length} solution region${verified.length === 1 ? "" : "s"}.${files.length ? `\n\nChanged files:\n${files.map((file) => `- ${file}`).join("\n")}` : ""}`;
+    return `Implemented and verified ${verified.length} solution region${verified.length === 1 ? "" : "s"}.${files.length ? `\n\nChanged files:\n${files.map((file) => `- ${file}`).join("\n")}` : ""}${floorNote}`;
   }
-  return state.result;
+  return state.result + floorNote;
 }
 
 export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<SolutionLodState> {
   const limits = Object.fromEntries((Object.keys(DEFAULT_SOLUTION_ROLE_LIMITS) as Capability[]).map((role) => [role, { ...DEFAULT_SOLUTION_ROLE_LIMITS[role], ...(options.roleLimits?.[role] ?? {}) }])) as unknown as SolutionRoleLimits;
   const width = Math.max(1, Math.floor(options.maxParallelActivations ?? DEFAULT_MAX_PARALLEL_ACTIVATIONS));
+  const maxActivations = Math.max(1, Math.floor(options.maxActivations ?? 256));
   const dispatchBatch = (state: SolutionLodState): Send[] => state.activeBatch.map((entry) => {
     const activation = state.network.activations.find((item) => item.id === entry.activationId);
     if (!activation) throw new Error(`Batch entry ${entry.activationId} references a missing activation`);
-    const task: ActivationTaskInput = { kind: "activation-task", activation, snapshot: { stateVersion: 5, runId: state.runId, originalTask: state.originalTask, conversationContext: state.conversationContext, directory: state.directory, worktree: state.worktree, phase: state.phase, network: state.network } };
+    const task: ActivationTaskInput = { kind: "activation-task", activation, snapshot: { stateVersion: 7, runId: state.runId, originalTask: state.originalTask, conversationContext: state.conversationContext, directory: state.directory, worktree: state.worktree, phase: state.phase, network: state.network } };
     return new Send("activate", task);
   });
-  const taskState = (task: ActivationTaskInput): SolutionLodState => ({ stateVersion: 5, runId: task.snapshot.runId, originalTask: task.snapshot.originalTask, conversationContext: task.snapshot.conversationContext, directory: task.snapshot.directory, worktree: task.snapshot.worktree, phase: task.snapshot.phase, activeBatch: [], network: task.snapshot.network, results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" });
+  const taskState = (task: ActivationTaskInput): SolutionLodState => ({ stateVersion: 7, runId: task.snapshot.runId, originalTask: task.snapshot.originalTask, conversationContext: task.snapshot.conversationContext, directory: task.snapshot.directory, worktree: task.snapshot.worktree, phase: task.snapshot.phase, activeBatch: [], network: task.snapshot.network, results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: 0, result: "" });
   const builder = new StateGraph(SolutionState)
     .addNode("schedule", (state: SolutionLodState) => {
+      if (state.callsUsed >= maxActivations) return { activeActivationId: undefined, activeBatch: [] as ActiveBatchEntry[], phase: "blocked", result: `The solution network is blocked: exploration-limit after ${maxActivations} activations; the current frontier remains inspectable.` };
       const scheduled = ensureRunnableWork(state.network, width);
       if (scheduled.done) return { network: scheduled.network, activeActivationId: undefined, activeBatch: [] as ActiveBatchEntry[], phase: "completed", result: finalResult({ ...state, network: scheduled.network }) };
       if (scheduled.blocked) return { network: scheduled.network, activeActivationId: undefined, activeBatch: [] as ActiveBatchEntry[], phase: "blocked", result: `The solution network is blocked: ${scheduled.blocked}` };
@@ -176,7 +225,7 @@ export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<So
       const singleton = batch.length === 1 ? batch[0] : undefined;
       return { network, activeActivationId: singleton?.capability === "implement" ? singleton.id : undefined, activeBatch: manifest, phase: singleton ? `${singleton.capability}:${singleton.regionId}` : `batch:${batch.length}` };
     })
-    .addNode("acquire", async (_state: SolutionLodState, config?: RunnableConfig) => { const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined; if (acquire) await acquire(); return { worktreeAcquired: true }; })
+    .addNode("acquire", async (_state: SolutionLodState, config?: RunnableConfig) => { const acquire = config?.configurable?.langgraphAcquireWorktree as (() => Promise<void>) | undefined; if (acquire) await acquire(); return {}; })
     .addNode("activate", async (input: ActivationTaskInput | SolutionLodState, config?: RunnableConfig) => {
       const task = input as ActivationTaskInput;
       if (task?.kind !== "activation-task") throw new Error("Activate requires a dispatched activation task");
@@ -186,28 +235,42 @@ export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<So
       const snapshotWorkspace = config?.configurable?.langgraphSnapshotWorkspace as ((worktree: string) => Map<string, string>) | undefined;
       const snapshot = snapshotWorkspace ?? statusPaths;
       const before = activation.capability === "implement" ? snapshot(state.worktree) : undefined;
+      const prepareVerifier = config?.configurable?.langgraphPrepareVerifierWorkspace as ((runId: string, worktree: string) => Promise<string>) | undefined;
+      const releaseVerifier = config?.configurable?.langgraphReleaseVerifierWorkspace as ((runId: string) => Promise<void>) | undefined;
+      let executionWorktree = state.worktree;
       const record = (partial: Pick<ActivationTaskResult, "outcome"> & Partial<ActivationTaskResult>): ActivationTaskResult => ({ activationId: activation.id, regionId: activation.regionId, capability: activation.capability, basisRevision: activation.basisRevision, startedAt, finishedAt: Date.now(), usage: { ...EMPTY_USAGE }, networkDelta: null, ...partial });
       try {
+        if (activation.capability === "verify" && prepareVerifier) executionWorktree = await prepareVerifier(state.runId, state.worktree);
         const schema = activation.capability === "implement" ? ImplementationOutputSchema : activation.capability === "verify" ? VerificationOutputSchema : activation.capability === "present" ? PresentationOutputSchema : activation.capability === "refine" ? RefinementOutputSchema : SolutionDeltaSchema;
-        const result = await runtime(config).call({ agent: options.agents[activation.capability], node: `${activation.capability}:${activation.regionId}`, state, limits: limits[activation.capability], schema: z.toJSONSchema(schema) as Record<string, unknown>, validateStructured: (value) => { const parsed = schema.parse(value); if (schema === SolutionDeltaSchema) validateSolutionDelta(state, activation.regionId, parsed as SolutionDelta); else if (schema === RefinementOutputSchema) validateRefinementOutput(state, activation.regionId, parsed as RefinementOutput); return parsed; }, prompt: JSON.stringify(projectActivationContext(state, activation)) });
+        const result = await runtime(config).call({ agent: options.agents[activation.capability] ?? activation.capability, node: `${activation.capability}:${activation.regionId}`, state, directory: executionWorktree, worktree: executionWorktree, limits: limits[activation.capability], schema: z.toJSONSchema(schema) as Record<string, unknown>, validateStructured: (value) => { const parsed = schema.parse(value); if (schema === SolutionDeltaSchema) validateSolutionDelta(state, activation.regionId, activation.capability, parsed as SolutionDelta); else if (schema === RefinementOutputSchema) validateRefinementOutput(state, activation.regionId, parsed as RefinementOutput); else if (schema === ImplementationOutputSchema) validateImplementationOutput(state, activation.regionId, parsed as ImplementationOutput); else if (schema === VerificationOutputSchema) validateVerificationOutput(state, activation.regionId, parsed as VerificationOutput); return parsed; }, prompt: JSON.stringify(projectActivationContext(state, activation)) });
         const base = { sessionId: result.sessionId, usage: result.usage ?? { ...EMPTY_USAGE } };
         if (result.budgetStop) {
           const error = `Agent scheduling quantum reached: ${result.budgetStop.metric}`;
           const changedFiles = before ? changedBetween(before, snapshot(state.worktree)) : [];
           return { results: [record({ ...base, outcome: "deferred", error, changedFiles })] };
         }
+        const validatedOutput = <Output>(outputSchema: ZodType<Output>): Output => {
+          const parsed = structured(result, outputSchema);
+          if (activation.capability === "inspect" || activation.capability === "synthesize") validateSolutionDelta(state, activation.regionId, activation.capability, parsed as SolutionDelta);
+          else if (activation.capability === "refine") validateRefinementOutput(state, activation.regionId, parsed as RefinementOutput);
+          else if (activation.capability === "implement") validateImplementationOutput(state, activation.regionId, parsed as ImplementationOutput);
+          else if (activation.capability === "verify") validateVerificationOutput(state, activation.regionId, parsed as VerificationOutput);
+          return parsed;
+        };
         if (activation.capability === "implement") {
           const changedFiles = changedBetween(before!, snapshot(state.worktree));
-          return { results: [record({ ...base, outcome: "applied", changedFiles, networkDelta: { kind: "implementation", output: structured(result, ImplementationOutputSchema), changedFiles } })] };
+          return { results: [record({ ...base, outcome: "applied", changedFiles, networkDelta: { kind: "implementation", output: validatedOutput(ImplementationOutputSchema), changedFiles } })] };
         }
-        if (activation.capability === "verify") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "verification", output: structured(result, VerificationOutputSchema) } })] };
+        if (activation.capability === "verify") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "verification", output: validatedOutput(VerificationOutputSchema) } })] };
         if (activation.capability === "present") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "presentation", answer: structured(result, PresentationOutputSchema).answer } })] };
-        if (activation.capability === "refine") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "refinement", output: structured(result, RefinementOutputSchema) } })] };
-        return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "delta", delta: structured(result, SolutionDeltaSchema) } })] };
+        if (activation.capability === "refine") return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "refinement", output: validatedOutput(RefinementOutputSchema) } })] };
+        return { results: [record({ ...base, outcome: "applied", networkDelta: { kind: "delta", delta: validatedOutput(SolutionDeltaSchema) } })] };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const changedFiles = before ? changedBetween(before, snapshot(state.worktree)) : undefined;
         return { results: [record({ outcome: "error", error: message, changedFiles })] };
+      } finally {
+        if (activation.capability === "verify" && releaseVerifier) await releaseVerifier(state.runId);
       }
     })
     .addNode("merge", (state: SolutionLodState) => {
@@ -219,14 +282,14 @@ export function solutionLodGraph(options: SolutionLodOptions): ConnectorGraph<So
     })
     .addNode("finish", (state: SolutionLodState) => ({ result: state.result || finalResult(state) }))
     .addEdge(START, "schedule")
-    .addConditionalEdges("schedule", (state: SolutionLodState) => state.result ? "finish" : state.activeActivationId && !state.worktreeAcquired ? "acquire" : dispatchBatch(state), { finish: "finish", acquire: "acquire", activate: "activate" })
+    .addConditionalEdges("schedule", (state: SolutionLodState) => state.result ? "finish" : state.activeActivationId ? "acquire" : dispatchBatch(state), { finish: "finish", acquire: "acquire", activate: "activate" })
     .addConditionalEdges("acquire", (state: SolutionLodState) => dispatchBatch(state), ["activate"])
     .addEdge("activate", "merge")
     .addEdge("merge", "schedule")
     .addEdge("finish", END);
   return {
     graph: builder.compile({ checkpointer: options.checkpointer ?? defaultSolutionCheckpointer() }),
-    initial: ({ task, conversationContext = "", directory, worktree, runId }) => ({ stateVersion: 5, runId, originalTask: task, conversationContext, directory, worktree, phase: "forming-root-domain", activeBatch: [], network: initialNetwork(task), results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: Date.now(), worktreeAcquired: false, result: "" }),
+    initial: ({ task, conversationContext = "", directory, worktree, runId }) => ({ stateVersion: 7, runId, originalTask: task, conversationContext, directory, worktree, phase: "forming-root-domain", activeBatch: [], network: initialNetwork(task), results: [], usage: { ...EMPTY_USAGE }, callsUsed: 0, startedAt: Date.now(), result: "" }),
     result: (state) => state.result,
     progress,
     display: { schedule: { phase: "collapse" }, acquire: { phase: "lease" }, activate: { phase: "activate" }, merge: { phase: "propagate" }, finish: { phase: "result" } },

@@ -29,7 +29,7 @@ const asNumbers = (value: unknown): number[] => Array.isArray(value) ? value.fil
 const asObject = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const str = (value: unknown): string => typeof value === "string" ? value : "";
 
-const KIND_TONE: Record<string, SchemaTone> = { refutes: "error", excludes: "warning", requires: "info", supports: "success", equivalent: "accent", acceptance: "primary", permission: "secondary" };
+const KIND_TONE: Record<string, SchemaTone> = { refutes: "error", excludes: "warning", requires: "info", supports: "success", equivalent: "accent" };
 
 function section(lines: SchemaLine[], title: string, count?: number): void {
   if (count !== undefined && count <= 0) return;

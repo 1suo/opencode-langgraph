@@ -76,11 +76,11 @@ The loop `schedule → activate → merge → schedule` repeats until `schedule`
 
 ## 3. State
 
-### 3.1 `SolutionLodState` (graph state, `stateVersion: 4`)
+### 3.1 `SolutionLodState` (graph state, `stateVersion: 7`)
 
 | Field | Type / reducer | Meaning |
 |---|---|---|
-| `stateVersion` | literal `4` | Checkpoint schema version; runs recorded under older schemas are rejected |
+| `stateVersion` | literal `7` | Checkpoint schema version; runs recorded under older schemas are rejected |
 | `runId` | string | Run identifier |
 | `originalTask` | string | The immutable original user message |
 | `conversationContext` | string | Compact frame of the preceding root conversation |
@@ -93,7 +93,6 @@ The loop `schedule → activate → merge → schedule` repeats until `schedule`
 | `usage` | `AgentUsage` | Aggregated telemetry (turns, input/output/reasoning/cache tokens, cost) — telemetry and scheduling pressure, never a user-facing budget gate |
 | `callsUsed` | number | Count of applied activation records |
 | `startedAt` | number | Wall-clock start |
-| `worktreeAcquired` | boolean | Whether the worktree lease is held |
 | `result` | string | Terminal result; non-empty `result` is what routes `schedule` to `finish` |
 
 ### 3.2 `SolutionNetwork`
@@ -114,11 +113,12 @@ A single append-mostly document holding both orthogonal structures plus bookkeep
 }
 ```
 
-- **Region** (`r1`, `r2`, …): `{key, parentId?, parentCandidateId?, edge: root|refines|partOf, lod, objective, delivery: answer|change, allowedVariables, acceptanceCriteria, status, candidateIds, selectedCandidateIds, constraintIds, evidenceIds, activationIds, artifactIds, answer?, contradiction?, implementationContract?, coveredCriteria?}`. The root region `r1` is created by `initialNetwork(task)` with status `unformed` and one queued `inspect` activation `a1`.
-- **Candidate** (`r3:switch-parser` style ids): one mutually exclusive solution family within a region; status `possible | eliminated | selected | equivalent`, with elimination reasons and evidence references.
-- **Constraint**: typed relationship `requires | excludes | supports | refutes | equivalent | acceptance | permission` between referenced entities (regions, candidates, evidence).
+- **Region** (`r1`, `r2`, …): `{key, parentId?, parentCandidateId?, edge: root|refines|partOf, lod, objective, delivery: answer|change, allowedVariables, acceptanceCriteria, status, candidateIds, selectedCandidateIds, constraintIds, evidenceIds, activationIds, artifactIds, answer?, contradiction?, coveredCriteria?}`. The root region `r1` is created by `initialNetwork(task)` with status `unformed` and one queued `inspect` activation `a1`.
+- **Candidate** (`r3:switch-parser` style ids): one mutually exclusive solution family within a region; status `possible | eliminated | selected` (interchangeability is derived from `equivalent` constraints, never authored), with elimination reasons, evidence references, and `stances: [{variableId, relation: requires|excludes|prefers, valueLabel}]` positioning the move on shared choices.
+- **Shared choice** (`v1`, … / DecisionVariable): `{id, name (globally unique slug), ownerRegionId, seedLabels[]}` — visible only in the owner's subtree; values exist as normalized labels inside stances/bindings, no registry. The primal variable graph (edges from co-occurrence within one move's stances or one constraint) must stay an acyclic forest — enforced at merge via union-find.
+- **Constraint**: hard relationship `requires | excludes | equivalent` between candidate endpoints, evidence relationship `supports | refutes` with kind-checked endpoints (`refutes`/`excludes` may also target coordinates `choiceName:option` when backed by ≥1 cited fact), plus `sourceKind: user-task|repo-evidence|model-inference`. Acceptance criteria and permissions are region policy, not constraint edges.
 - **Evidence**: normalized facts deduplicated by a sha256 fingerprint of `(text, source)`; kind `repository | tool | inference | user`. Stored once, passed around by id.
-- **Activation** (`a1`, `a2`, …): `{capability, regionId, request, expectedDelta, contextRefs, wakeCondition?, senderActivationId?, status: queued|running|waiting|completed|failed|superseded, basisRevision, sessionId?, error?}`.
+- **Activation** (`a1`, `a2`, …): `{capability, regionId, request, expectedDelta, contextRefs, senderActivationId?, status: queued|running|completed|failed|superseded, basisRevision, sessionId?, error?}`.
 - **Artifact** (`x1`, …): observed outputs — `file` (with path), `check` (with pass/fail), `answer`.
 
 ### 3.3 Initial state
@@ -148,7 +148,7 @@ r1 (root, lod 0, unformed, delivery: change)
 
 ```ts
 state.result ? "finish"
-: state.activeActivationId && !state.worktreeAcquired ? "acquire"
+: state.activeActivationId ? "acquire"
 : dispatchBatch(state)          // one Send("activate", task) per manifest entry
 ```
 
@@ -156,7 +156,7 @@ Parallelism uses LangGraph `Send`: each `activate` task receives an `ActivationT
 
 ### 4.3 `acquire` — worktree lease
 
-Runs only before a mutating singleton batch. Invokes the configurable `langgraphAcquireWorktree` hook (the connector's worktree lock) and returns `{worktreeAcquired: true}`; it waits until the lease is available. It never calls a model. Routing then proceeds to `activate` via the same dispatch.
+Runs before every mutating implementation singleton, including after resume. It invokes the process-local `langgraphAcquireWorktree` hook and does not persist lease ownership in the checkpoint. Routing then proceeds to `activate` via the same dispatch.
 
 ### 4.4 `activate` — the only model-calling node
 
@@ -260,8 +260,8 @@ Durable facts are stored once in `evidence` and passed by id. (Known measured be
 - A domain with every candidate eliminated → region `contradiction`.
 - Exactly one viable candidate → forced collapse ("only viable candidate").
 - Multiple non-equivalent selected candidates → `contradiction` ("multiple incompatible alternatives").
+- Shared-choice facts: cited refutations of `choice:option` prune requiring moves everywhere visible; committed selections bind options and prune excluding/requiring-other moves; two live commitments demanding different options surface a contradiction instead of resolving silently. Kills derive on a pure overlay (dead binders release their bindings), then constraint rules evaluate as synchronous fact-stage → commitment-stage sweeps against frozen snapshots.
 - After a consistent selection: non-equivalent siblings are eliminated, `selectedCandidateIds` stabilize, and the region status becomes `collapsed` (children exist), `actionable` (controller-computed: exactly one explicit criterion, or depth floor), or `unrefined` — **selection never implies actionability**.
-- Waiting activations whose `wakeCondition.revisionAfter < revision` are re-queued; any change bumps `network.revision`.
 
 `validateSolutionDelta` mirrors the merge so that a delta which would eliminate every candidate with none selected is rejected *at validation time* with guidance and retried; a truly dead region is recovered by reopening the parent, not by an empty domain.
 
@@ -303,7 +303,7 @@ Invalidation is surgical: a new synthesis selection drops the previous refinemen
 
 ## 12. Progress, display, and configuration
 
-- `progress(state)` produces the F8 semantic snapshot (`solution-lod-v1`): regions with LOD/viable-domain counts, candidates with statuses, constraints, evidence, activations, artifacts, usage, and phase.
+- `progress(state)` produces the F8 semantic snapshot (`solution-lod-v2`): regions with LOD/viable-domain counts, candidates with statuses, constraints, evidence, activations, artifacts, usage, and phase.
 - `display` maps nodes to phases for the TUI: `schedule → collapse`, `acquire → lease`, `activate → activate`, `merge → propagate`, `finish → result`.
 - Options (`SolutionLodOptions`): `agents` (model per capability), `roleLimits` (per-capability scheduling quantum), `maxParallelActivations` (default `3`), `checkpointer`. Example:
 

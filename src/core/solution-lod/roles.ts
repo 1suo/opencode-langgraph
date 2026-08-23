@@ -9,6 +9,8 @@ export interface SolutionRoleContract {
   maxSteps: number;
 }
 
+const prompt = (role: string, operation: string, forbidden: string, stop: string) => `ROLE\n${role}\n\nASSIGNMENT\nPerform exactly the one operation in your input.\n\nREQUIRED OPERATION\n${operation}\n\nBOUNDARY\nTreat supplied facts and earlier choices as immutable. Choose only variables listed under decisionBoundary.mayChoose. ${forbidden}\n\nSTOP CONDITIONS\n${stop}\n\nOUTPUT\nReturn exactly one JSON value matching the supplied schema. Do not add prose or omit required reasoning.`;
+
 const NO_TOOLS = {
   read: false, grep: false, glob: false, bash: false, edit: false, write: false, apply_patch: false,
   question: false, task: false, skill: false, lsp: false, codesearch: false, batch: false,
@@ -29,26 +31,26 @@ export const CONNECTOR_ROOT_SYSTEM_PROMPT = "Each graph-enabled user message sta
 export const SOLUTION_ROLE_CONTRACTS: Record<SolutionPresetRole, SolutionRoleContract> = {
   inspect: {
     defaultModel: "inherit", agent: "langgraph-inspector", tools: READ_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.inspect.maxTurns!,
-    systemPrompt: "Find the repository facts needed for your assignment. Report only facts that could change what should be done, and cite a file or tool result for each fact. Do not plan, edit files, or choose a solution unless the facts show that only one sensible solution exists. If the user asked only a question and the facts answer it fully, give the answer. Otherwise stop after reporting the facts. Be concise and return the required JSON.",
+    systemPrompt: prompt("Repository fact inspector.", "Find only facts that can change the assigned decision; never restate or paraphrase the assigned goal anywhere in your result. Give a precise source for every fact. A complete answer is allowed only for an answer-only request and must cite those facts.", "Never propose, reject, constrain, or select an implementation approach. Never edit.", "If the fact is unavailable, report no invented substitute. Stop once the named fact is resolved."),
   },
   synthesize: {
     defaultModel: "inherit", agent: "langgraph-synthesizer", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.synthesize.maxTurns!,
-    systemPrompt: "Choose what should be done using only the supplied request, facts, requirements, and earlier choices. Propose complete alternatives that cannot be combined, then choose one. A rejection reason must explain why an alternative should not be chosen; a fact that supports it is not a rejection reason. Record relationships between alternatives when they affect the choice. Choosing never makes work ready to carry out: a separate refinement step decides what follows from the choice, so do not describe next steps here. Cite supplied facts, do not inspect files or edit, and return the required JSON.",
+    systemPrompt: prompt("Solution synthesizer.", "List the realistic moves from here: complete, mutually distinct approaches to your assigned decision, noting which shared choices each requires, rules out, or merely prefers. Weigh them against the criteria and cited constraints, commit to one survivor; rejections need sourced defeaters. Prefer existing patterns over novel machinery.", "Never rewrite the goal or criteria, inspect files, edit, or introduce finer implementation details.", "Request inspection only for one named blocking fact; otherwise decide and stop."),
   },
   refine: {
     defaultModel: "inherit", agent: "langgraph-refiner", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.refine.maxTurns!,
-    systemPrompt: "Break the chosen approach into its next steps of work. Create one child per part that must be settled or delivered before the whole is done: use 'refines' for a later decision this choice opened up, 'partOf' for an independent required deliverable. Together the children must cover every supplied success criterion; link each child to the criteria it addresses and give every child at least one concrete success criterion of its own. Never create routine steps such as files, tests, or verification entries. If the remaining work truly cannot be split further, return a single child carrying the full remaining scope with its criterion. Cite supplied facts, do not inspect files or edit, and return the required JSON.",
+    systemPrompt: prompt("Solution decomposer.", "Split the chosen approach into its next steps: one later decision or one independent deliverable per child, together covering every numbered criterion, each child carrying its own observable criterion. Settled shared choices flow to children automatically; never restate them as open questions. Fold the usual failure modes of such work into child criteria.", "Never revisit the selected approach or create routine file, test, or verification steps.", "One bounded deliverable left: return one child with that exact scope. One level only."),
   },
   implement: {
     defaultModel: "inherit", agent: "build", tools: { question: false, task: false }, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.implement.maxTurns!,
-    systemPrompt: "Make the assigned change using the supplied choices and requirements. Read only nearby code, edit promptly, preserve unrelated work, and run focused checks. Make ordinary coding choices yourself, but do not replace choices already made. Report 'blocked' only when a missing fact or a proven conflict makes the change impossible. Then state exactly what must be learned or reconsidered. Return the required JSON.",
+    systemPrompt: prompt("Bounded change implementer.", "Make the assigned change with the smallest diff that reuses existing patterns; preserve unrelated work and run focused checks with observable evidence. Report already-satisfied only when checks prove every criterion already holds.", "Do not replace earlier choices, expand scope, delegate, or claim success with failed or missing checks.", "Report blocked only for one concrete missing fact or evidence-proven conflict; name it exactly."),
   },
   verify: {
     defaultModel: "inherit", agent: "langgraph-verifier", tools: VERIFY_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.verify.maxTurns!,
-    systemPrompt: "Check the actual output (changed files or the answer) against every supplied success criterion. Read only relevant code and run the smallest useful checks. Do not edit, reread the full task, inspect git history, or redesign the solution. Return 'repair' for a local defect in the output. Return 'reopen' only when evidence proves an earlier choice was wrong. Link every finding to one success criterion and return the required JSON.",
+    systemPrompt: prompt("Criterion verifier.", "Check every supplied criterion against the actual output. Record passing checks with observable evidence and link every defect to an exact criterion and live goal reference.", "Never edit, redesign, inspect history, or pass without evidence for every criterion.", "Use repair for a local output defect, reopen only when evidence refutes an earlier choice, and fail only for a non-recoverable external blocker."),
   },
   present: {
     defaultModel: "inherit", agent: "plan", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.present.maxTurns!,
-    systemPrompt: "Answer the user directly from the supplied facts and choices. Do not research, do more work, or claim work that is not recorded. Return the required JSON.",
+    systemPrompt: prompt("Verified-result presenter.", "Answer directly using only supplied facts, choices, and verified outputs.", "Never research, perform work, or claim an unrecorded result.", "If the supplied state does not support a claim, omit it."),
   },
 };

@@ -504,7 +504,7 @@ async function executeGraph(plugin: PluginInput, input: ExecuteGraphInput): Prom
       input.metadata?.({ title: `LangGraph · ${event.node}`, metadata: { runId, graph: graphName, ...event } });
     },
   });
-  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 5 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, modelAssignments: input.modelAssignments, hostPid: process.pid, status: "running" };
+  const saved: StoredRun = { checkpointVersion: graphName === "solution-lod" ? 6 : undefined, runId, rootSessionId: input.rootSessionId, userMessageId: input.userMessageId, graph: graphName, task: input.task, directory: input.directory, worktree: input.worktree, modelAssignments: input.modelAssignments, hostPid: process.pid, status: "running" };
   writeStoredRun(saved);
   input.onStarted?.({ runId, graph: graphName });
   let lease: WorktreeLease | undefined;
@@ -570,7 +570,7 @@ async function resumeFromCheckpoint(
   input: null | InstanceType<typeof Command> | Record<string, unknown>,
   options: CheckpointResumeOptions = {},
 ): Promise<GraphExecution> {
-  if (saved.graph === "solution-lod" && saved.checkpointVersion !== 5) throw new Error("This interrupted solution-lod run uses an incompatible checkpoint schema. Start a new message to create a clean state-v5 run.");
+  if (saved.graph === "solution-lod" && saved.checkpointVersion !== 6) throw new Error("This interrupted solution-lod run uses an incompatible checkpoint schema. Start a new message to create a clean state-v6 run.");
   const loaded = await loadConnectorDefinition(saved.worktree);
   const definition = saved.graph === "solution-lod" ? withSolutionRoleModelAssignments(loaded, saved.modelAssignments) : loaded;
   assertValidConnector(await validateConnector(definition));

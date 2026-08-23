@@ -22,8 +22,14 @@ export interface SolutionCandidate {
   key: string;
   proposition: string;
   status: CandidateStatus;
+  /** Authored disposition. `status` is recomputed from this on every propagation pass. */
+  declaredStatus?: CandidateStatus;
   evidenceIds: string[];
+  declaredEvidenceIds?: string[];
   eliminationReasons: string[];
+  declaredEliminationReasons?: string[];
+  /** Positions this move takes on shared decision variables. */
+  stances: CandidateStance[];
 }
 
 export interface SolutionRegion {
@@ -61,7 +67,21 @@ export interface SolutionEvidence {
   fingerprint: string;
 }
 
-export type ConstraintKind = "requires" | "excludes" | "supports" | "refutes" | "equivalent" | "acceptance" | "permission";
+export type ConstraintKind = "requires" | "excludes" | "supports" | "refutes" | "equivalent";
+export type ConstraintSource = "user-task" | "repo-evidence" | "model-inference";
+export type StanceRelation = "requires" | "excludes" | "prefers";
+export interface DecisionVariable {
+  id: string;
+  name: string;
+  ownerRegionId: string;
+  /** Known options at declaration time; new options may still appear later. Canonical spellings. */
+  seedLabels: string[];
+}
+export interface CandidateStance {
+  variableId: string;
+  relation: StanceRelation;
+  valueLabel: string;
+}
 export interface SolutionConstraint {
   id: string;
   kind: ConstraintKind;
@@ -69,6 +89,9 @@ export interface SolutionConstraint {
   target: string;
   reason: string;
   sourceActivationId: string;
+  sourceKind: ConstraintSource;
+  /** Resolved evidence ids backing this statement; coordinate-targeted refutations must be non-empty. */
+  evidenceRefs: string[];
 }
 
 export interface SolutionArtifact {
@@ -88,9 +111,8 @@ export interface Activation {
   request: string;
   expectedDelta: string;
   contextRefs: string[];
-  wakeCondition?: { ref: string; revisionAfter: number };
   senderActivationId?: string;
-  status: "queued" | "running" | "waiting" | "completed" | "failed" | "superseded";
+  status: "queued" | "running" | "completed" | "failed" | "superseded";
   basisRevision: number;
   sessionId?: string;
   error?: string;
@@ -133,7 +155,7 @@ export interface ActivationTaskInput {
   kind: "activation-task";
   activation: Activation;
   snapshot: {
-    stateVersion: 5;
+    stateVersion: 7;
     runId: string;
     originalTask: string;
     conversationContext: string;
@@ -151,12 +173,14 @@ export interface SolutionNetwork {
   nextConstraintId: number;
   nextActivationId: number;
   nextArtifactId: number;
+  nextVariableId: number;
   regions: SolutionRegion[];
   candidates: SolutionCandidate[];
   constraints: SolutionConstraint[];
   evidence: SolutionEvidence[];
   activations: Activation[];
   artifacts: SolutionArtifact[];
+  variables: DecisionVariable[];
 }
 
 export interface SolutionRoleLimits {
@@ -189,24 +213,35 @@ const ChildRegionSchema = z.object({
 
 export const SolutionDeltaSchema = z.object({
   region: z.object({
-    objective: z.string().optional().describe("The goal to decide or deliver."),
+    objective: z.string().optional().describe("The goal to decide or deliver. Inspectors must omit this field entirely — never restate the assigned goal."),
     delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when the user needs an answer without file changes. Otherwise use 'change'."),
     allowedVariables: z.array(z.string()).optional().describe("The only aspects that may be chosen here."),
     acceptanceCriteria: z.array(z.string()).optional().describe("Observable conditions that prove the goal is complete."),
   }).optional().describe("Use only to clarify the current goal or its success criteria."),
   evidence: z.array(z.object({ text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference") })).default([]).describe("Facts used in this result. State each fact plainly and identify where it came from."),
+  variables: z.array(z.object({
+    name: z.string().min(1).describe("A short stable name for a new shared choice that several moves depend on, e.g. 'http-client'. Declare it only when moves genuinely differ on it; reuse the established name instead of inventing a variant."),
+    seedLabels: z.array(z.string()).default([]).describe("Options already known for this choice, stated exactly. Informational; new options may still appear later."),
+  })).default([]).describe("New shared choices declared at this decision level. Leave empty unless one is genuinely needed."),
   candidates: z.array(z.object({
     key: z.string().min(1).describe("A short stable name for this alternative."),
     proposition: z.string().min(1).describe("The complete approach this alternative proposes."),
-    outcome: z.enum(["possible", "eliminated", "selected", "equivalent"]).default("possible").describe("Whether this alternative remains possible, is rejected, is chosen, or is interchangeable with another."),
+    outcome: z.enum(["possible", "eliminated", "selected"]).default("possible").describe("Whether this alternative remains possible, is rejected, or is chosen. Interchangeability is derived from 'equivalent' constraints, never declared here."),
     reasons: z.array(z.string()).default([]).describe("For a rejected alternative, explain why it should not be chosen. Do not put supporting facts here."),
     evidenceRefs: z.array(z.string()).default([]).describe("References to facts that justify the stated outcome."),
+    stances: z.array(z.object({
+      variable: z.string().min(1).describe("Name of a shared choice declared for this goal or inherited from an earlier one."),
+      relation: z.enum(["requires", "excludes", "prefers"]).describe("'requires' = this move is viable only with that option. 'excludes' = this move cannot coexist with that option. 'prefers' = when nothing else distinguishes moves, favor that option."),
+      valueLabel: z.string().min(1).describe("The option itself. Reuse the exact established spelling of an existing option instead of paraphrasing it."),
+    })).default([]).describe("How this move positions on shared choices. Omit when the move touches none."),
   })).default([]).describe("Complete alternatives to the same choice. They must not be combined, and exactly one should be chosen. Put independent deliverables under the chosen alternative as 'partOf' children, not as competing alternatives."),
   constraints: z.array(z.object({
-    kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent", "acceptance", "permission"]),
+    kind: z.enum(["requires", "excludes", "supports", "refutes", "equivalent"]),
     subject: z.string().min(1).describe("Key or reference of the item this statement is about."),
-    target: z.string().min(1).describe("Key or reference of the related item."),
+    target: z.string().min(1).describe("Key or reference of the related item. For 'refutes' this may also be a shared choice with an option, written as choiceName:option."),
     reason: z.string().default("").describe("Why this relationship is true, using supplied facts."),
+    evidenceRefs: z.array(z.string()).default([]).describe("Facts backing this statement. Required when refuting a shared choice option; an uncited refutation of a shared choice is rejected."),
+    sourceKind: z.enum(["user-task", "repo-evidence", "model-inference"]).default("model-inference").describe("Where this relationship comes from: stated by the user, grounded in repository facts, or inferred while comparing alternatives."),
   })).default([]).describe("Relationships between referenced items: 'requires' means one needs another; 'excludes' means they cannot coexist; 'supports' means one strengthens another; 'refutes' means one contradicts another; 'equivalent' means they are interchangeable."),
   select: z.array(z.string()).default([]).describe("Keys or references of the chosen alternative. Choose one, except that interchangeable alternatives may be selected together."),
   answer: z.string().optional().describe("Answer text for a goal already marked as answer-only."),
@@ -221,20 +256,19 @@ export const SolutionDeltaSchema = z.object({
     request: z.string().min(1).describe("One specific task for the requested helper."),
     expectedDelta: z.string().min(1).describe("A short stable name for the expected new information or work. It prevents duplicate requests."),
     contextRefs: z.array(z.string()).default([]).describe("References the helper needs to see."),
-    wakeCondition: z.object({ ref: z.string(), revisionAfter: z.number().int().nonnegative() }).optional().describe("Use only when this request must wait for a referenced item to change."),
   })).default([]).describe("Requests for another helper. Leave empty unless one missing fact or proven conflict prevents your assigned work."),
 });
 export type SolutionDelta = z.infer<typeof SolutionDeltaSchema>;
 
 export const RefinementOutputSchema = z.object({
   evidence: SolutionDeltaSchema.shape.evidence,
-  children: z.array(ChildRegionSchema).min(1).describe("The next steps of work: each resolves one later decision ('refines') or delivers one independent piece ('partOf'). Together they must address every success criterion of the current work, and each child must carry at least one concrete success criterion of its own. Never routine steps, files, tests, or verification."),
+  children: z.array(ChildRegionSchema).default([]).describe("Next conditional work regions that together cover every criterion."),
   activations: SolutionDeltaSchema.shape.activations,
-});
+}).strict();
 export type RefinementOutput = z.infer<typeof RefinementOutputSchema>;
 
 export const ImplementationOutputSchema = z.object({
-  status: z.enum(["completed", "blocked"]),
+  status: z.enum(["completed", "already-satisfied", "blocked"]),
   summary: z.string().default(""),
   changedFiles: z.array(z.string()).default([]),
   checks: z.array(z.object({ name: z.string(), passed: z.boolean(), evidence: z.string().default("") })).default([]),
@@ -255,7 +289,7 @@ export type VerificationOutput = z.infer<typeof VerificationOutputSchema>;
 export const PresentationOutputSchema = z.object({ answer: z.string().min(1) });
 
 export interface SolutionLodState extends Record<string, unknown> {
-  stateVersion: 5;
+  stateVersion: 7;
   runId: string;
   originalTask: string;
   conversationContext: string;
@@ -269,6 +303,5 @@ export interface SolutionLodState extends Record<string, unknown> {
   usage: AgentUsage;
   callsUsed: number;
   startedAt: number;
-  worktreeAcquired: boolean;
   result: string;
 }

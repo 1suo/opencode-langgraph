@@ -13,7 +13,7 @@ import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, renderSchema
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
 import { validateConnector } from "../src/core/validate.js";
 import type { AgentUsage, ConnectorDefinition } from "../src/core/types.js";
-import { applyBatchRecords, completeImplementation, completeVerification, ensureRunnableWork, initialNetwork, mergeRefinementOutput, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateRefinementOutput, validateSolutionDelta } from "../src/core/solution-lod/reducer.js";
+import { applyBatchRecords, completeImplementation, completeVerification, ensureRunnableWork, initialNetwork, mergeRefinementOutput, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateImplementationOutput, validateRefinementOutput, validateSolutionDelta, validateVerificationOutput } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
 import type { ActivationTaskResult, ImplementationOutput, RefinementOutput, SolutionLodState } from "../src/core/solution-lod/types.js";
@@ -109,7 +109,7 @@ describe("typed graph validation", () => {
     expect(definition.models["implement-model"]).toEqual({ backend: "opencode", model: "provider/strong" });
     expect(definition.agents.inspect.maxSteps).toBe(3);
     const initial = definition.graphs["solution-lod"].initial({ task: "x", directory: project, worktree: project, runId: "x" }) as SolutionLodState;
-    expect(initial.stateVersion).toBe(5);
+    expect(initial.stateVersion).toBe(7);
   });
 
   it("applies per-session role assignments without changing the configured definition", async () => {
@@ -393,14 +393,14 @@ describe("OpenCode child-session runtime", () => {
 
 describe("solution LOD reducer", () => {
   const state = (): SolutionLodState => ({
-    stateVersion: 5, runId: "run", originalTask: "change", conversationContext: "prior decision", directory: "/repo", worktree: "/repo", phase: "forming-root-domain", activeBatch: [], results: [],
-    network: initialNetwork("change"), usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "",
+    stateVersion: 6, runId: "run", originalTask: "change", conversationContext: "prior decision", directory: "/repo", worktree: "/repo", phase: "forming-root-domain", activeBatch: [], results: [],
+    network: initialNetwork("change"), usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, result: "",
   });
   const candidate = (key: string, proposition: string, outcome: "possible" | "eliminated" | "selected" | "equivalent" = "possible") => ({ key, proposition, outcome, reasons: [], evidenceRefs: [] });
   const contract = (acceptanceCriteria: string[], coveredCriteria = acceptanceCriteria.map((_, index) => index)) => ({ delivery: "change" as const, allowedVariables: [], acceptanceCriteria, coveredCriteria });
   const terminal = (acceptanceCriteria: string[]): RefinementOutput => ({ evidence: [], children: [], activations: [] });
   const selectDelta = (network: SolutionLodState["network"], activationId: string, ...keys: string[]) => {
-    const merged = mergeSolutionDelta({ stateVersion: 5, runId: "run", originalTask: "change", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", network, usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, worktreeAcquired: false, result: "" } as SolutionLodState, activationId, {
+    const merged = mergeSolutionDelta({ stateVersion: 6, runId: "run", originalTask: "change", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", network, usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, result: "" } as SolutionLodState, activationId, {
       region: {}, evidence: [], constraints: [], activations: [], select: keys,
       candidates: keys.map((key) => candidate(key, `${key} approach`, "selected")),
     });
@@ -613,6 +613,36 @@ describe("solution LOD reducer", () => {
     expect(merged.candidates.find((candidate) => candidate.key === "kept")?.status).toBe("selected");
   });
 
+  it("recomputes symmetric exclusion idempotently from authored candidate state", () => {
+    const current = state();
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [],
+      candidates: [candidate("left", "Left"), { ...candidate("right", "Right"), outcome: "selected" }],
+      constraints: [{ kind: "excludes", subject: "left", target: "right", reason: "mutually exclusive" }], select: ["right"],
+    });
+    expect(merged.candidates.find((item) => item.key === "left")?.status).toBe("eliminated");
+    const again = propagateNetwork(merged);
+    expect(again.revision).toBe(merged.revision);
+    expect(again.candidates.find((item) => item.key === "left")?.eliminationReasons).toEqual(["mutually exclusive"]);
+  });
+
+  it("rejects role overreach and endpoint-invalid constraints before merge", () => {
+    const current = state();
+    expect(() => validateSolutionDelta(current, "r1", "inspect", {
+      evidence: [], candidates: [candidate("x", "X")], constraints: [], select: [], activations: [],
+    })).toThrow(/Inspection may report sourced facts/);
+    expect(() => validateSolutionDelta(current, "r1", "synthesize", {
+      evidence: [], candidates: [candidate("x", "X")], constraints: [{ kind: "requires", subject: "task", target: "x", reason: "invalid hard endpoint" }], select: ["x"], activations: [],
+    })).toThrow(/Invalid requires endpoints/);
+  });
+
+  it("requires observable implementation and criterion-specific verification evidence", () => {
+    const current = state(); current.network.regions[0].acceptanceCriteria = ["target updated"];
+    expect(() => validateImplementationOutput(current, "r1", { status: "completed", summary: "done", changedFiles: [], checks: [], activations: [] })).toThrow(/focused check/);
+    expect(() => validateVerificationOutput(current, "r1", { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "smoke", passed: true, evidence: "unrelated" }], activations: [] })).toThrow(/criterion-specific evidence/);
+    expect(() => validateVerificationOutput(current, "r1", { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target updated", passed: true, evidence: "target updated: yes" }], activations: [] })).not.toThrow();
+  });
+
   it("demotes previously selected candidates when a resolved answer lands", () => {
     const current = state();
     current.network = selectDelta(current.network, "a1", "inspect-then-split");
@@ -738,18 +768,57 @@ describe("solution LOD reducer", () => {
     network.artifacts.push({ id: "x1", regionId: "r2", kind: "file", path: "left.ts", summary: "left", activationId: "a1" }, { id: "x2", regionId: "r3", kind: "file", path: "right.ts", summary: "right", activationId: "a1" });
     const reopened = reopenRegion(network, "r3", "criterion failed");
     expect(reopened.regions.find((region) => region.id === "r2")?.status).toBe("verified");
-    expect(reopened.regions.find((region) => region.id === "r3")?.status).toBe("superposed");
+    expect(reopened.regions.find((region) => region.id === "r3")?.status).toBe("unformed");
     expect(reopened.artifacts.map((artifact) => artifact.path)).toEqual(["left.ts", "right.ts"]);
+  });
+
+  it("schedules the frontier by viable-domain size, deepest first on ties", () => {
+    const network = initialNetwork("task");
+    network.activations[0].status = "completed";
+    network.regions[0].status = "verified";
+    network.regions[0].acceptanceCriteria = ["settled"];
+    network.regions[0].candidateIds = ["r1:root"];
+    network.candidates.push({ id: "r1:root", regionId: "r1", key: "root", proposition: "settled", status: "selected", evidenceIds: [], eliminationReasons: [], stances: [] });
+    network.regions[0].selectedCandidateIds = ["r1:root"];
+    for (const [id, key, viableCount, lod] of [["r2", "wide", 4, 0], ["r3", "narrow", 2, 0], ["r4", "deep-tie", 3, 2], ["r5", "shallow-tie", 3, 1]] as const) {
+      network.regions.push({ ...network.regions[0], id, key, parentId: "r1", edge: "partOf", lod, objective: key, delivery: "change", allowedVariables: [], acceptanceCriteria: [], status: "superposed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] });
+      for (let index = 0; index < viableCount; index += 1) {
+        const candidateId = `${id}:c${index}`;
+        network.candidates.push({ id: candidateId, regionId: id, key: `c${index}`, proposition: `option ${index}`, status: "possible", evidenceIds: [], eliminationReasons: [], stances: [] });
+        network.regions.find((region) => region.id === id)!.candidateIds.push(candidateId);
+      }
+    }
+    // One pass, width 4: narrow first (viable 2), tie broken by depth (r4 before r5), wide last.
+    const scheduled = ensureRunnableWork(network, 4);
+    expect(scheduled.network.activations.filter((item) => item.status === "queued").slice(-4).map((item) => item.regionId)).toEqual(["r3", "r4", "r5", "r2"]);
+  });
+
+  it("projects shared choices with bindings and refuted options into activation payloads", () => {
+    const current = state();
+    current.network.variables.push({ id: "v1", name: "http-client", ownerRegionId: "r1", seedLabels: ["undici", "node-fetch"] });
+    current.network.evidence.push({ id: "e7", text: "repo standardizes on undici", source: "src/http.ts:1", kind: "repository", fingerprint: "f7" }, { id: "e8", text: "unrelated fact", source: "other.ts:1", kind: "repository", fingerprint: "f8" });
+    current.network.constraints.push({ id: "c7", kind: "refutes", subject: "e7", target: "v1:node-fetch", reason: "conflicts with repo standard", sourceActivationId: "a1", sourceKind: "repo-evidence", evidenceRefs: ["e7"] });
+    current.network.regions[0].evidenceIds.push("e7");
+    current.network.activations[0].contextRefs.push("e7");
+    const projection = projectActivationContext(current, current.network.activations[0]) as { sharedChoices: Array<{ name: string; committedTo?: string; ruledOut: string[] }> };
+    expect(projection.sharedChoices).toEqual([{ name: "http-client", declaredAt: "r1", knownOptions: ["undici", "node-fetch"], committedTo: undefined, ruledOut: ["node-fetch"] }]);
   });
 
   it("projects only referenced context and the collapsed ancestry", () => {
     const current = state();
     current.network.evidence.push({ id: "e1", text: "relevant", source: "a.ts", kind: "repository", fingerprint: "1" }, { id: "e2", text: "unrelated", source: "b.ts", kind: "repository", fingerprint: "2" });
     current.network.regions[0].evidenceIds.push("e1");
+    current.network.activations[0].contextRefs.push("e1");
+    for (let index = 0; index < 300; index += 1) {
+      const suffix = String(index);
+      current.network.evidence.push({ id: `noise-e${suffix}`, text: `unrelated fact ${suffix}`, source: `noise/${suffix}.ts:1`, kind: "repository", fingerprint: `ne${suffix}` });
+      current.network.artifacts.push({ id: `noise-x${suffix}`, regionId: "r1", kind: "file", path: `noise/${suffix}.txt`, summary: `unrelated ${suffix}`, activationId: "a1" });
+    }
     const projection = JSON.stringify(projectActivationContext(current, current.network.activations[0]));
     expect(projection).toContain("prior decision");
     expect(projection).toContain("relevant");
     expect(projection).not.toContain("unrelated");
+    expect(projection.length, "projection must stay bounded by references, not by network size").toBeLessThan(JSON.stringify(current.network).length / 3);
     expect(projection).not.toContain("nextActivationId");
   });
 
@@ -845,15 +914,7 @@ describe("solution LOD reducer", () => {
     expect(corrected.regions[0]).toMatchObject({ status: "actionable", selectedCandidateIds: ["r1:coherent"] });
   });
 
-  it("wakes a waiting activation only after its state predicate revision", () => {
-    const network = initialNetwork("change");
-    network.activations.push({ id: "a2", capability: "inspect", regionId: "r1", request: "wait", expectedDelta: "later fact", contextRefs: ["r1"], wakeCondition: { ref: "r1", revisionAfter: 1 }, status: "waiting", basisRevision: 0 });
-    expect(propagateNetwork(network).activations.find((item) => item.id === "a2")?.status).toBe("waiting");
-    network.revision = 2;
-    expect(propagateNetwork(network).activations.find((item) => item.id === "a2")?.status).toBe("queued");
-  });
-
-  it("reopens the implicated region on a failed verification instead of dead-ending", () => {
+  it("gives fail distinct blocked semantics instead of silently reopening a choice", () => {
     const network = initialNetwork("change");
     network.activations[0].status = "completed";
     network.regions[0].status = "implemented";
@@ -865,11 +926,11 @@ describe("solution LOD reducer", () => {
     );
     network.activations.push({ id: "a2", capability: "verify", regionId: "r1", request: "verify", expectedDelta: "verification:r1", contextRefs: ["r1"], status: "running", basisRevision: 0 });
     const verified = completeVerification(network, "a2", { verdict: "fail", summary: "evidence contradicts the design", findings: [], checks: [], activations: [] });
-    expect(verified.regions[0].status).toBe("superposed");
+    expect(verified.regions[0].status).toBe("blocked");
     expect(verified.regions[0].contradiction).toContain("evidence contradicts");
     const scheduled = ensureRunnableWork(verified);
     expect(scheduled.done).toBe(false);
-    expect(scheduled.network.activations.at(-1)).toMatchObject({ capability: "synthesize", status: "queued" });
+    expect(scheduled.blocked).toContain("no runnable activation");
   });
 
   it("treats transitively chained equivalence as one interchangeable set", () => {
@@ -910,7 +971,7 @@ describe("solution LOD reducer", () => {
     expect(selectActivationBatch(network, 2).map((item) => item.id)).toEqual(["a1", "a2"]);
     for (const item of network.activations) item.status = "completed";
     queued("a9", "implement", "r1", 5); queued("a10", "inspect", "r2", 5);
-    expect(selectActivationBatch(network, 4).map((item) => item.id)).toEqual(["a9"]);
+    expect(selectActivationBatch(network, 4).map((item) => item.id)).toEqual(["a10"]);
   });
 
   it("applies batch records in (basisRevision, activationId) order regardless of completion order", () => {
@@ -1012,6 +1073,193 @@ describe("solution LOD reducer", () => {
     current = blockedImplementCycle(current, ["target.txt"]);
     expect(current.regions[0]).toMatchObject({ status: "superposed", reopens: 1 });
   });
+
+  it("declares a shared choice once and resolves candidate stances against it", () => {
+    const current = state();
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], constraints: [], select: [], activations: [],
+      variables: [{ name: "HTTP Client", seedLabels: ["undici"] }],
+      candidates: [{ key: "reuse", proposition: "Reuse undici", outcome: "selected", reasons: [], evidenceRefs: [], stances: [{ variable: "http-client", relation: "requires", valueLabel: "undici" }] }],
+      select: ["reuse"],
+    });
+    expect(merged.variables.map((item) => item.name)).toEqual(["http-client"]);
+    expect(merged.candidates[0].stances).toEqual([{ variableId: merged.variables[0].id, relation: "requires", valueLabel: "undici" }]);
+  });
+
+  it("keeps shared-choice spellings canonical and names unique", () => {
+    const current = state();
+    current.network = mergeSolutionDelta(current, "a1", {
+      region: {}, evidence: [], constraints: [], select: [], activations: [],
+      variables: [{ name: "http-client", seedLabels: ["undici"] }],
+      candidates: [{ key: "a", proposition: "A", outcome: "possible", reasons: [], evidenceRefs: [] }],
+    });
+    expect(() => validateSolutionDelta(current, "r1", {
+      region: {}, evidence: [], candidates: [{ key: "b", proposition: "B", outcome: "possible", reasons: [], evidenceRefs: [], stances: [{ variable: "http-client", relation: "prefers", valueLabel: "Undici" }] }], constraints: [], select: [], activations: [],
+    })).toThrow(/Reuse the established option spelling/);
+    expect(() => validateSolutionDelta(current, "r1", {
+      region: {}, evidence: [], candidates: [{ key: "b", proposition: "B", outcome: "possible", reasons: [], evidenceRefs: [] }], constraints: [], select: [], activations: [],
+      variables: [{ name: "http client" }],
+    })).toThrow(/already exists/);
+  });
+
+  it("round-trips constraint provenance through merge", () => {
+    const current = state();
+    const merged = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], select: [], activations: [],
+      candidates: [
+        { key: "left", proposition: "L", outcome: "possible", reasons: [], evidenceRefs: [] },
+        { key: "right", proposition: "R", outcome: "possible", reasons: [], evidenceRefs: [] },
+      ],
+      constraints: [{ kind: "excludes", subject: "left", target: "right", reason: "cannot coexist", sourceKind: "user-task", evidenceRefs: [] }],
+    });
+    expect(merged.constraints[0]).toMatchObject({ sourceKind: "user-task", kind: "excludes", subject: merged.candidates[0].id });
+    expect(() => validateSolutionDelta(current, "r1", {
+      region: {}, evidence: [], candidates: [{ key: "x", proposition: "X", outcome: "possible", reasons: [], evidenceRefs: [] }], constraints: [
+        { kind: "excludes", subject: "task", target: "x", reason: "invalid direction", sourceKind: "repo-evidence", evidenceRefs: [] },
+      ], select: [], activations: [],
+    })).toThrow(/Invalid excludes endpoints/);
+  });
+
+  it("rejects stances on choices declared outside the region's subtree", () => {
+    const current = state();
+    current.network.regions.push({ ...current.network.regions[0], id: "r2", key: "left", parentId: "r1", edge: "partOf" as const, lod: 1, objective: "left", status: "unformed" as const, candidateIds: [], selectedCandidateIds: [], activationIds: [], artifactIds: [] });
+    current.network.regions.push({ ...current.network.regions[0], id: "r3", key: "right", parentId: "r1", edge: "partOf" as const, lod: 1, objective: "right", status: "unformed" as const, candidateIds: [], selectedCandidateIds: [], activationIds: [], artifactIds: [] });
+    current.network.variables.push({ id: "v9", name: "left-only", ownerRegionId: "r2" });
+    current.network.activations.push({ id: "a9", capability: "synthesize", regionId: "r3", request: "choose", expectedDelta: "s-r3", contextRefs: ["r3"], status: "running", basisRevision: 0 });
+    expect(() => mergeSolutionDelta(current, "a9", {
+      region: {}, evidence: [], constraints: [], select: [], activations: [], variables: [],
+      candidates: [{ key: "move", proposition: "Move", outcome: "possible", reasons: [], evidenceRefs: [], stances: [{ variable: "left-only", relation: "requires", valueLabel: "x" }] }],
+    })).toThrow(/declared at r2 and is not visible here/);
+  });
+
+  it("keeps duplicate primal couplings legal and rejects only true transitive cycles", () => {
+    const current = state();
+    for (const [id, delta] of [["a2", "s-r1-again"], ["a3", "s-r1-third"], ["a4", "s-r1-fourth"]] as const) {
+      current.network.activations.push({ id, capability: "synthesize", regionId: "r1", request: "more", expectedDelta: delta, contextRefs: ["r1"], status: "running", basisRevision: 0 });
+    }
+    current.network = mergeSolutionDelta(current, "a1", {
+      region: {}, evidence: [], constraints: [], select: [], activations: [],
+      variables: [{ name: "http-client" }, { name: "auth-db" }, { name: "cache-layer" }],
+      candidates: [{ key: "first", proposition: "First move", outcome: "possible", reasons: [], evidenceRefs: [], stances: [
+        { variable: "http-client", relation: "requires", valueLabel: "undici" },
+        { variable: "auth-db", relation: "requires", valueLabel: "sqlite" },
+      ] }],
+    });
+    // A second move coupling the SAME variable pair is a parallel edge, not a cycle.
+    expect(() => {
+      current.network = mergeSolutionDelta(current, "a2", {
+        region: {}, evidence: [], constraints: [], select: [], activations: [], variables: [],
+        candidates: [{ key: "parallel", proposition: "Parallel move", outcome: "possible", reasons: [], evidenceRefs: [], stances: [
+          { variable: "http-client", relation: "prefers", valueLabel: "undici" },
+          { variable: "auth-db", relation: "excludes", valueLabel: "postgres" },
+        ] }],
+      });
+    }).not.toThrow();
+    // Extend the chain: auth-db <-> cache-layer.
+    expect(() => {
+      current.network = mergeSolutionDelta(current, "a3", {
+        region: {}, evidence: [], constraints: [], select: [], activations: [], variables: [],
+        candidates: [{ key: "chain", proposition: "Chain move", outcome: "possible", reasons: [], evidenceRefs: [], stances: [
+          { variable: "auth-db", relation: "prefers", valueLabel: "sqlite" },
+          { variable: "cache-layer", relation: "requires", valueLabel: "redis" },
+        ] }],
+      });
+    }).not.toThrow();
+    // Coupling the outer vertices of the chain closes a real cycle.
+    expect(() => mergeSolutionDelta(current, "a4", {
+      region: {}, evidence: [], constraints: [], select: [], activations: [], variables: [],
+      candidates: [{ key: "closer", proposition: "Cycle closer", outcome: "possible", reasons: [], evidenceRefs: [], stances: [
+        { variable: "http-client", relation: "requires", valueLabel: "undici" },
+        { variable: "cache-layer", relation: "prefers", valueLabel: "redis" },
+      ] }],
+    })).toThrow(/close a coupling cycle/);
+  });
+
+  it("prunes requiring moves everywhere once a committed move excludes an option", () => {
+    const current = state();
+    current.network.regions.push({ ...current.network.regions[0], id: "r2", key: "child", parentId: "r1", edge: "refines" as const, lod: 1, objective: "child", status: "unformed" as const, candidateIds: ["r2:move"], selectedCandidateIds: [], activationIds: [], artifactIds: [] });
+    current.network.variables.push({ id: "v1", name: "http-client", ownerRegionId: "r1", seedLabels: [] });
+    current.network.evidence.push({ id: "e5", text: "the platform forbids extra clients", source: "docs/adr/0007.md:1", kind: "repository", fingerprint: "f5" });
+    current.network.candidates.push(
+      { id: "r2:move", regionId: "r2", key: "move", proposition: "Move needing undici", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "undici" }] },
+      { id: "r1:committer", regionId: "r1", key: "committer", proposition: "Commit that rules undici out", status: "selected", declaredStatus: "selected", evidenceIds: [], eliminationReasons: [], stances: [] },
+    );
+    current.network.constraints.push({ id: "c7", kind: "excludes", subject: "r1:committer", target: "v1:undici", reason: "this approach forbids adding any client", sourceActivationId: "a9", sourceKind: "repo-evidence", evidenceRefs: ["e5"] });
+    const propagated = propagateNetwork(current.network);
+    expect(propagated.candidates.find((candidate) => candidate.id === "r2:move")?.status).toBe("eliminated");
+    expect(propagated.candidates.find((candidate) => candidate.id === "r2:move")?.eliminationReasons.join(" ")).toMatch(/rules out shared choice http-client="undici"/);
+  });
+
+  it("keeps coordinate excludes inert while their subject is uncommitted and rejects uncited ones", () => {
+    const build = () => {
+      const fresh = state();
+      fresh.network.regions.push({ ...fresh.network.regions[0], id: "r2", key: "child", parentId: "r1", edge: "refines" as const, lod: 1, objective: "child", status: "unformed" as const, candidateIds: ["r2:move"], selectedCandidateIds: [], activationIds: [], artifactIds: [] });
+      fresh.network.variables.push({ id: "v1", name: "http-client", ownerRegionId: "r1", seedLabels: [] });
+      fresh.network.candidates.push(
+        { id: "r2:move", regionId: "r2", key: "move", proposition: "Move needing undici", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "undici" }] },
+        { id: "r1:idle", regionId: "r1", key: "idle", proposition: "Uncommitted excluder", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [] },
+      );
+      return fresh;
+    };
+    const inactive = build();
+    inactive.network.constraints.push({ id: "cx", kind: "excludes", subject: "r1:idle", target: "v1:undici", reason: "idle grudge", sourceActivationId: "a9", sourceKind: "model-inference", evidenceRefs: ["e9"] });
+    inactive.network.evidence.push({ id: "e9", text: "cited anyway", source: "x:1", kind: "repository", fingerprint: "e9" });
+    // Singleton region force-selects the move; inertness means it is not eliminated.
+    expect(propagateNetwork(inactive.network).candidates.find((candidate) => candidate.id === "r2:move")?.status).not.toBe("eliminated");
+    expect(() => validateSolutionDelta(build(), "r1", {
+      region: {}, evidence: [{ text: "fact", source: "y:1", kind: "repository" }], candidates: [{ key: "idle2", proposition: "Idle", outcome: "possible", reasons: [], evidenceRefs: [] }], constraints: [
+        { kind: "excludes", subject: "idle2", target: "http-client:undici", reason: "uncited exclusion", sourceKind: "model-inference", evidenceRefs: [] },
+      ], select: [], activations: [],
+    })).toThrow(/at least one cited fact/);
+  });
+
+  it("binds a committed choice and prunes conflicting moves elsewhere while prefers survives", () => {
+    const current = state();
+    current.network.regions.push({ ...current.network.regions[0], id: "r2", key: "child", parentId: "r1", edge: "refines" as const, lod: 1, objective: "child", status: "unformed" as const, candidateIds: [], selectedCandidateIds: [], activationIds: [], artifactIds: [] });
+    const network = mergeSolutionDelta(current, "a1", {
+      region: {}, evidence: [], constraints: [], select: [], activations: [],
+      variables: [{ name: "http-client" }],
+      candidates: [{ key: "reuse", proposition: "Reuse undici", outcome: "selected", reasons: [], evidenceRefs: [], stances: [{ variable: "http-client", relation: "requires", valueLabel: "undici" }] }],
+      select: ["reuse"],
+    });
+    network.candidates.push(
+      { id: "r2:excl", regionId: "r2", key: "excl", proposition: "Excluding move", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: network.variables[0].id, relation: "excludes", valueLabel: "undici" }] },
+      { id: "r2:reqother", regionId: "r2", key: "reqother", proposition: "Requires another option", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: network.variables[0].id, relation: "requires", valueLabel: "node-fetch" }] },
+      { id: "r2:flexible", regionId: "r2", key: "flexible", proposition: "Any client works", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: network.variables[0].id, relation: "prefers", valueLabel: "undici" }] },
+    );
+    const propagated = propagateNetwork(network);
+    expect(propagated.candidates.find((candidate) => candidate.id === "r2:excl")?.status).toBe("eliminated");
+    expect(propagated.candidates.find((candidate) => candidate.id === "r2:reqother")?.status).toBe("eliminated");
+    expect(propagated.candidates.find((candidate) => candidate.id === "r2:flexible")?.status).toBe("possible");
+    expect(propagated.candidates.find((candidate) => candidate.key === "reuse")?.status).toBe("selected");
+  });
+
+  it("prunes requiring moves across regions only when a coordinate refutation cites facts", () => {
+    const build = () => {
+      const current = state();
+      current.network.regions.push({ ...current.network.regions[0], id: "r2", key: "child", parentId: "r1", edge: "refines" as const, lod: 1, objective: "child", status: "unformed" as const, candidateIds: ["r2:move"], selectedCandidateIds: [], activationIds: [], artifactIds: [] });
+      current.network.variables.push({ id: "v1", name: "http-client", ownerRegionId: "r1" });
+      current.network.evidence.push({ id: "e9", text: "the repo standardizes on undici everywhere", source: "src/http.ts:1", kind: "repository", fingerprint: "f9" });
+      current.network.candidates.push({ id: "r2:move", regionId: "r2", key: "move", proposition: "Move needing undici", status: "possible", evidenceIds: [], eliminationReasons: [], stances: [{ variableId: "v1", relation: "requires", valueLabel: "undici" }] });
+      return current;
+    };
+    const cited = build();
+    cited.network.constraints.push({ id: "c9", kind: "refutes", subject: "e9", target: "v1:undici", reason: "repo forbids additional clients here", sourceActivationId: "a9", sourceKind: "repo-evidence", evidenceRefs: ["e9"] });
+    const pruned = propagateNetwork(cited.network);
+    expect(pruned.candidates.find((candidate) => candidate.id === "r2:move")?.status).toBe("eliminated");
+    expect(pruned.candidates.find((candidate) => candidate.id === "r2:move")?.eliminationReasons.join(" ")).toMatch(/refuted by cited evidence/);
+
+    const uncited = build();
+    uncited.network.constraints.push({ id: "c10", kind: "refutes", subject: "e9", target: "v1:undici", reason: "a hunch", sourceActivationId: "a9", sourceKind: "model-inference", evidenceRefs: [] });
+    expect(propagateNetwork(uncited.network).candidates.find((candidate) => candidate.id === "r2:move")?.status).not.toBe("eliminated");
+
+    expect(() => validateSolutionDelta(build(), "r1", {
+      region: {}, evidence: [], candidates: [], constraints: [{ kind: "refutes", subject: "task", target: "http-client:undici", reason: "uncited", evidenceRefs: [] }], select: [], activations: [],
+    })).toThrow(/at least one cited fact/);
+    expect(() => validateSolutionDelta(build(), "r1", {
+      region: {}, evidence: [], candidates: [], constraints: [{ kind: "refutes", subject: "task", target: "http-client:undici", reason: "phantom citation", evidenceRefs: ["ghost"] }], select: [], activations: [],
+    })).toThrow(/unknown fact/);
+  });
 });
 
 describe("solution LOD graph", () => {
@@ -1024,13 +1272,13 @@ describe("solution LOD graph", () => {
       calls.push(input.node);
       if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", allowedVariables: ["solution family"], acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: ["e1"] }] } };
       if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: ["e1"] }], constraints: [], select: ["direct"], answer: "stale pre-implementation design", activations: [] } };
-      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [], activations: [] } }; }
-      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] } };
+      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] } }; }
+      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     const result = await configured.graph.invoke(configured.initial({ task: "update", directory, worktree: directory, runId: "run" }), { recursionLimit: 64, configurable: { thread_id: "run", langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => {} } });
     expect(calls).toEqual(["inspect:r1", "synthesize:r1", "implement:r1", "verify:r1"]);
-    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", semantic: { kind: "solution-lod-v1" } });
+    expect(configured.progress?.(result)).toMatchObject({ phase: "completed", semantic: { kind: "solution-lod-v2" } });
     expect(configured.result?.(result)).toContain("Implemented and verified");
     expect(configured.result?.(result)).not.toContain("stale pre-implementation design");
   });
@@ -1071,9 +1319,10 @@ describe("solution LOD graph", () => {
     fs.writeFileSync(path.join(directory, "untouched.txt"), "user dirt");
     const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
     const runtime = { call: async (input: { node: string }) => {
-      if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["files updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "change files", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "agent change"); fs.writeFileSync(path.join(directory, "new.txt"), "new"); return { text: "", structured: { status: "completed", summary: "done", changedFiles: [], checks: [], activations: [] } }; }
-      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["files updated"] }, evidence: [], candidates: [], constraints: [], select: [], activations: [] } };
+      if (input.node === "synthesize:r1") return { text: "", structured: { evidence: [], candidates: [{ key: "direct", proposition: "change files", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
+      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "agent change"); fs.writeFileSync(path.join(directory, "new.txt"), "new"); return { text: "", structured: { status: "completed", summary: "done", changedFiles: [], checks: [{ name: "files updated", passed: true, evidence: "files updated: target.txt and new.txt" }], activations: [] } }; }
+      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "files updated", passed: true, evidence: "files updated: target.txt and new.txt" }], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     let snapshots = 0;
@@ -1090,7 +1339,8 @@ describe("solution LOD graph", () => {
     const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
     let first = true;
     const runtime = { call: async (input: { node: string }) => {
-      if (first && input.node === "inspect:r1") { first = false; return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } }; }
+      if (first && input.node === "inspect:r1") { first = false; return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [], constraints: [], select: [], activations: [] } }; }
+      if (input.node === "synthesize:r1") return { text: "", structured: { evidence: [], candidates: [{ key: "direct", proposition: "update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
       if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "retained"); throw new Error("invalid structured output"); }
       throw new Error("recovery activation also malformed");
     } };
@@ -1111,17 +1361,19 @@ describe("solution LOD graph", () => {
       events.push(`start:${input.node}`); open++; maxOpen = Math.max(maxOpen, open);
       await new Promise((resolve) => setTimeout(resolve, 25));
       open--; events.push(`end:${input.node}`);
-      if (input.node === "inspect:r1") return { text: "", structured: { region: { acceptanceCriteria: ["left answered", "right answered"] }, evidence: [], candidates: [{ key: "split", proposition: "Two independent answers", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["split"], activations: [] } };
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { acceptanceCriteria: ["left answered", "right answered"] }, evidence: [], candidates: [], constraints: [], select: [], activations: [] } };
+      if (input.node === "synthesize:r1") return { text: "", structured: { evidence: [], candidates: [{ key: "split", proposition: "Two independent answers", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["split"], activations: [] } };
       if (input.node === "refine:r1") return { text: "", structured: { evidence: [], activations: [], children: [
         { key: "left", objective: "Answer the left question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["left answered"], coveredCriteria: [0] },
-        { key: "right", objective: "Answer the right question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["right answered"], coveredCriteria: [0] },
+        { key: "right", objective: "Answer the right question", edge: "partOf", delivery: "answer", allowedVariables: [], acceptanceCriteria: ["right answered"], coveredCriteria: [1] },
       ] } };
       if (input.node === "inspect:r2") return { text: "", structured: { region: {}, evidence: [{ text: "left context", source: "left:1", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] } };
       if (input.node === "inspect:r3") return { text: "", structured: { region: {}, evidence: [{ text: "right context", source: "right:1", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] } };
       if (input.node === "synthesize:r2" || input.node === "synthesize:r3") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
       if (input.node === "present:r2") return { text: "", structured: { answer: "left answer" } };
       if (input.node === "present:r3") return { text: "", structured: { answer: "right answer" } };
-      if (input.node === "verify:r2" || input.node === "verify:r3") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
+      if (input.node === "verify:r2") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "left answered", passed: true, evidence: "left answered: left answer" }], activations: [] } };
+      if (input.node === "verify:r3") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "right answered", passed: true, evidence: "right answered: right answer" }], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     const result = await configured.graph.invoke(configured.initial({ task: "answer two questions", directory, worktree: directory, runId: "parallel" }), { recursionLimit: 128, configurable: { thread_id: "parallel", langgraphOpenCodeRuntime: runtime } });
@@ -1144,9 +1396,10 @@ describe("solution LOD graph", () => {
     const order: string[] = [];
     const runtime = { call: async (input: { node: string }) => {
       order.push(`node:${input.node}`);
-      if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] } }; }
-      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [], activations: [] } };
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [], constraints: [], select: [], activations: [] } };
+      if (input.node === "synthesize:r1") return { text: "", structured: { evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
+      if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: [], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] } }; }
+      if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] } };
       throw new Error(`unexpected node ${input.node}`);
     } };
     let snapshots = 0;
@@ -1486,7 +1739,7 @@ describe("OpenCode automatic graph routing", () => {
     try {
       fs.writeFileSync(path.join(project, "file.txt"), "value");
       const verifierWorkspace = await prepareVerifierWorkspace("run", project);
-      writeStoredRun({ checkpointVersion: 5, runId: "run", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "interrupted" });
+      writeStoredRun({ checkpointVersion: 6, runId: "run", rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory: project, worktree: project, status: "interrupted" });
       const hooks = await server({ client: {}, directory: "/repo", worktree: "/repo" } as never);
       await hooks["command.execute.before"]?.({ command: "graph-cancel", sessionID: "root", arguments: "" }, { parts: [] } as never);
       expect(readStoredRun("run").status).toBe("cancelled");
@@ -1521,9 +1774,10 @@ describe("OpenCode automatic graph routing", () => {
         if (requestPath.id === "root") return { data: ["message-1", "message-command"].map((parentID) => ({ info: { role: "assistant", parentID }, parts: [{ type: "text", text: "The answer is 4." }] })) };
         const title = titles.get(requestPath.id) ?? "";
         const structured = title.includes("inspect:r1")
-          ? { region: { delivery: "answer", acceptanceCriteria: ["Answer the question"] }, evidence: [{ text: "2+2 is 4", source: "arithmetic", kind: "inference" }], candidates: [{ key: "answer", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["answer"], activations: [] }
+          ? { region: { delivery: "answer", acceptanceCriteria: ["Answer the question"] }, evidence: [{ text: "2+2 is 4", source: "arithmetic", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] }
+          : title.includes("synthesize:r1") ? { evidence: [], candidates: [{ key: "answer", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: ["e1"] }], constraints: [], select: ["answer"], activations: [] }
           : title.includes("present:r1") ? { answer: "The answer is 4." }
-          : title.includes("verify:r1") ? { verdict: "pass", summary: "Answer matches the facts", findings: [], checks: [], activations: [] } : undefined;
+          : title.includes("verify:r1") ? { verdict: "pass", summary: "Answer matches the facts", findings: [], checks: [{ name: "Answer the question", passed: true, evidence: "Answer the question: 2+2 is 4" }], activations: [] } : undefined;
         return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: "The answer is 4." }] }] };
       },
       abort: async () => ({ data: true }),
@@ -1559,9 +1813,9 @@ describe("OpenCode automatic graph routing", () => {
       expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
       expect(output.message.agent).toBe("langgraph-presenter");
       deadline = Date.now() + 4_000;
-      while ((child < 6 || posted.length < 8) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(child).toBe(6);
-      expect(posted).toHaveLength(8);
+      while ((child < 8 || posted.length < 10) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(child).toBe(8);
+      expect(posted).toHaveLength(10);
       expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter" } });
       expect((posted.at(-1) as { body: Record<string, unknown> }).body.tools).toBeUndefined();
       const events = readPluginEvents("root");
@@ -1613,12 +1867,12 @@ describe("OpenCode automatic graph routing", () => {
           if (title.includes("inspect:r1")) {
             structured = { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] };
           } else if (title.includes("synthesize:r1")) {
-            structured = { region: { acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] };
+            structured = { evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] };
           } else if (title.includes("implement:r1")) {
             fs.writeFileSync(path.join(directory, "target.txt"), "after");
-            structured = { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] };
+            structured = { status: "completed", summary: "updated", changedFiles: [], checks: [{ name: "target updated", passed: true, evidence: "target updated to after" }], activations: [] };
           } else if (title.includes("verify:r1")) {
-            structured = { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] };
+            structured = { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] };
           }
           return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: JSON.stringify(structured ?? {}) }] }] };
         },
@@ -1626,16 +1880,16 @@ describe("OpenCode automatic graph routing", () => {
       } };
       const hooks = await server({ client, directory, worktree: directory } as never);
       const runId = "tool-run";
-      writeStoredRun({ checkpointVersion: 5, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
+      writeStoredRun({ checkpointVersion: 6, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "failed" });
 
       const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new DurableFileSaver(path.join(state, "opencode-langgraph", "checkpoints")) });
       let recovering = false;
       const runtime = { call: async (input: { node: string }) => {
         if (!recovering) throw new Error("insufficient balance");
         if (input.node === "inspect:r1") return { text: "", structured: { region: { delivery: "change", acceptanceCriteria: ["target updated"] }, evidence: [{ text: "target exists", source: "target.txt", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [{ capability: "synthesize", request: "form domain", expectedDelta: "domain:r1", contextRefs: [] }] } };
-        if (input.node === "synthesize:r1") return { text: "", structured: { region: {}, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
-          if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [], activations: [] } }; }
-        if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] } };
+        if (input.node === "synthesize:r1") return { text: "", structured: { evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] } };
+          if (input.node === "implement:r1") { fs.writeFileSync(path.join(directory, "target.txt"), "after"); return { text: "", structured: { status: "completed", summary: "updated", changedFiles: ["target.txt"], checks: [{ name: "target updated", passed: true, evidence: "target updated to after" }], activations: [] } }; }
+        if (input.node === "verify:r1") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target updated", passed: true, evidence: "target updated: after" }], activations: [] } };
         throw new Error(`unexpected node ${input.node}`);
       } };
       const failed = await configured.graph.invoke(configured.initial({ task: "task", directory, worktree: directory, runId }), { recursionLimit: 64, configurable: { thread_id: runId, langgraphOpenCodeRuntime: runtime, langgraphAcquireWorktree: async () => {} } });
@@ -1657,7 +1911,7 @@ describe("OpenCode automatic graph routing", () => {
 
       const resumeOutput = await (hooks.tool?.langgraph_resume.execute as (args: { runId?: string; answer?: string }, ctx: never) => Promise<string>)({}, toolContext);
       const resumed = JSON.parse(resumeOutput);
-      expect(resumed.failed).toBe(false);
+      expect(resumed.failed, JSON.stringify(resumed)).toBe(false);
       expect(resumed.interrupted).toBe(false);
       expect(readStoredRun(runId).status).toBe("completed");
       expect(fs.readFileSync(path.join(directory, "target.txt"), "utf8")).toBe("after");
@@ -1697,9 +1951,9 @@ describe("OpenCode automatic graph routing", () => {
             structured = { region: { acceptanceCriteria: ["target updated"] }, evidence: [], candidates: [{ key: "direct", proposition: "Update target", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["direct"], activations: [] };
           } else if (title.includes("implement:r1")) {
             fs.writeFileSync(path.join(directory, "target.txt"), "after");
-            structured = { status: "completed", summary: "updated", changedFiles: [], checks: [], activations: [] };
+            structured = { status: "completed", summary: "updated", changedFiles: [], checks: [{ name: "target updated", passed: true, evidence: "target.txt contains after" }], activations: [] };
           } else if (title.includes("verify:r1")) {
-            structured = { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target", passed: true, evidence: "after" }], activations: [] };
+            structured = { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "target updated", passed: true, evidence: "target.txt contains after" }], activations: [] };
           }
           return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: JSON.stringify(structured ?? {}) }] }] };
         },
@@ -1707,7 +1961,7 @@ describe("OpenCode automatic graph routing", () => {
       } };
       const hooks = await server({ client, directory, worktree: directory } as never);
       const runId = "values-run";
-      writeStoredRun({ checkpointVersion: 5, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "paused" });
+      writeStoredRun({ checkpointVersion: 6, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "paused" });
 
       const checkpointer = new DurableFileSaver(path.join(state, "opencode-langgraph", "checkpoints"));
       const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer });
@@ -1743,7 +1997,7 @@ describe("OpenCode automatic graph routing", () => {
     try {
       const hooks = await server({ client: { session: { get: async () => ({ data: { id: "root", parentID: undefined } }) } }, directory, worktree: directory } as never);
       const runId = "fresh-run";
-      writeStoredRun({ checkpointVersion: 5, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
+      writeStoredRun({ checkpointVersion: 6, runId, rootSessionId: "root", userMessageId: "message", graph: "solution-lod", task: "task", directory, worktree: directory, status: "queued" });
       const toolContext = { sessionID: "root", directory, worktree: directory, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
 
       const inspectOutput = await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string }, ctx: never) => Promise<string>)({}, toolContext);
@@ -1884,7 +2138,7 @@ describe("OpenCode graph viewer", () => {
 
   it("renders semantic solution progress as a mixed-LOD hierarchy", () => {
     const base = { at: "now", runId: "run", rootSessionId: "root", graph: "solution-lod", node: "activate", status: "active", agent: "inspector", model: "inherit" };
-    const semantic = { kind: "solution-lod-v1" as const, revision: 2, candidates: [], constraints: [], evidence: [], activations: [], artifacts: [], regions: [
+    const semantic = { kind: "solution-lod-v2" as const, revision: 2, candidates: [], constraints: [], evidence: [], activations: [], artifacts: [], regions: [
       { id: "r1", key: "root", edge: "root" as const, lod: 0, objective: "Requested behavior", status: "collapsed", viable: 1, total: 2, selectedCandidateIds: ["r1:adapter"], candidateIds: ["r1:adapter", "r1:rewrite"], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] },
       { id: "r2", key: "handoff", parentId: "r1", edge: "refines" as const, lod: 1, objective: "Session handoff", status: "superposed", viable: 2, total: 3, selectedCandidateIds: [], candidateIds: [], constraintIds: [], evidenceIds: ["e1", "e2"], activationIds: [], artifactIds: [] },
     ] };
@@ -2073,7 +2327,7 @@ describe("OpenCode graph viewer", () => {
     const event = {
       runId: "run", rootSessionId: "root", graph: "solution-lod", node: "implement:r2", status: "failed", agent: "langgraph-implement", model: "inherit",
       text: "Implement the selected behavior",
-      progress: { phase: "implement:r2", callsUsed: 3, activeNodeId: "r2", semantic: { kind: "solution-lod-v1" as const, revision: 1, candidates: [], constraints: [], evidence: [], activations: [{ id: "a14", capability: "implement", regionId: "r2", request: "", expectedDelta: "implement:r2:18", senderActivationId: undefined, status: "failed", error: "budget" }], artifacts: [], regions: [{ id: "r2", key: "r2", edge: "refines" as const, lod: 1, objective: "Settle emptiness", status: "actionable", viable: 1, total: 2, selectedCandidateIds: [], candidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] }] }, nodes: [] },
+      progress: { phase: "implement:r2", callsUsed: 3, activeNodeId: "r2", semantic: { kind: "solution-lod-v2" as const, revision: 1, candidates: [], constraints: [], evidence: [], activations: [{ id: "a14", capability: "implement", regionId: "r2", request: "", expectedDelta: "implement:r2:18", senderActivationId: undefined, status: "failed", error: "budget" }], artifacts: [], regions: [{ id: "r2", key: "r2", edge: "refines" as const, lod: 1, objective: "Settle emptiness", status: "actionable", viable: 1, total: 2, selectedCandidateIds: [], candidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] }] }, nodes: [] },
       state: { phase: "blocked", callsUsed: 3, network: { regions: [{ id: "r2", status: "actionable" }], candidates: [], activations: [{ id: "a14", capability: "implement", regionId: "r2", status: "failed", error: "budget" }] } },
       usage: { turns: 12, input: 1000, output: 200, reasoning: 0, cacheRead: 500, cacheWrite: 0, cost: 0.01 },
     } as never;

@@ -38,7 +38,10 @@ const runtime = new OpenCodeAgentRuntime({
   plugin: { client, project: {} as never, directory: worktree, worktree, serverUrl: new URL(server.url), $: {} as never },
   definition,
   parentSessionId: rootSessionId,
-  parentModel: { providerID: "deepseek", modelID: "deepseek-v4-pro" },
+  parentModel: (() => {
+    const [providerID, modelID] = (process.env.REAL_TASK_MODEL ?? "deepseek/deepseek-v4-pro").split("/");
+    return { providerID, modelID };
+  })(),
   directory: worktree,
   worktree,
   signal: new AbortController().signal,
