@@ -22,11 +22,17 @@ const EMPTY_STATE = {
   stateVersion: 7, runId: "oracle", originalTask: "t", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", activeBatch: [], results: [], usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, result: "",
 } as const;
 
-/** Semantic derived-state comparison: who is eliminated/selected, region statuses. Excludes diagnostic witness text and revision counter. */
+/** Canonical derived state: input-array order is irrelevant, every consequential field is not. */
 function semanticSnapshot(value: SolutionNetwork): string {
   return JSON.stringify({
-    candidates: value.candidates.map(({ id, status }) => ({ id, status })).sort((a, b) => (a.id < b.id ? -1 : 1)),
-    regions: value.regions.map(({ id, status, selectedCandidateIds }) => ({ id, status, s: [...selectedCandidateIds].sort() })).sort((a, b) => (a.id < b.id ? -1 : 1)),
+    revision: value.revision,
+    variables: value.variables.map((v) => ({ ...v, seedLabels: [...(v.seedLabels ?? [])].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
+    candidates: value.candidates.map((c) => ({ ...c, evidenceIds: [...c.evidenceIds].sort(), declaredEvidenceIds: [...(c.declaredEvidenceIds ?? [])].sort(), eliminationReasons: [...c.eliminationReasons].sort(), declaredEliminationReasons: [...(c.declaredEliminationReasons ?? [])].sort(), stances: [...(c.stances ?? [])].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) })).sort((a, b) => a.id.localeCompare(b.id)),
+    regions: value.regions.map((r) => ({ ...r, allowedVariables: [...r.allowedVariables].sort(), acceptanceCriteria: [...r.acceptanceCriteria].sort(), candidateIds: [...r.candidateIds].sort(), selectedCandidateIds: [...r.selectedCandidateIds].sort(), constraintIds: [...r.constraintIds].sort(), evidenceIds: [...r.evidenceIds].sort(), activationIds: [...r.activationIds].sort(), artifactIds: [...r.artifactIds].sort(), coveredCriteria: [...(r.coveredCriteria ?? [])].sort((a, b) => a - b) })).sort((a, b) => a.id.localeCompare(b.id)),
+    constraints: [...value.constraints].sort((a, b) => a.id.localeCompare(b.id)),
+    evidence: [...value.evidence].sort((a, b) => a.id.localeCompare(b.id)),
+    activations: value.activations.map((a) => ({ ...a, contextRefs: [...a.contextRefs].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
+    artifacts: [...value.artifacts].sort((a, b) => a.id.localeCompare(b.id)),
   });
 }
 
@@ -70,13 +76,13 @@ function buildDirect(seed: number): FastInstance {
   const random = rng(seed);
   const net = initialNetwork("t");
   net.activations[0].status = "completed";
-  const varCount = Math.floor(random() * 4);
+  const varCount = Math.floor(random() * 3);
   for (let i = 0; i < varCount; i++) net.variables.push({ id: `v${i + 1}`, name: `choice-${i}`, ownerRegionId: "r1", seedLabels: [] });
-  const childCount = 2 + Math.floor(random() * 3);
+  const childCount = 2 + Math.floor(random() * 2);
   const committedPicks: Array<{ regionId: string; id: string }> = [];
   for (let ci = 0; ci < childCount; ci++) {
     const rid = `r${ci + 2}`;
-    const ds = 1 + Math.floor(random() * 4);
+    const ds = 2 + Math.floor(random() * 2);
     net.regions.push({ id: rid, key: `c${ci}`, parentId: "r1", edge: "partOf", lod: 1, objective: rid, delivery: random() < 0.25 ? "answer" : "change", allowedVariables: [], acceptanceCriteria: [], status: "superposed", candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [] });
     for (let ki = 0; ki < ds; ki++) {
       const cid = `${rid}:c${ki}`;
@@ -97,7 +103,7 @@ function buildDirect(seed: number): FastInstance {
     const sibs = net.candidates.filter((c) => c.regionId === rid);
     if (sibs.length >= 2 && random() < 0.4) {
       const l = pick(random, sibs)!; let r = pick(random, sibs)!; while (r.id === l.id) r = pick(random, sibs)!;
-      net.constraints.push({ id: `pw${ci}`, kind: pick(random, ["requires", "excludes", "equivalent"] as const)!, subject: l.id, target: r.id, reason: "pairwise relation", sourceActivationId: "a9", sourceKind: "model-inference", evidenceRefs: [] });
+      net.constraints.push({ id: `pw${ci}`, kind: pick(random, ["requires", "excludes", "equivalent"] as const)!, subject: l.id, target: r.id, reason: "pairwise relation", sourceActivationId: "a9", sourceKind: pick(random, ["user-task", "repo-evidence", "model-inference"] as const)!, evidenceRefs: [] });
     }
     if (varCount > 0 && random() < 0.3) {
       const sub = pick(random, sibs)!;
@@ -134,7 +140,6 @@ interface EnumerationResult {
 }
 
 function enumerateJoint(network: SolutionNetwork, committedPicks: Array<{ regionId: string; id: string }>): EnumerationResult {
-  const activeCommitIds = new Set(committedPicks.map((entry) => entry.id));
   const liveRegions = network.regions.filter((r) => r.candidateIds.length > 0);
   const domains = liveRegions.map((r) => [...r.candidateIds]);
   const stanceMap = stanceOf(network);
@@ -162,41 +167,6 @@ function enumerateJoint(network: SolutionNetwork, committedPicks: Array<{ region
 
   const commitByRegion = new Map(committedPicks.map((e) => [e.regionId, e.id] as const));
 
-  // Forced sources: regions fact-collapsed onto exactly one survivor.
-  const forcedSourceIds = new Set<string>();
-  const forbiddenPairs = new Map<string, string>();
-  {
-    const survivors = new Map<string, Set<string>>();
-    for (const r of liveRegions) survivors.set(r.id, new Set(r.candidateIds.filter((id) => !evidenceKills.has(id))));
-    let moved = true;
-    for (let round = 0; round < 4 && moved; round += 1) {
-      moved = false;
-      for (const [, alive] of survivors) {
-        for (const id of [...alive]) {
-          if (!satisfied(id, {} as Record<string, string>)) { alive.delete(id); moved = true; continue; }
-          for (const [, fpLabel] of forbiddenPairs) {
-            const [fvid, flabel] = fpLabel.split("\u0000");
-            for (const st of stanceMap.get(id) ?? []) if (st.relation === "requires" && st.variableId === fvid && st.valueLabel.toLowerCase() === flabel) { alive.delete(id); moved = true; break; }
-            if (!alive.has(id)) break;
-          }
-        }
-      }
-      for (const [, alive] of survivors) {
-        if (alive.size !== 1) continue;
-        const only = [...alive][0]!;
-        if (forcedSourceIds.has(only)) continue;
-        forcedSourceIds.add(only);
-        for (const constraint of network.constraints) {
-          if (constraint.kind !== "excludes" || constraint.subject !== only) continue;
-          const colon = constraint.target.indexOf(":");
-          if (!(colon > 0 && variableIds.has(constraint.target.slice(0, colon)))) continue;
-          const key = `${constraint.target.slice(0, colon)}\u0000${constraint.target.slice(colon + 1).trim().toLowerCase()}`;
-          if (!forbiddenPairs.has(key)) { forbiddenPairs.set(key, only); moved = true; }
-        }
-      }
-    }
-  }
-
   const usedCandidates = new Set<string>();
   const usedCoordinates = new Map<string, Set<string>>();
   let anyValid = false;
@@ -217,9 +187,9 @@ function enumerateJoint(network: SolutionNetwork, committedPicks: Array<{ region
         const commitId = commitByRegion.get(liveRegions[slot].id);
         if (!commitId) continue;
         const structurallyBad = network.constraints.some((c) => c.kind === "requires" && c.subject === commitId && c.target !== commitId && c.target.startsWith(`${liveRegions[slot].id}:`));
-        const factDead = evidenceKills.has(commitId) || !satisfied(commitId, labels);
+        const factDead = evidenceKills.has(commitId) || (stanceMap.get(commitId) ?? []).some((stance) => stance.relation === "requires" && refutedCoordinates.has(`${stance.variableId}\u0000${stance.valueLabel.toLowerCase()}`));
         if (factDead || structurallyBad) { if (picks[slot] === commitId) ok = false; continue; }
-        if (picks[slot] !== commitId) ok = false;
+        if (picks[slot] !== commitId || !satisfied(commitId, labels)) ok = false;
       }
       if (!ok) continue;
 
@@ -261,7 +231,9 @@ function enumerateJoint(network: SolutionNetwork, committedPicks: Array<{ region
         if (!(colon > 0 && variableIds.has(constraint.target.slice(0, colon)))) continue;
         const head = constraint.target.slice(0, colon);
         const label = constraint.target.slice(colon + 1).trim().toLowerCase();
-        const isSource = (activeCommitIds.has(constraint.subject) || forcedSourceIds.has(constraint.subject)) && chosen.has(constraint.subject);
+        // Declarative meaning: the rule applies exactly in worlds where its subject is chosen.
+        // No propagation/singleton algorithm is reproduced here.
+        const isSource = chosen.has(constraint.subject);
         if (!isSource) continue;
         if (labels[head] === label) { ok = false; break; }
         for (const otherId of chosen) {
@@ -312,32 +284,37 @@ type CandidateStane<T = string> = { variableId: T; relation: string; valueLabel:
 // ─── Tier 1: fast soundness oracle (500+ seeds, direct construction) ────────
 
 describe("soundness oracle — fast tier (declarative joint enumeration)", () => {
-  const SEEDS = Number(process.env.NEOLIT_ORACLE_SEEDS ?? 100);
+  const SEEDS = Number(process.env.NEOLIT_ORACLE_SEEDS ?? 500);
   it(`never eliminates a candidate or coordinate some valid assignment uses (${SEEDS} seeds)`, () => {
     let eliminationsSeen = 0, skipped = 0;
+    const constraintKinds = new Set<string>(); const provenanceKinds = new Set<string>();
     for (let seed = 1; seed <= SEEDS; seed++) {
       let network: SolutionNetwork | null = null; let committedPicks: Array<{ regionId: string; id: string }> = [];
       for (let attempt = 0; attempt < 4; attempt++) { try { const inst = buildDirect(seed * 11 + attempt); if (inst) { network = inst.network; committedPicks = inst.committedPicks; break; } } catch { /* coupling cycle — retry */ } }
       if (!network) continue;
+      for (const constraint of network.constraints) { constraintKinds.add(constraint.kind); provenanceKinds.add(constraint.sourceKind); }
       const propagated = propagateNetwork(structuredClone(network));
-      const { anyValid, usedCandidates, usedCoordinates } = enumerateJoint(propagated, committedPicks);
+      const { anyValid, usedCandidates, usedCoordinates } = enumerateJoint(network, committedPicks);
       if (!anyValid) continue; // cross-region inconsistency is a documented incompleteness
       for (const candidate of propagated.candidates) {
         if (candidate.status !== "eliminated") continue;
-        // Sibling-collapse eliminations are commitment-driven, not fact-driven — they're
-        // outside the pure-CSP soundness guarantee. Only fact-based kills are asserted.
-        const isFactBased = candidate.eliminationReasons.some((r) => r.startsWith("shared choice ") && r.includes("refuted by cited evidence"));
-        if (!isFactBased) continue;
         eliminationsSeen++;
         const ctx = `seed=${seed} cand=${candidate.id} reasons=${JSON.stringify(candidate.eliminationReasons)}`;
         expect(candidate.eliminationReasons.length, `witness required: ${ctx}`).toBeGreaterThan(0);
         expect(candidate.eliminationReasons.every((r) => r.trim().length > 3), `witness substance: ${ctx}`).toBe(true);
+        if (usedCandidates.has(candidate.id)) fs.writeFileSync("/tmp/opencode/unsound-case.json", JSON.stringify({ seed, input: network, out: propagated, committedPicks }, null, 2));
         expect(usedCandidates.has(candidate.id), `unsound elimination: ${ctx}`).toBe(false);
       }
-      // Coordinate tracking is reported for analysis; coordinate-availability is a completeness
-      // claim the soundness-only contract explicitly does not make.
+      for (const [variableId, labels] of usedCoordinates) for (const label of labels) {
+        expect(propagated.candidates.some((candidate) => candidate.status !== "eliminated" && candidate.stances?.some((stance) => stance.relation === "requires" && stance.variableId === variableId && stance.valueLabel.toLowerCase() === label)), `used coordinate ${variableId}=${label} lost every viable witness`).toBe(true);
+      }
+      const twice = propagateNetwork(structuredClone(propagated));
+      expect(fullSnapshot(twice), `seed=${seed} full idempotence`).toBe(fullSnapshot(propagated));
+      expect(twice.revision, `seed=${seed} revision idempotence`).toBe(propagated.revision);
     }
     expect(eliminationsSeen, "expected meaningful coverage").toBeGreaterThan(SEEDS / 10);
+    expect([...constraintKinds].sort()).toEqual(["equivalent", "excludes", "refutes", "requires", "supports"]);
+    expect([...provenanceKinds].sort()).toEqual(["model-inference", "repo-evidence", "user-task"]);
   });
 
   it("is order-independent across every insertion dimension", () => {
@@ -370,14 +347,10 @@ describe("merge-boundary suite", () => {
       const instance = generateThroughMerge(seed);
       if (!instance) { skipped++; continue; }
       const propagated = propagateNetwork(instance.network);
-      const { anyValid, usedCandidates } = enumerateJoint(propagated, instance.committedPicks);
+      const { anyValid, usedCandidates } = enumerateJoint(instance.network, instance.committedPicks);
       if (!anyValid) continue;
       for (const candidate of propagated.candidates) {
         if (candidate.status !== "eliminated") continue;
-        const isFactBased = candidate.eliminationReasons.some((r) => r.startsWith("shared choice ") && r.includes("refuted by cited evidence"));
-        if (!isFactBased) continue;
-        const isDerived = candidate.eliminationReasons.some((r) => r.includes("a different non-equivalent approach") || r.includes("bound it to") || r.includes("required alternative") || r.includes("which was bound to that option"));
-        if (isDerived) continue;
         expect(usedCandidates.has(candidate.id), `seed=${seed} unsound: ${candidate.id}`).toBe(false);
       }
     }
@@ -448,7 +421,8 @@ describe("merge-boundary suite", () => {
       }
     }
     assertAcyclicPrimalGraph(net);
-    return { network: net, committedPicks };
+    const authored = net.candidates.filter((candidate) => candidate.declaredStatus === "selected").map((candidate) => ({ regionId: candidate.regionId, id: candidate.id }));
+    return { network: net, committedPicks: [...new Map([...committedPicks, ...authored].map((entry) => [entry.regionId, entry])).values()] };
   }
 });
 

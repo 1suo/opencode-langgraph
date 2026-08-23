@@ -64,6 +64,9 @@ export interface SolutionEvidence {
   text: string;
   source: string;
   kind: "repository" | "tool" | "inference" | "user";
+  /** Inference starts as a hypothesis; only confirmed evidence may justify pruning. */
+  status?: "hypothesis" | "confirmed" | "rejected";
+  validationKind?: "repository-evidence" | "tool-evidence" | "user-confirmation";
   fingerprint: string;
 }
 
@@ -148,6 +151,9 @@ export interface ActivationTaskResult {
   error?: string;
   changedFiles?: string[];
   networkDelta: ActivationNetworkDelta | null;
+  /** Cheap prompt/repair telemetry recorded without another model call. */
+  promptChars?: number;
+  validationFailures?: string[];
 }
 
 /** The unified snapshot a `Send` carries into one parallel `activate` task. */
@@ -218,7 +224,11 @@ export const SolutionDeltaSchema = z.object({
     allowedVariables: z.array(z.string()).optional().describe("The only aspects that may be chosen here."),
     acceptanceCriteria: z.array(z.string()).optional().describe("Observable conditions that prove the goal is complete."),
   }).optional().describe("Use only to clarify the current goal or its success criteria."),
-  evidence: z.array(z.object({ text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference") })).default([]).describe("Facts used in this result. State each fact plainly and identify where it came from."),
+  evidence: z.array(z.object({
+    text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference"),
+    status: z.enum(["hypothesis", "confirmed", "rejected"]).optional().describe("Inference is unconfirmed unless explicitly validated; repository, tool, and user evidence are confirmed by default."),
+    validationKind: z.enum(["repository-evidence", "tool-evidence", "user-confirmation"]).optional(),
+  })).default([]).describe("Claims used in this result. State each plainly, identify its source, and leave inference as a hypothesis until validated."),
   variables: z.array(z.object({
     name: z.string().min(1).describe("A short stable name for a new shared choice that several moves depend on, e.g. 'http-client'. Declare it only when moves genuinely differ on it; reuse the established name instead of inventing a variant."),
     seedLabels: z.array(z.string()).default([]).describe("Options already known for this choice, stated exactly. Informational; new options may still appear later."),

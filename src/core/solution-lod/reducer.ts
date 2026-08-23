@@ -187,6 +187,7 @@ export function assertAcyclicPrimalGraph(network: SolutionNetwork): void {
 
 export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
   const network = cloneNetwork(input);
+  const confirmedEvidence = (id: string) => network.evidence.some((item) => item.id === id && (item.status ?? (item.kind === "inference" ? "hypothesis" : "confirmed")) === "confirmed");
   const derivedSnapshot = (value: SolutionNetwork) => JSON.stringify({
     candidates: value.candidates.map(({ id, status, evidenceIds, eliminationReasons }) => ({ id, status, evidenceIds, eliminationReasons })),
     regions: value.regions.map(({ id, status, selectedCandidateIds, contradiction }) => ({ id, status, selectedCandidateIds, contradiction })),
@@ -239,7 +240,7 @@ export function propagateNetwork(input: SolutionNetwork): SolutionNetwork {
         const selectsBefore = pendingSelects.size;
         for (const constraint of network.constraints) {
           if (kinds === "facts") {
-            if (constraint.kind === "refutes" && snapActive(constraint.subject) && snapKnown(constraint.target)) queueEliminate(constraint.target, constraint.reason || constraint.kind);
+            if (constraint.kind === "refutes" && snapActive(constraint.subject) && (!network.evidence.some((item) => item.id === constraint.subject) || confirmedEvidence(constraint.subject)) && snapKnown(constraint.target)) queueEliminate(constraint.target, constraint.reason || constraint.kind);
             continue;
           }
           if (constraint.kind === "supports") {
@@ -283,7 +284,7 @@ const factStage = runConstraintSweeps(statusAtPassStart, "facts");
       if (constraint.kind !== "refutes") continue;
       const coordinate = coordinateOf(network, constraint.target);
       if (!coordinate || !constraint.evidenceRefs?.length) continue;
-      if (!constraint.evidenceRefs.every((ref) => network.evidence.some((item) => item.id === ref))) continue;
+      if (!constraint.evidenceRefs.every(confirmedEvidence)) continue;
       const subjectCandidate = network.candidates.find((item) => item.id === constraint.subject);
       if (subjectCandidate && subjectCandidate.status !== "selected") continue;
       refuted.add(`${coordinate.variableId}\u0000${slug(coordinate.valueLabel)}`);
@@ -471,7 +472,9 @@ function mergeEvidence(network: SolutionNetwork, region: SolutionRegion, items: 
   for (const item of items) {
     const fingerprint = createHash("sha256").update(`${normalize(item.text)}\0${normalize(item.source)}`).digest("hex").slice(0, 16);
     let evidence = network.evidence.find((existing) => existing.fingerprint === fingerprint);
-    if (!evidence) { evidence = { ...item, text: normalize(item.text), source: normalize(item.source), id: `e${network.nextEvidenceId++}`, fingerprint }; network.evidence.push(evidence); } else { evidence = { ...evidence }; }
+    const status = item.status ?? (item.kind === "inference" ? "hypothesis" : "confirmed");
+    if (!evidence) { evidence = { ...item, status, text: normalize(item.text), source: normalize(item.source), id: `e${network.nextEvidenceId++}`, fingerprint }; network.evidence.push(evidence); }
+    else if (item.status && !(evidence.status === "rejected" && item.status === "hypothesis")) { evidence.status = item.status; evidence.validationKind = item.validationKind; }
     region.evidenceIds = [...new Set([...region.evidenceIds, evidence.id])]; localEvidence.set(item.source, evidence.id);
   }
   return localEvidence;
@@ -531,6 +534,12 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
   for (const item of delta.candidates) statuses.set(candidateId(regionId, item.key), item.outcome);
   const candidateRefs = new Set(statuses.keys());
   const evidenceRefs = new Set([...state.network.evidence.map((item) => item.id), ...delta.evidence.map((item) => item.source)]);
+  const confirmedRef = (ref: string) => {
+    const existing = state.network.evidence.find((item) => item.id === ref);
+    if (existing) return (existing.status ?? (existing.kind === "inference" ? "hypothesis" : "confirmed")) === "confirmed";
+    const supplied = delta.evidence.find((item) => item.source === ref);
+    return Boolean(supplied && (supplied.status ?? (supplied.kind === "inference" ? "hypothesis" : "confirmed")) === "confirmed");
+  };
   const endpoint = (ref: string) => {
     const canonical = candidateRef(state.network, regionId, ref);
     if (candidateRefs.has(canonical)) return "candidate";
@@ -552,11 +561,26 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
         `Allowed shapes: supports = factId -> candidateKey. refutes = factId|task|candidateKey -> candidateKey (or -> choiceName:option when citing why an option dies). requires/excludes/equivalent = candidateKey -> candidateKey within this goal. ` +
         `To say one approach strengthens another, attach its facts as supporting evidenceRefs on the candidate instead.`,
       );
+    for (const ref of constraint.evidenceRefs ?? []) {
+      if (!evidenceRefs.has(ref)) throw new Error(`Constraint cites unknown fact "${ref}" — cite an established fact id or supply the fact with this result.`);
+      if (!confirmedRef(ref)) throw new Error(`Constraint cites unresolved claim "${ref}" — validate it before using it as a constraint.`);
+    }
+    if (constraint.kind === "refutes" && subject === "evidence" && !confirmedRef(constraint.subject))
+      throw new Error(`Refutation source "${constraint.subject}" is unresolved — validate it before using it to eliminate an alternative.`);
     if (target === "coordinate") {
       if (!(constraint.evidenceRefs ?? []).length)
         throw new Error(`Refuting shared choice "${constraint.target}" requires at least one cited fact in evidenceRefs — an uncited kill of a shared option is a guess, not a constraint.`);
-      for (const ref of constraint.evidenceRefs ?? [])
-        if (!evidenceRefs.has(ref)) throw new Error(`Constraint cites unknown fact "${ref}" — cite an established fact id or supply the fact with this result.`);
+    }
+  }
+  if (capability === "synthesize") {
+    for (const item of delta.candidates) {
+      if (item.outcome === "selected" && !delta.select.some((key) => candidateId(regionId, key) === candidateId(regionId, item.key)))
+        throw new Error(`Alternative "${item.key}" says selected but is absent from select. Propose the choice once through select so the kernel owns the disposition.`);
+      if (item.outcome === "eliminated") {
+        const id = candidateId(regionId, item.key);
+        const proof = delta.constraints.some((constraint) => constraint.kind === "refutes" && candidateId(regionId, constraint.target) === id && (constraint.sourceKind === "user-task" || constraint.evidenceRefs.some(confirmedRef)));
+        if (!proof) throw new Error(`Alternative "${item.key}" cannot be directly eliminated. Return it as possible and provide a user-authoritative or confirmed-evidence refutes constraint; the kernel will derive elimination.`);
+      }
     }
   }
   // Mirror mergeSolutionDelta: a select only lands on a candidate that exists after the outcomes are applied.
@@ -613,12 +637,13 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     let candidate = network.candidates.find((existing) => existing.id === id);
     const evidenceIds = item.evidenceRefs.map((ref) => localEvidence.get(ref) ?? ref).filter((ref) => network.evidence.some((evidence) => evidence.id === ref));
     const stances = resolveStances(network, region.id, item.stances ?? []);
+    const authoredStatus = item.outcome === "eliminated" ? "possible" : item.outcome;
     if (!candidate) {
-      candidate = { id, regionId: region.id, key: item.key, proposition: normalize(item.proposition), status: item.outcome, declaredStatus: item.outcome, evidenceIds, declaredEvidenceIds: evidenceIds, eliminationReasons: [...item.reasons], declaredEliminationReasons: [...item.reasons], stances };
+      candidate = { id, regionId: region.id, key: item.key, proposition: normalize(item.proposition), status: authoredStatus, declaredStatus: authoredStatus, evidenceIds, declaredEvidenceIds: evidenceIds, eliminationReasons: [], declaredEliminationReasons: [], stances };
       network.candidates.push(candidate); region.candidateIds.push(id); changed = true;
     } else {
       const serialized = JSON.stringify(candidate);
-      candidate.proposition = normalize(item.proposition); candidate.status = item.outcome; candidate.declaredStatus = item.outcome; candidate.evidenceIds = [...new Set([...candidate.evidenceIds, ...evidenceIds])]; candidate.declaredEvidenceIds = [...candidate.evidenceIds]; candidate.eliminationReasons = [...new Set([...candidate.eliminationReasons, ...item.reasons])]; candidate.declaredEliminationReasons = [...candidate.eliminationReasons]; candidate.stances = stances;
+      candidate.proposition = normalize(item.proposition); candidate.status = authoredStatus; candidate.declaredStatus = authoredStatus; candidate.evidenceIds = [...new Set([...candidate.evidenceIds, ...evidenceIds])]; candidate.declaredEvidenceIds = [...candidate.evidenceIds]; candidate.eliminationReasons = []; candidate.declaredEliminationReasons = []; candidate.stances = stances;
       if (JSON.stringify(candidate) !== serialized) changed = true;
     }
   }

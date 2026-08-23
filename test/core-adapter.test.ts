@@ -14,7 +14,7 @@ import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRol
 import { validateConnector } from "../src/core/validate.js";
 import type { AgentUsage, ConnectorDefinition } from "../src/core/types.js";
 import { applyBatchRecords, completeImplementation, completeVerification, ensureRunnableWork, initialNetwork, mergeRefinementOutput, mergeSolutionDelta, nextQueuedActivation, propagateNetwork, reopenRegion, selectActivationBatch, validateImplementationOutput, validateRefinementOutput, validateSolutionDelta, validateVerificationOutput } from "../src/core/solution-lod/reducer.js";
-import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
+import { compileActivationPrompt, projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
 import type { ActivationTaskResult, ImplementationOutput, RefinementOutput, SolutionLodState } from "../src/core/solution-lod/types.js";
 import { DurableFileSaver } from "../src/core/durable-checkpointer.js";
@@ -586,14 +586,16 @@ describe("solution LOD reducer", () => {
   it("does not eliminate a refutes target when the refuting candidate is itself rejected", () => {
     const current = state();
     const merged = mergeSolutionDelta(current, "a1", {
-      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [],
+      region: { acceptanceCriteria: ["works"] }, evidence: [{ text: "bad-a violates contract", source: "a:1", kind: "repository" }, { text: "bad-b is legacy", source: "b:1", kind: "repository" }], activations: [],
       candidates: [
         candidate("good", "Good"),
-        { ...candidate("bad-a", "Bad A"), outcome: "eliminated" as const, reasons: ["violates contract"] },
-        { ...candidate("bad-b", "Bad B"), outcome: "eliminated" as const, reasons: ["legacy path"] },
+        candidate("bad-a", "Bad A"),
+        candidate("bad-b", "Bad B"),
       ], constraints: [
         { kind: "refutes", subject: "bad-a", target: "good", reason: "bad-a disagrees" },
         { kind: "refutes", subject: "bad-b", target: "good", reason: "bad-b disagrees" },
+        { kind: "refutes", subject: "a:1", target: "bad-a", reason: "violates contract", evidenceRefs: ["a:1"] },
+        { kind: "refutes", subject: "b:1", target: "bad-b", reason: "legacy path", evidenceRefs: ["b:1"] },
       ], select: [],
     });
     expect(merged.candidates.find((candidate) => candidate.key === "good")?.status).toBe("selected");
@@ -673,12 +675,12 @@ describe("solution LOD reducer", () => {
         { key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["supporting evidence misread as defeater"], evidenceRefs: [] },
         { key: "beta", proposition: "Beta", outcome: "eliminated", reasons: ["supporting evidence misread as defeater"], evidenceRefs: [] },
       ],
-    })).toThrow(/Every alternative/);
+    })).toThrow(/cannot be directly eliminated/);
     expect(() => validateSolutionDelta(current, current.network.regions[0].id, {
       evidence: [], constraints: [], activations: [], select: ["alpha"],
       candidates: [
         { key: "alpha", proposition: "Alpha", outcome: "selected", reasons: [], evidenceRefs: [] },
-        { key: "beta", proposition: "Beta", outcome: "eliminated", reasons: ["genuine defeater"], evidenceRefs: [] },
+        { key: "beta", proposition: "Beta", outcome: "possible", reasons: [], evidenceRefs: [] },
       ],
     })).not.toThrow();
   });
@@ -692,11 +694,11 @@ describe("solution LOD reducer", () => {
     expect(() => validateSolutionDelta(current, "r1", {
       evidence: [], constraints: [], activations: [], select: ["ghost"],
       candidates: [{ key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["misread defeater"], evidenceRefs: [] }],
-    })).toThrow(/Every alternative/);
+    })).toThrow(/cannot be directly eliminated/);
     expect(() => validateSolutionDelta(current, "r1", {
       evidence: [], constraints: [], activations: [], select: ["alpha"],
       candidates: [{ key: "alpha", proposition: "Alpha", outcome: "eliminated", reasons: ["misread defeater"], evidenceRefs: [] }],
-    })).not.toThrow();
+    })).toThrow(/cannot be directly eliminated/);
   });
 
   it("resynthesizes a pruned region even when its completed synthesis activation survives", () => {
@@ -844,6 +846,49 @@ describe("solution LOD reducer", () => {
     expect(projection).not.toHaveProperty("collapsedAncestry");
     expect(projection).not.toHaveProperty("domain");
     expect(projection).not.toHaveProperty("availableCapabilities");
+  });
+
+  it("compiles confirmed facts and unresolved claims into different operational permissions", () => {
+    const current = state();
+    current.network.evidence.push(
+      { id: "e1", text: "package pins Node 20", source: "package.json:4", kind: "repository", status: "confirmed", fingerprint: "f1" },
+      { id: "e2", text: "Node 16 may be unsupported", source: "model", kind: "inference", status: "hypothesis", validationKind: "repository-evidence", fingerprint: "f2" },
+    );
+    current.network.activations[0].contextRefs.push("e1", "e2");
+    const compiled = compileActivationPrompt(current, { ...current.network.activations[0], capability: "synthesize" });
+    expect(compiled).toContain("CONFIRMED FACTS");
+    expect(compiled).toContain("package pins Node 20");
+    expect(compiled).toContain("UNRESOLVED CLAIMS — NO PRUNING AUTHORITY");
+    expect(compiled).toContain("Node 16 may be unsupported");
+    expect(compiled).toContain("Preference or uncertainty cannot reject");
+    expect(compiled).not.toContain("nextActivationId");
+  });
+
+  it("keeps compiled prompts bounded when unrelated graph state grows", () => {
+    const current = state();
+    const activation = current.network.activations[0];
+    const before = compileActivationPrompt(current, activation);
+    for (let index = 0; index < 300; index++) current.network.evidence.push({ id: `noise-${index}`, text: `noise ${index}`, source: `noise/${index}`, kind: "repository", fingerprint: `n${index}` });
+    expect(compileActivationPrompt(current, activation)).toBe(before);
+  });
+
+  it("keeps the local semantic contract stable across user-request paraphrases", () => {
+    const left = state(); const right = state();
+    left.originalTask = "Add a cache without changing deployment";
+    right.originalTask = "Introduce caching while preserving the deployment topology";
+    expect(compileActivationPrompt(left, left.network.activations[0])).toBe(compileActivationPrompt(right, right.network.activations[0]));
+  });
+
+  it("compiles a bounded operational contract for every role", () => {
+    const current = state();
+    for (const capability of ["inspect", "synthesize", "refine", "implement", "verify", "present"] as const) {
+      const compiled = compileActivationPrompt(current, { ...current.network.activations[0], capability });
+      expect(compiled).toContain(`LOCAL OPERATION\n${capability}:`);
+      expect(compiled).toContain("DECISION BOUNDARY");
+      expect(compiled).toContain("DATA BOUNDARY");
+      expect(compiled).toContain("Return exactly one JSON value");
+      expect(compiled.length).toBeLessThan(3500);
+    }
   });
 
   it("forms an unformed region by inspection before synthesis, then reports convergence instead of looping", () => {
@@ -1259,6 +1304,16 @@ describe("solution LOD reducer", () => {
     expect(() => validateSolutionDelta(build(), "r1", {
       region: {}, evidence: [], candidates: [], constraints: [{ kind: "refutes", subject: "task", target: "http-client:undici", reason: "phantom citation", evidenceRefs: ["ghost"] }], select: [], activations: [],
     })).toThrow(/unknown fact/);
+  });
+
+  it("prevents unresolved inference from pruning a shared option", () => {
+    const current = state();
+    current.network.variables.push({ id: "v1", name: "runtime", ownerRegionId: "r1", seedLabels: ["node20"] });
+    current.network.evidence.push({ id: "e9", text: "Node 20 might be required", source: "model", kind: "inference", status: "hypothesis", validationKind: "repository-evidence", fingerprint: "h9" });
+    expect(() => validateSolutionDelta(current, "r1", "synthesize", {
+      region: {}, evidence: [], variables: [], candidates: [{ key: "legacy", proposition: "Use Node 16", outcome: "possible", reasons: [], evidenceRefs: [] }],
+      constraints: [{ kind: "refutes", subject: "task", target: "runtime:node20", reason: "hypothesis", sourceKind: "model-inference", evidenceRefs: ["e9"] }], select: [], activations: [],
+    })).toThrow(/unresolved claim/);
   });
 });
 

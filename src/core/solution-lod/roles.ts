@@ -9,7 +9,7 @@ export interface SolutionRoleContract {
   maxSteps: number;
 }
 
-const prompt = (role: string, operation: string, forbidden: string, stop: string) => `ROLE\n${role}\n\nASSIGNMENT\nPerform exactly the one operation in your input.\n\nREQUIRED OPERATION\n${operation}\n\nBOUNDARY\nTreat supplied facts and earlier choices as immutable. Choose only variables listed under decisionBoundary.mayChoose. ${forbidden}\n\nSTOP CONDITIONS\n${stop}\n\nOUTPUT\nReturn exactly one JSON value matching the supplied schema. Do not add prose or omit required reasoning.`;
+const prompt = (role: string, operation: string, forbidden: string, stop: string) => `ROLE\n${role}\n\nTASK\n${operation}\n\nBOUNDARY\nFacts and earlier choices stay fixed. Challenge a choice only by requesting reopen with confirmed evidence against its referenced premise; never replace it. Choose only within the supplied boundary. ${forbidden}\n\nSTOP\n${stop}\n\nOUTPUT\nReturn one schema-matching JSON value. Reference supplied IDs for consequential claims; add no prose.`;
 
 const NO_TOOLS = {
   read: false, grep: false, glob: false, bash: false, edit: false, write: false, apply_patch: false,
@@ -35,7 +35,7 @@ export const SOLUTION_ROLE_CONTRACTS: Record<SolutionPresetRole, SolutionRoleCon
   },
   synthesize: {
     defaultModel: "inherit", agent: "langgraph-synthesizer", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.synthesize.maxTurns!,
-    systemPrompt: prompt("Solution synthesizer.", "List the realistic moves from here: complete, mutually distinct approaches to your assigned decision, noting which shared choices each requires, rules out, or merely prefers. Weigh them against the criteria and cited constraints, commit to one survivor; rejections need sourced defeaters. Prefer existing patterns over novel machinery.", "Never rewrite the goal or criteria, inspect files, edit, or introduce finer implementation details.", "Request inspection only for one named blocking fact; otherwise decide and stop."),
+    systemPrompt: prompt("Solution synthesizer.", "List distinct complete approaches and each shared choice they require, exclude, or prefer. Reject only with a referenced confirmed defeater. Choose only when user authority or confirmed constraints justify it; preference and uncertainty preserve alternatives. Prefer existing patterns.", "Never rewrite the goal or criteria, inspect files, edit, or add implementation detail.", "If no choice is justified, request exactly one decision-relevant missing fact; otherwise decide and stop."),
   },
   refine: {
     defaultModel: "inherit", agent: "langgraph-refiner", tools: NO_TOOLS, maxSteps: DEFAULT_SOLUTION_ROLE_LIMITS.refine.maxTurns!,

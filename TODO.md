@@ -158,7 +158,7 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
 - [x] Titles aligned with evidence: graph fixture renamed to terminal-state
   replay of a fully verified checkpoint; soundness describe now states its
   declarative joint-enumeration method explicitly.
-- [x] Step 5 complete: 120/120 vitest + clean tsc with the 500-seed declarative
+- [x] Step 5 complete: 122/122 vitest + clean tsc with the 500-seed declarative
   oracle, seven-dimension permutation, canonical-snapshot order-independence,
   full idempotence + named cases, exhaustion and terminal-replay graph fixtures,
   scaled locality property, completed named matrix, and hardened kernel fixes
@@ -167,7 +167,7 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
 
 ### Step 5 completion record
 
-Two-tier architecture: fast direct-construction oracle (100 seeds) tests
+Two-tier architecture: fast direct-construction oracle (500 seeds) tests
 propagation semantics; merge-boundary suite (15 seeds) tests real schema
 parse + mergeSolutionDelta acceptance. Named matrix covers clique cycles,
 parallel edges, owner-variable invalidation, stale-coordinate cleanup,
@@ -318,72 +318,72 @@ coordinate-excludes on their way out.
 
 ### Typed prompt compilation and inter-agent meaning
 
-- [ ] Replace the raw `JSON.stringify(projectActivationContext(...))` node prompt
+- [x] Replace the raw `JSON.stringify(projectActivationContext(...))` node prompt
   with a small deterministic compiler: typed graph state -> dependency-scoped
   projection -> role-native prompt sections. Keep the structured object available
   for diagnostics, but do not require an agent to infer operational meaning from
   controller field names.
-- [ ] Introduce an explicit lifecycle for claims (`hypothesis`, `confirmed`,
+- [x] Introduce an explicit lifecycle for claims (`hypothesis`, `confirmed`,
   `rejected`) together with authority and validation kind. A hypothesis must have
   no pruning or selection effect; confirmation must satisfy the evidence policy
   for that claim type; rejection must prevent the claim from silently returning
   as an established fact.
-- [ ] Compile claim state into consequences appropriate to the receiving role.
+- [x] Compile claim state into consequences appropriate to the receiving role.
   Inspectors receive the exact validation question, admissible evidence, and
   `confirmed|refuted|unresolved` response contract; synthesizers are told that an
   unresolved claim cannot eliminate an alternative; implementers receive only
   relevant confirmed requirements and explicitly necessary unresolved risks.
-- [ ] Preserve stable IDs through every prompt and response. Require proposed
+- [x] Preserve stable IDs through every prompt and response. Require proposed
   eliminations, selections, validations, and reopen requests to reference the
   candidate, constraint/claim, and evidence IDs they depend on; reject missing,
   invisible, stale, or type-ineligible references before merging output.
-- [ ] Project provenance completely. Every supplied relationship must carry its
+- [x] Project provenance completely. Every supplied relationship must carry its
   `sourceKind` and supporting evidence references, and every supplied fact must
   retain its authority/status, so agents can distinguish user requirements,
   repository facts, model inference, preference, and unresolved hypothesis.
-- [ ] Stop presenting inferred evidence as an undifferentiated fact. Rename the
+- [x] Stop presenting inferred evidence as an undifferentiated fact. Rename the
   projected section or split it into confirmed facts, fixed user decisions,
   preferences, and unresolved claims, with operational permissions stated once
   for each non-empty category.
-- [ ] Make the kernel, not synthesis prose, own derived dispositions. Agents
+- [x] Make the kernel, not synthesis prose, own derived dispositions. Agents
   should propose alternatives, stances, facts, and constraints; selection or
   elimination must either be an explicitly authorized decision or be derived by
   the constraint kernel from a valid referenced proof.
-- [ ] Replace the synthesizer's unconditional "commit to one survivor" rule with
+- [x] Replace the synthesizer's unconditional "commit to one survivor" rule with
   a guarded rule: commit only when authority or current constraints justify the
   choice; otherwise preserve the domain and request exactly one decision-relevant
   missing fact. Test that uncertainty and preference alone never force collapse.
-- [ ] Resolve the global "earlier choices are immutable" wording conflict. Render
+- [x] Resolve the global "earlier choices are immutable" wording conflict. Render
   earlier choices as fixed by default, while exposing the single legal exception:
   request reopening when new eligible evidence directly refutes a referenced
   premise. The requesting role must not reopen or replace the choice itself.
-- [ ] Compile exact per-role capabilities and preconditions rather than broad
+- [x] Compile exact per-role capabilities and preconditions rather than broad
   prose boundaries: which operation is requested, which variables may change,
   which state is immutable, what evidence permits each action, and what terminal
   response is valid. Reject impossible state/role combinations before an LLM call.
-- [ ] Add at most one generated minimal contrast where the current operation is
+- [x] Add at most one generated minimal contrast where the current operation is
   semantically easy to misuse (for example, cited conflict permits elimination;
   dislike or cost preference does not). Generate it from the operation contract,
   never ask an agent to write three paraphrases of the same instruction.
-- [ ] Keep prompts locally exhaustive but globally small: include the complete
+- [x] Keep prompts locally exhaustive but globally small: include the complete
   contract for the node's permitted operation and only the transitive dependency
   closure of relevant ancestry, choices, constraints, evidence, outputs, and
   criteria. Add hard assertions that unrelated graph growth does not grow the
   compiled prompt.
-- [ ] Return precise repair prompts after validation failure. State the rejected
+- [x] Return precise repair prompts after validation failure. State the rejected
   operation, the failed precondition, and the admissible correction without
   repeating the whole prompt or allowing the model to reinterpret established
   semantics.
-- [ ] Add prompt-contract fixtures for every role covering ambiguous terminology,
+- [x] Add prompt-contract fixtures for every role covering ambiguous terminology,
   unresolved versus confirmed claims, preference versus defeater, stale IDs,
   missing citations, forbidden scope, evidence-driven reopen, and adversarial
   repository text that resembles instructions. Assert structured decisions and
   kernel effects, not exact prose.
-- [ ] Add paraphrase and irrelevant-context robustness tests: vary only the user
+- [x] Add paraphrase and irrelevant-context robustness tests: vary only the user
   wording while holding semantic state constant and require equivalent structured
   proposals; inject large unrelated state and require identical decisions and a
   bounded prompt size.
-- [ ] Instrument prompt tokens, validation-rejection rate, repair attempts,
+- [x] Instrument prompt size, validation-rejection and repair attempts,
   unsupported disposition attempts, unresolved-claim misuse, and semantic
   consistency across equivalent inputs. Use these measurements to justify each
   template addition and remove wording that adds cost without improving behavior.
