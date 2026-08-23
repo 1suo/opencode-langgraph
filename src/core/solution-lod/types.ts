@@ -229,7 +229,7 @@ const ChildRegionSchema = z.object({
 export const SolutionDeltaSchema = z.object({
   region: z.object({
     objective: z.string().optional().describe("The goal to decide or deliver. Inspectors must omit this field entirely — never restate the assigned goal."),
-    delivery: z.enum(["answer", "change"]).optional().describe("Use 'answer' only when the user needs an answer without file changes. Otherwise use 'change'."),
+    delivery: z.enum(["answer", "change"]).optional().describe("Only settable together with a complete resolvedAnswer, and only after every implementation alternative is settled; a change goal may not be quietly downgraded to Q&A."),
     allowedVariables: z.array(z.string()).optional().describe("The only aspects that may be chosen here."),
     acceptanceCriteria: z.array(z.string()).optional().describe("Observable conditions that prove the goal is complete."),
   }).optional().describe("Use only to clarify the current goal or its success criteria."),
@@ -272,7 +272,7 @@ export const SolutionDeltaSchema = z.object({
     answer: z.string().min(1).describe("The complete answer to give the user."),
     acceptanceCriteria: z.array(z.string().min(1)).min(1).describe("Conditions showing that this answer fully satisfies the request."),
     evidenceRefs: z.array(z.string()).default([]).describe("References to facts that support the answer. Cite at least one existing fact or a fact supplied with this result; an uncited answer is rejected."),
-  }).optional().describe("Use only when the user's request can be fully answered without changing files."),
+  }).optional().describe("Use only when the user's request can be fully answered without changing files. On a change goal, first settle the solution space (select or evidence-backed elimination of every alternative) and cite the task reference in evidenceRefs."),
   activations: z.array(z.object({
     capability: z.enum(["inspect", "synthesize", "refine", "implement", "verify", "present"]).describe("The kind of help needed."),
     regionId: z.string().optional().describe("The supplied goal reference. Omit it to use the current goal."),

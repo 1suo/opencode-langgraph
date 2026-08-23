@@ -547,11 +547,20 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
   if (delta.candidates.length > 12) throw new Error("A region may contain at most 12 materially distinct current-level alternatives. Refine the decision boundary instead of silently pruning candidates.");
   // Mirror mergeSolutionDelta: an answer is honored only when the delta marks the goal as answer-only.
   const resolvedAnswer = delta.region?.delivery === "answer" ? delta.resolvedAnswer : undefined;
+  if (delta.region?.delivery && delta.region.delivery !== region.delivery && !resolvedAnswer)
+    throw new Error("Delivery type may change only through a complete resolvedAnswer. A standalone delivery rewrite is not a clarification — return resolvedAnswer with the evidence-backed answer instead.");
   if (resolvedAnswer) {
-    const known = new Set(state.network.evidence.map((item) => item.id));
+    const known = new Set(["task", ...state.network.evidence.map((item) => item.id)]);
     const suppliedSources = new Set(delta.evidence.map((item) => item.source));
     if (!resolvedAnswer.evidenceRefs.some((ref) => known.has(ref) || suppliedSources.has(ref)))
       throw new Error("A resolved answer must cite at least one real fact: an existing evidence id or the source of a fact supplied with this result. An answer without evidence is a guess, not a resolution.");
+    if (region.delivery !== "answer") {
+      const open = state.network.candidates.filter((item) => item.regionId === regionId && item.status === "possible");
+      if (open.length)
+        throw new Error(`Resolving to an answer would downgrade this change goal while ${open.length} implementation alternative(s) remain possible. Commit to one approach through select, or eliminate each alternative with a refutes constraint backed by the task reference or confirmed evidence; only a settled solution space may be closed with an answer.`);
+      if (!resolvedAnswer.evidenceRefs.includes("task"))
+        throw new Error(`Closing a change goal with an answer requires user authority: cite the immutable task reference "task" in resolvedAnswer.evidenceRefs so the resolution is anchored to the original request, not to model preference.`);
+    }
     return;
   }
   const statuses = new Map<string, string>();
@@ -651,6 +660,8 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
   let changed = false;
   if (delta.region) {
     if (delta.region.objective && delta.region.objective !== region.objective) { region.objective = delta.region.objective; changed = true; }
+    const mergeResolvedAnswer = delta.region.delivery === "answer" ? delta.resolvedAnswer : undefined;
+    if (delta.region.delivery && delta.region.delivery !== region.delivery && !mergeResolvedAnswer) throw new Error(`Delivery rewrite from "${region.delivery}" to "${delta.region.delivery}" is only valid through a complete resolvedAnswer.`);
     if (delta.region.delivery && delta.region.delivery !== region.delivery) { region.delivery = delta.region.delivery; changed = true; }
     if (delta.region.allowedVariables) { region.allowedVariables = [...new Set(delta.region.allowedVariables.map(normalize).filter(Boolean))]; changed = true; }
     if (delta.region.acceptanceCriteria) { region.acceptanceCriteria = [...new Set(delta.region.acceptanceCriteria.map(normalize).filter(Boolean))]; changed = true; }

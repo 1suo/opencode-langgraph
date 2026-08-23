@@ -528,7 +528,7 @@ describe("solution LOD reducer", () => {
       region: { delivery: "answer" },
       evidence: [{ text: "The marker says ready", source: "SMOKE.md:1", kind: "repository" }],
       candidates: [], constraints: [], select: [], activations: [],
-      resolvedAnswer: { answer: "ready", acceptanceCriteria: ["Report the marker exactly"], evidenceRefs: ["SMOKE.md:1"] },
+      resolvedAnswer: { answer: "ready", acceptanceCriteria: ["Report the marker exactly"], evidenceRefs: ["task", "SMOKE.md:1"] },
     });
     expect(network.regions).toHaveLength(1);
     expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "implemented", answer: "ready", selectedCandidateIds: ["r1:resolved-answer"] });
@@ -553,7 +553,39 @@ describe("solution LOD reducer", () => {
       region: { delivery: "answer" },
       evidence: [{ text: "fact", source: "a.ts:1", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [],
       resolvedAnswer: { answer: "Grounded.", acceptanceCriteria: ["answered"], evidenceRefs: ["a.ts:1"] },
+    })).toThrow(/user authority/);
+    expect(() => validateSolutionDelta(current, "r1", {
+      region: { delivery: "answer" },
+      evidence: [{ text: "fact", source: "a.ts:1", kind: "repository" }], candidates: [], constraints: [], select: [], activations: [],
+      resolvedAnswer: { answer: "Grounded.", acceptanceCriteria: ["answered"], evidenceRefs: ["task", "a.ts:1"] },
     })).not.toThrow();
+  });
+
+  it("rejects downgrading a change goal to an answer while implementation alternatives remain possible", () => {
+    const current = state();
+    const network = mergeSolutionDelta(current, "a1", {
+      candidates: [
+        { key: "left", proposition: "do it left", outcome: "possible", reasons: [], evidenceRefs: [] },
+        { key: "right", proposition: "do it right", outcome: "possible", reasons: [], evidenceRefs: [] },
+      ], constraints: [], evidence: [], select: [], activations: [],
+    });
+    expect(() => validateSolutionDelta({ ...current, network }, "r1", {
+      region: { delivery: "answer" }, evidence: [], candidates: [], constraints: [], select: [], activations: [],
+      resolvedAnswer: { answer: "just use left", acceptanceCriteria: ["answered"], evidenceRefs: ["task"] },
+    })).toThrow(/remain possible/);
+  });
+
+  it("rejects a standalone delivery rewrite without a resolved answer", () => {
+    const current = state();
+    expect(() => validateSolutionDelta(current, "r1", "synthesize", {
+      region: { delivery: "answer" }, evidence: [], candidates: [], constraints: [], select: [], activations: [],
+    })).toThrow(/may not rewrite the objective, delivery type/);
+    expect(() => validateSolutionDelta(current, "r1", "inspect", {
+      region: { delivery: "answer" }, evidence: [], candidates: [], constraints: [], select: [], activations: [],
+    })).toThrow(/Delivery type may change only through/);
+    expect(() => mergeSolutionDelta(current, "a1", {
+      region: { delivery: "answer" }, evidence: [], candidates: [], constraints: [], select: [], activations: [],
+    })).toThrow(/only valid through a complete resolvedAnswer/);
   });
 
   it("queues verification for a directly-resolved answer", () => {
@@ -562,7 +594,7 @@ describe("solution LOD reducer", () => {
       region: { delivery: "answer" },
       evidence: [{ text: "The section is already fully implemented", source: "TODO.md:1", kind: "repository" }],
       candidates: [], constraints: [], select: [], activations: [],
-      resolvedAnswer: { answer: "Already complete.", acceptanceCriteria: ["confirmed implemented"], evidenceRefs: ["TODO.md:1"] },
+      resolvedAnswer: { answer: "Already complete.", acceptanceCriteria: ["confirmed implemented"], evidenceRefs: ["task", "TODO.md:1"] },
     });
     expect(network.regions[0]).toMatchObject({ delivery: "answer", status: "implemented", answer: "Already complete." });
     network.activations[0].status = "completed";
@@ -1984,10 +2016,10 @@ describe("OpenCode automatic graph routing", () => {
         if (requestPath.id === "root") return { data: ["message-1", "message-command"].map((parentID) => ({ info: { role: "assistant", parentID }, parts: [{ type: "text", text: "The answer is 4." }] })) };
         const title = titles.get(requestPath.id) ?? "";
         const structured = title.includes("inspect:r1")
-          ? { region: { delivery: "answer", acceptanceCriteria: ["Answer the question"] }, evidence: [{ text: "2+2 is 4", source: "arithmetic", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] }
+          ? { region: { delivery: "answer", acceptanceCriteria: ["State the sum"] }, evidence: [{ text: "2+2 is 4", source: "arithmetic", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [], resolvedAnswer: { answer: "The answer is 4.", acceptanceCriteria: ["State the sum"], evidenceRefs: ["task"] } }
           : title.includes("synthesize:r1") ? { evidence: [], candidates: [{ key: "answer", proposition: "Answer directly", outcome: "selected", reasons: [], evidenceRefs: ["e1"] }], constraints: [], select: ["answer"], activations: [] }
           : title.includes("present:r1") ? { answer: "The answer is 4." }
-          : title.includes("verify:r1") ? { verdict: "pass", summary: "Answer matches the facts", findings: [], checks: [{ name: "Answer the question", passed: true, evidence: "Answer the question: 2+2 is 4" }], activations: [] } : undefined;
+          : title.includes("verify:r1") ? { verdict: "pass", summary: "Answer matches the facts", findings: [], checks: [{ name: "State the sum", passed: true, evidence: "State the sum: 2+2 is 4" }], activations: [] } : undefined;
         return { data: [{ info: { role: "assistant", structured }, parts: [{ type: "text", text: "The answer is 4." }] }] };
       },
       abort: async () => ({ data: true }),
@@ -2023,13 +2055,13 @@ describe("OpenCode automatic graph routing", () => {
       expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
       expect(output.message.agent).toBe("langgraph-presenter");
       deadline = Date.now() + 4_000;
-      while ((child < 8 || posted.length < 10) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(child).toBe(8);
-      expect(posted).toHaveLength(10);
+      while ((child < 4 || posted.length < 6) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(child).toBe(4);
+      expect(posted).toHaveLength(6);
       expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter" } });
       expect((posted.at(-1) as { body: Record<string, unknown> }).body.tools).toBeUndefined();
       const events = readPluginEvents("root");
-      expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "present:r1", "verify:r1", "__end__"]));
+      expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "verify:r1", "__end__"]));
       expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
       expect(events.find((event) => event.userMessageId === "message-1" && event.node === "__start__")?.state).toMatchObject({
         originalTask: "What is 2+2?",
