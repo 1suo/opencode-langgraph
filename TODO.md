@@ -182,6 +182,72 @@ facts stop firing coordinate-excludes on their way out.
 
 ## 7. Refactor and polish
 
+## 8. Findings from the 2026-08-23 long run (6030382c)
+
+Live-run evidence from executing TODO-CSP-CEGAR-LOD.md's design through a
+20+ region, 3-level solution tree (16→62 activations). Each item names the
+observed failure and the fix direction.
+
+- [ ] **Evidence restatement bloat.** The evidence merge matches exact
+  text+fingerprint, so paraphrased facts accumulate: r1 recorded 34 evidence
+  items for ~12 unique findings, and descendants re-inherited all of them
+  (e88–e134 by revision 28). Every downstream prompt pays. Fix: normalized
+  proposition-style signatures for evidence identity (same rule TODO-CSP
+  section 1 mandates for candidates), plus ancestor-evidence projection that
+  sends children only the deduplicated set.
+- [ ] **Cross-subtree scope duplication.** Two siblings independently
+  decomposed the same feature space: r5's children (r9–r13) and r8's children
+  (r15–r18) each covered domain-control state+v8, the bounded synthesis loop,
+  acceptance gates+tiers, recycling, and observability. Integration region
+  r20 had to reconcile collisions reactively ("cross-piece conflicts resolved…
+  as a unit"). Fix: before refining, give the refiner the sibling-child
+  objective list and require it to either reuse an existing cousin scope or
+  justify novelty; add a merge-time check that flags two leaf objectives with
+  high slug/proposition overlap under different parents.
+- [ ] **Constraint-kind validation hole.** A constraint with `kind:
+  "acceptance"` entered state (c25) — not a member of `ConstraintKind`.
+  Propagation silently ignores unknown kinds, so it was inert but polluted.
+  Fix: enforce the enum at mergeSolutionDelta and reject unknown kinds with
+  teaching text.
+- [ ] **Duplicate excludes survived dedup.** c1/c2 are identical
+  subject/target/kind pairs differing only in a "(supplied relationship c1)"
+  reason suffix. The pair-canonicalization dedup should have merged them;
+  investigate why the second authoring path bypassed the existing-match scan
+  (likely two records in one batch applied before any propagate).
+- [ ] **No-progress re-authoring loop (run killer).** After the r4
+  contradiction, four consecutive synthesize attempts re-authored the same
+  six selections under renamed candidate keys (`a1-stored-verdict-record` →
+  `verdict-record`), dodging slug-dedup and re-tripping the contested lock
+  until the scheduler starved. `MAX_ACTIVATION_RETRIES` only counts failed
+  activations; successful merges that produce no semantic change are
+  uncapped. This is the strongest live argument for TODO-CSP's normalized
+  candidate identity (section 1) and its two-identical-no-progress-cycles
+  block (section 2); until those land, add a cheap guard: if N consecutive
+  synthesize results for one region produce a network whose candidate-set
+  signature is unchanged, block the region with the last contradiction.
+- [ ] **OR-region modeling error needs prompt-side defense.** The synthesizer
+  crammed six orthogonal design axes into one region as co-selectable
+  candidates; the kernel correctly locked contradiction, but recovery needed
+  a manual prune whose objective taught "one selection per result; orthogonal
+  axes become refine children." Bake that lesson into the synthesize role
+  contract and MINIMAL CONTRAST section so first attempts model axes as
+  children instead of parallel selections.
+- [ ] **Depth inflation on small tasks.** A TUI-badge task decomposed to LOD
+  6–7; each level costs ~3 thinking-tier activations. The depth floor
+  guarantees termination but not economy. Fix direction: teach the refiner to
+  prefer atomic leaves when every remaining criterion is mechanically
+  verifiable (check-command-expressible), independent of REFINEMENT_DEPTH_LIMIT.
+- [ ] **Selection debt before any implementation.** The run formed ~11 OR-
+  domains and committed none while burning half its activation budget;
+  implement/verify never started. Consider a scheduler preference: once a
+  region has sat superposed past K scheduling passes, force a
+  select-or-request-fact decision instead of forming another frontier.
+- [ ] **Scratch files in repo root.** `dbg-bd.tmp.ts` / `dbg-buildDirect.tmp.ts`
+  were left by offline debugging and even surfaced as cleanup work inside the
+  run's own decomposition (r20). Delete and keep temp debug scripts outside
+  the repository.
+
+
 - [ ] Separate pure domain derivation, conditional-region reconciliation,
   workflow transitions, and scheduling policy inside the solution reducer.
 - [ ] Unify initial execution and checkpoint-resume lifecycle handling in the

@@ -210,6 +210,26 @@ export function listAllRuns(stateHome?: string): StoredRun[] {
   return runs.sort((a, b) => b.modified - a.modified).map((item) => item.run);
 }
 
+/** Failed runs from one session within the recency window — the runaway-start guard's input. */
+export function countRecentFailedRuns(sessionID: string, windowMs: number, stateHome?: string): number {
+  const directory = path.join(root(stateHome), "runs");
+  if (!fs.existsSync(directory)) return 0;
+  const cutoff = Date.now() - windowMs;
+  let count = 0;
+  for (const name of fs.readdirSync(directory)) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(directory, name);
+    try {
+      if (fs.statSync(file).mtimeMs < cutoff) continue;
+      const run = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<StoredRun>;
+      if (run.rootSessionId === sessionID && run.status === "failed") count += 1;
+    } catch {
+      // Ignore an incomplete or externally edited run file.
+    }
+  }
+  return count;
+}
+
 export function listProjectRuns(worktree: string, stateHome?: string): StoredRun[] {
   const directory = path.join(root(stateHome), "runs");
   if (!fs.existsSync(directory)) return [];

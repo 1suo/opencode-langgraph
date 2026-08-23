@@ -962,7 +962,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
       onConfirm(task) {
         if (!task.trim()) return;
         props.api.ui.dialog.clear();
-        void askManagementAgent(props.api, parent, `Start this task through the /graph command with exactly this argument: ${JSON.stringify(task.trim())}${graph ? ` (graph: ${JSON.stringify(graph)})` : ""}. Then report its runId.`);
+        void askManagementAgent(props.api, parent, `Call langgraph_start with task ${JSON.stringify(task.trim())}${graph ? ` and graph ${JSON.stringify(graph)}` : ""}, then report its runId.`);
       },
       onCancel: () => props.api.ui.dialog.clear(),
     }));

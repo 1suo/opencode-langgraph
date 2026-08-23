@@ -2096,43 +2096,48 @@ describe("OpenCode automatic graph routing", () => {
       expect(config.agent?.["langgraph-inspector"]).toMatchObject({ maxSteps: 32, tools: { read: true, bash: false, skill: false }, permission: { bash: "deny", external_directory: "deny" } });
       expect(config.agent?.["langgraph-synthesizer"]).toMatchObject({ maxSteps: 8, tools: { read: false, bash: false, skill: false }, permission: { bash: "deny", external_directory: "deny" } });
       expect(config.agent?.["langgraph-verifier"]).toMatchObject({ tools: { bash: true, edit: false, skill: false }, permission: { bash: "allow", edit: "deny", external_directory: "deny" } });
-      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_inspect", "langgraph_prune", "langgraph_resume", "langgraph_cancel", "langgraph_pause"]);
+      expect(Object.keys(hooks.tool ?? {})).toEqual(["langgraph_start", "langgraph_inspect", "langgraph_prune", "langgraph_resume", "langgraph_cancel", "langgraph_pause"]);
       const output = {
         message: { id: "message-1", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
         parts: [{ id: "part-1", messageID: "message-1", sessionID: "root", type: "text", text: "What is 2+2?" }],
       };
       await hooks["chat.message"]?.({ sessionID: "root", messageID: "message-1" }, output as never);
       expect(output.parts).toHaveLength(1);
-      writeSessionGraphEnabled("root", true, state);
-      await hooks["chat.message"]?.({ sessionID: "root", messageID: "message-1" }, output as never);
-      expect(output.parts).toHaveLength(1);
       await hooks["command.execute.before"]?.({ command: "run-graph", sessionID: "root", arguments: "What is 2+2?" }, { parts: output.parts } as never);
-      const commandParts = [{ ...output.parts[0], id: "part-command", messageID: "message-command" }];
       await hooks["chat.message"]?.({ sessionID: "root", messageID: "message-command", model: { providerID: "test", modelID: "model" } }, {
         ...output,
         message: { ...output.message, id: "message-command" },
-        parts: commandParts,
+        parts: [{ ...output.parts[0], id: "part-command", messageID: "message-command" }],
       } as never);
       let deadline = Date.now() + 2_000;
       while (readPluginEvents("root").at(-1)?.userMessageId !== "message-command" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
       expect(readPluginEvents("root").at(-1)?.userMessageId).toBe("message-command");
-      expect(commandParts.at(-1)).toMatchObject({ type: "text", synthetic: true });
-      expect(commandParts.at(-1)?.id).toMatch(/^prt_/);
-      expect(output.message.agent).toBe("build"); // plain messages stay untouched; only /graph command output mutates
+      writeSessionGraphEnabled("root", true, state);
+      await hooks["chat.message"]?.({ sessionID: "root", messageID: "message-1" }, output as never);
+      expect(output.parts.at(-1)).toMatchObject({ type: "text", synthetic: true });
+      expect(output.parts.at(-1)?.id).toMatch(/^prt_/);
+      expect(output.message.agent).toBe("langgraph-presenter");
       deadline = Date.now() + 4_000;
-      while ((child < 2 || posted.length < 3) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(child).toBe(2);
-      expect(posted).toHaveLength(3);
+      while ((child < 4 || posted.length < 6) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(child).toBe(4);
+      expect(posted).toHaveLength(6);
       expect(posted.at(-1)).toMatchObject({ body: { agent: "langgraph-presenter" } });
       expect((posted.at(-1) as { body: Record<string, unknown> }).body.tools).toBeUndefined();
       const events = readPluginEvents("root");
       expect(events.map((event) => event.node)).toEqual(expect.arrayContaining(["__start__", "inspect:r1", "verify:r1", "__end__"]));
-      expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command"]));
-      expect(events.find((event) => event.userMessageId === "message-command" && event.node === "__start__")?.state).toMatchObject({
+      expect(new Set(events.map((event) => event.userMessageId))).toEqual(new Set(["message-command", "message-1"]));
+      expect(events.find((event) => event.userMessageId === "message-1" && event.node === "__start__")?.state).toMatchObject({
         originalTask: "What is 2+2?",
+        conversationContext: "ASSISTANT: The answer is 4.\nASSISTANT: The answer is 4.",
       });
       const toolContext = { sessionID: "root", directory: project, worktree: project, agent: "langgraph-presenter", abort: new AbortController().signal, ask: async () => {}, metadata: () => {} } as never;
-      expect(JSON.parse(await (hooks.tool?.langgraph_inspect.execute as (args: Record<string, never>, ctx: never) => Promise<string>)({}, toolContext)).runId ?? "latest").toBeDefined();
+      const startOutput = await (hooks.tool?.langgraph_start.execute as (args: { task: string }, ctx: never) => Promise<string>)({ task: "What is 2+2?" }, toolContext);
+      const started = JSON.parse(startOutput) as { runId: string; status: string };
+      expect(started).toMatchObject({ status: "running" });
+      deadline = Date.now() + 2_000;
+      while (!(["completed", "failed"] as string[]).includes(readStoredRun(started.runId).status) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(["completed", "failed"]).toContain(readStoredRun(started.runId).status);
+      expect(JSON.parse(await (hooks.tool?.langgraph_inspect.execute as (args: { runId: string }, ctx: never) => Promise<string>)({ runId: started.runId }, toolContext)).runId).toBe(started.runId);
     } finally {
       if (priorState === undefined) delete process.env.OPENCODE_LANGGRAPH_STATE_HOME;
       else process.env.OPENCODE_LANGGRAPH_STATE_HOME = priorState;
@@ -2348,10 +2353,6 @@ export default defineOpenCodeLangGraph({ version: 1, models: {}, agents: {}, gra
         message: { id: "message", sessionID: "root", role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: Date.now() } },
         parts: [{ id: "part", messageID: "message", sessionID: "root", type: "text", text: "task" }],
       };
-      await hooks["chat.message"]?.({ sessionID: "root", messageID: "message" }, output as never);
-      expect(readPluginEvents("root", state)).toHaveLength(0);
-      expect(output.parts).toHaveLength(1);
-      await hooks["command.execute.before"]?.({ command: "run-graph", sessionID: "root", arguments: "task" }, { parts: output.parts } as never);
       await hooks["chat.message"]?.({ sessionID: "root", messageID: "message" }, output as never);
       const deadline = Date.now() + 2_000;
       while (readPluginEvents("root", state).at(-1)?.node !== "__end__" && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));

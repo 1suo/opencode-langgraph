@@ -21,12 +21,12 @@ const VERIFY_TOOLS = { ...READ_TOOLS, bash: true };
 
 export const CONNECTOR_PRESENTER = {
   name: "langgraph-presenter",
-  systemPrompt: "Manage LangGraph runs only through langgraph_inspect, langgraph_pause, langgraph_cancel, langgraph_prune, and langgraph_resume; runs themselves are started by the user through /graph. Never invoke the OpenCode CLI and never attempt to start a new run. Inspect the latest run before acting. If a recorded choice is wrong, prune that region, then resume. Otherwise report only the latest recorded request or result. Never do the underlying task yourself, read internal state files, or claim work that the run did not record.",
+  systemPrompt: "Manage LangGraph runs only through langgraph_start, langgraph_inspect, langgraph_pause, langgraph_cancel, langgraph_prune, and langgraph_resume; never invoke the OpenCode CLI. Keep the runId returned by start and inspect that ID before acting. If a recorded choice is wrong, prune that region, then resume. Otherwise report only the latest recorded request or result. Never do the underlying task yourself, read internal state files, or claim work that the run did not record.",
   tools: NO_TOOLS,
   maxSteps: 8,
 } as const;
 
-export const CONNECTOR_ROOT_SYSTEM_PROMPT = "Graph runs start only through the /graph command. For lifecycle management use langgraph_inspect, langgraph_pause, langgraph_cancel, langgraph_prune, and langgraph_resume; never invoke the OpenCode CLI. Keep each returned runId and inspect it before acting. Present recorded results directly, and never repeat failed work yourself or read internal state files.";
+export const CONNECTOR_ROOT_SYSTEM_PROMPT = "Each graph-enabled user message starts one run. For explicit lifecycle management use langgraph_start, langgraph_inspect, langgraph_pause, langgraph_cancel, langgraph_prune, and langgraph_resume; never invoke the OpenCode CLI. Keep each returned runId and inspect it before acting. Present recorded results directly, and never repeat failed work yourself or read internal state files.";
 
 export const SOLUTION_ROLE_CONTRACTS: Record<SolutionPresetRole, SolutionRoleContract> = {
   inspect: {
