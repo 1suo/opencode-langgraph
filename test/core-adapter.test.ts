@@ -446,6 +446,33 @@ describe("solution LOD reducer", () => {
     expect(nextQueuedActivation(ensureRunnableWork(merged).network)).toMatchObject({ capability: "refine", regionId: "r1" });
   });
 
+  it("rejects one result committing to multiple non-equivalent approaches", () => {
+    const current = state();
+    expect(() => validateSolutionDelta(current, "r1", {
+      candidates: [candidate("inline", "Inline provenance", "selected"), candidate("grouped", "Grouped details", "selected")],
+      constraints: [], evidence: [], select: ["inline", "grouped"], activations: [],
+    })).toThrow(/exactly one approach/);
+    expect(() => validateSolutionDelta(current, "r1", {
+      candidates: [
+        candidate("left", "Left approach", "selected"),
+        candidate("right", "Right approach", "selected"),
+        { ...candidate("twin", "Twin of left", "selected"), key: "twin" },
+      ],
+      constraints: [
+        { kind: "equivalent", subject: "left", target: "twin", reason: "same approach", evidenceRefs: [] },
+      ], evidence: [], select: ["left", "right", "twin"], activations: [],
+    })).toThrow(/exactly one approach/);
+    expect(() => validateSolutionDelta(current, "r1", {
+      candidates: [
+        candidate("left", "Left approach", "selected"),
+        candidate("twin", "Twin of left", "selected"),
+      ],
+      constraints: [
+        { kind: "equivalent", subject: "left", target: "twin", reason: "same approach", evidenceRefs: [] },
+      ], evidence: [], select: ["left", "twin"], activations: [],
+    })).not.toThrow();
+  });
+
   it("declares a single-criterion selection actionable without refinement, and a multi-criterion one not", () => {
     const current = state();
     current.network.activations[0].status = "completed";

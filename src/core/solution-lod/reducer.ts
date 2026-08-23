@@ -637,6 +637,16 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
         if (!proof) throw new Error(`Alternative "${item.key}" cannot be directly eliminated. Return it as possible and provide a refutes constraint backed by the exact task reference or confirmed evidence; keep sourceKind=model-inference for your interpretation of the task. The kernel will derive elimination.`);
       }
     }
+    const selectedIds = [...new Set([...delta.select.map((key) => candidateId(regionId, key)), ...delta.candidates.filter((item) => item.outcome === "selected").map((item) => candidateId(regionId, item.key))])];
+    if (selectedIds.length > 1) {
+      const parent = new Map<string, string>();
+      const find = (id: string): string => { const root = parent.get(id) ?? id; if (root === id) return id; const resolved = find(root); parent.set(id, resolved); return resolved; };
+      const union = (left: string, right: string) => { const leftRoot = find(left); const rightRoot = find(right); if (leftRoot !== rightRoot) parent.set(leftRoot, rightRoot); };
+      for (const constraint of state.network.constraints) if (constraint.kind === "equivalent" && selectedIds.includes(constraint.subject) && selectedIds.includes(constraint.target)) union(constraint.subject, constraint.target);
+      for (const constraint of delta.constraints) if (constraint.kind === "equivalent") { const subject = candidateId(regionId, constraint.subject); const target = candidateId(regionId, constraint.target); if (selectedIds.includes(subject) && selectedIds.includes(target)) union(subject, target); }
+      if (new Set(selectedIds.map(find)).size > 1)
+        throw new Error(`One result may commit to exactly one approach: ${selectedIds.length} non-equivalent selections cannot be merged and would lock the region in contradiction. Return only your preferred alternative as selected; state the others as possible with refutes constraints if evidence justifies elimination.`);
+    }
   }
   // Mirror mergeSolutionDelta: a select only lands on a candidate that exists after the outcomes are applied.
   for (const key of delta.select) { const id = candidateRef(state.network, regionId, key); if (statuses.has(id)) statuses.set(id, "selected"); }
