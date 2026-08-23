@@ -100,7 +100,10 @@ function resolveStances(network: SolutionNetwork, regionId: string, stances: Rea
 function addActivation(network: SolutionNetwork, input: Omit<Activation, "id" | "status" | "basisRevision">): Activation | undefined {
   const signature = `${input.capability}\0${input.regionId}\0${normalize(input.expectedDelta)}`;
   const matches = network.activations.filter((item) => `${item.capability}\0${item.regionId}\0${normalize(item.expectedDelta)}` === signature);
-  const duplicate = matches.some((item) => item.status !== "failed");
+  // Only activations whose outcome actually landed (or is still in flight) occupy their
+  // signature. Failed and superseded attempts produced nothing, so they must free the
+  // slot — otherwise a killed-and-resumed run deadlocks behind its own superseded record.
+  const duplicate = matches.some((item) => item.status !== "failed" && item.status !== "superseded");
   const failedAttempts = matches.filter((item) => item.status === "failed").length;
   const region = network.regions.find((item) => item.id === input.regionId);
   if (duplicate || failedAttempts >= MAX_ACTIVATION_RETRIES || !region || input.contextRefs.some((ref) => !knownRef(network, ref))) return undefined;

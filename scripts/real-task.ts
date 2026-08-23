@@ -2,10 +2,10 @@ import { createOpencodeServer, createOpencodeClient } from "@opencode-ai/sdk";
 import { loadConnectorDefinition, opencodeModel, withSolutionRoleModelAssignments } from "../src/core/config.js";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 
-const task = process.argv[2];
+const task = process.argv[2] ?? (process.env.REAL_TASK_RESUME_RUN_ID ? "(resumed run)" : undefined);
 const worktree = process.argv[3] ?? process.cwd();
 if (!task) {
-  console.error("usage: tsx scripts/real-task.ts <task> [worktree]");
+  console.error("usage: tsx scripts/real-task.ts <task> [worktree]  (set REAL_TASK_RESUME_RUN_ID to resume)");
   process.exit(2);
 }
 
@@ -41,7 +41,7 @@ const definition = withSolutionRoleModelAssignments(await loadConnectorDefinitio
   ] as const).filter((entry): entry is [typeof entry[0], string] => Boolean(entry[1])).map(([role, model]) => [role, opencodeModel({ model })]),
 ));
 const configured = definition.graphs["solution-lod"];
-const runId = `harness-${Date.now()}`;
+const runId = process.env.REAL_TASK_RESUME_RUN_ID ?? `harness-${Date.now()}`;
 
 const runtime = new OpenCodeAgentRuntime({
   plugin: { client, project: {} as never, directory: worktree, worktree, serverUrl: new URL(server.url), $: {} as never },
@@ -59,10 +59,12 @@ const runtime = new OpenCodeAgentRuntime({
 });
 
 console.log(`task: ${task}`);
-console.log(`worktree: ${worktree}\n`);
+console.log(`worktree: ${worktree}`);
+console.log(`runId: ${runId}\n`);
 
-const initial = configured.initial({ task, conversationContext: "", directory: worktree, worktree, runId });
-const result = await configured.graph.invoke(initial, {
+const resume = Boolean(process.env.REAL_TASK_RESUME_RUN_ID);
+const input = resume ? null : configured.initial({ task, conversationContext: "", directory: worktree, worktree, runId });
+const result = await configured.graph.invoke(input as never, {
   recursionLimit: 512,
   configurable: {
     thread_id: runId,

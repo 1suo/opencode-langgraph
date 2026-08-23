@@ -1242,6 +1242,17 @@ describe("solution LOD reducer", () => {
     expect(application.network.evidence.some((item) => item.text === "late")).toBe(false);
   });
 
+  it("frees an activation signature for requeueing after supersede or failure", () => {
+    const current = state();
+    const network = mergeSolutionDelta(current, "a1", {
+      region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [],
+      candidates: [{ key: "left", proposition: "Left", outcome: "selected", reasons: [], evidenceRefs: [] }], constraints: [], select: ["left"],
+    });
+    network.activations[0].status = "completed";
+    network.activations.push({ id: "a9", capability: "synthesize", regionId: "r1", request: "again", expectedDelta: "novel:r1", contextRefs: ["r1"], status: "superseded", basisRevision: 0 });
+    expect(ensureRunnableWork(network).done).toBe(false);
+  });
+
   it("retains the workspace mutation of a failed implement record and blocks its region", () => {
     const network = mergeSolutionDelta(state(), "a1", {
       region: { acceptanceCriteria: ["works"] }, evidence: [], activations: [],
