@@ -306,7 +306,10 @@ const factStage = runConstraintSweeps(statusAtPassStart, "facts");
       const selectedStances = new Map<string, Array<{ variableId: string; valueLabel: string }>>();
       for (const holder of holders) {
         if (holder.status !== "selected" || baseDead.has(holder.id)) continue;
-        selectedStances.set(holder.id, (holder.stances ?? []).map((stance) => ({ variableId: stance.variableId, valueLabel: stance.valueLabel })));
+        // Only requires-stances are demands. An excludes-stance states incompatibility, not
+        // commitment — counting it here made a lone holder contest itself against its own
+        // exclusions and locked the region forever.
+        selectedStances.set(holder.id, (holder.stances ?? []).filter((stance) => stance.relation === "requires").map((stance) => ({ variableId: stance.variableId, valueLabel: stance.valueLabel })));
       }
       const contestedVariables = new Set<string>();
       const contestedRegionIds = new Set<string>();
@@ -346,10 +349,15 @@ const factStage = runConstraintSweeps(statusAtPassStart, "facts");
       // Iterate the decreasing operator K ← conflicts(bindings(selected ∖ baseDead ∖ K)):
       // a kill must never outlive the binder that caused it. Contested variables are excluded
       // from binding entirely — their conflict is surfaced above instead of resolved silently.
+      // Kill grounds are collected for every stance-holder, dead ones included: a candidate
+      // felled early by one rule must still record the grounds that arise later in the same
+      // derivation (e.g. a binding materialized by this pass's forced selection), otherwise
+      // the next pass revives and re-kills it with a different reason and idempotence breaks.
       let excluded: Set<string> = new Set();
-      let killed = new Map<string, string>();
+      let killed = new Map<string, Set<string>>();
+      let fingerprint = "";
       for (let iteration = 0; iteration < 16; iteration += 1) {
-        killed = new Map<string, string>();
+        killed = new Map<string, Set<string>>();
         const boundLabels = new Map<string, string>();
         const boundBy = new Map<string, string>();
         for (const holder of holders) {
@@ -369,7 +377,6 @@ const factStage = runConstraintSweeps(statusAtPassStart, "facts");
         }
         for (const entries of boundsPerVariable.values()) entries.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
         for (const holder of holders) {
-          if (holder.status === "eliminated" || baseDead.has(holder.id)) continue;
           for (const stance of holder.stances ?? []) {
             const variable = variableById.get(stance.variableId);
             if (!variable || stance.relation === "prefers") continue;
@@ -386,19 +393,20 @@ const factStage = runConstraintSweeps(statusAtPassStart, "facts");
               reason = `move excludes ${variable.name}="${stance.valueLabel}", which was bound to that option by ${boundBy.get(labelKey)}`;
             }
             if (reason) {
-              const existing = killed.get(holder.id);
-              if (!existing || reason.localeCompare(existing) < 0) killed.set(holder.id, reason);
+              if (!killed.has(holder.id)) killed.set(holder.id, new Set());
+              killed.get(holder.id)!.add(reason);
             }
           }
         }
-        const nextExcluded = new Set(killed.keys());
-        const same = nextExcluded.size === excluded.size && [...nextExcluded].every((id) => excluded.has(id));
-        if (same) break;
-        excluded = nextExcluded;
+        const fingerprintNow = [...killed.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([id, reasons]) => `${id}:${[...reasons].sort().join("|")}`).join(";");
+        if (fingerprintNow === fingerprint) break;
+        fingerprint = fingerprintNow;
+        excluded = new Set(killed.keys());
       }
-      for (const [id, reason] of killed) {
-        eliminate(id, reason);
+      for (const [id, reasons] of killed) {
         const candidate = network.candidates.find((item) => item.id === id);
+        for (const reason of reasons) if (candidate && !candidate.eliminationReasons.includes(reason)) { candidate.eliminationReasons.push(reason); changed = anyChange = true; }
+        if (candidate && reasons.size && candidate.status !== "eliminated") candidate.status = "eliminated";
         if (candidate?.declaredStatus === "selected") candidate.declaredStatus = "possible";
       }
     } else {

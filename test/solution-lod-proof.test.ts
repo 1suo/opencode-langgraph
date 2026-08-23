@@ -100,6 +100,12 @@ function buildDirect(seed: number): FastInstance {
         const roll = random();
         if (roll < 0.35) stances.push({ variableId: `v${vi}`, relation: "requires", valueLabel: roll < 0.18 ? "alpha" : "beta" });
         else if (roll < 0.45) stances.push({ variableId: `v${vi}`, relation: "excludes", valueLabel: "alpha" });
+        // Mixed demands on one holder: requires + excludes of the same variable must never
+        // self-contest — regression coverage for the stale conflict-lock bug.
+        else if (roll < 0.55) {
+          stances.push({ variableId: `v${vi}`, relation: "requires", valueLabel: "beta" });
+          stances.push({ variableId: `v${vi}`, relation: "excludes", valueLabel: "alpha" });
+        }
       }
       net.candidates.push({ id: cid, regionId: rid, key: `c${ki}`, proposition: `${rid} o${ki}`, status: "possible", evidenceIds: [], eliminationReasons: [], stances });
       net.regions.find((r) => r.id === rid)!.candidateIds.push(cid);

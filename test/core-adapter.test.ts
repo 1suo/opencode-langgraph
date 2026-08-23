@@ -602,6 +602,24 @@ describe("solution LOD reducer", () => {
     })).toThrow(/remain possible/);
   });
 
+  it("clears a stale conflict lock instead of letting a selected holder contest its own exclusions", () => {
+    const current = state();
+    let network = mergeSolutionDelta(current, "a1", {
+      variables: [{ name: "provenance-surface", seedLabels: ["inline", "tree", "dedicated"] }],
+      candidates: [
+        { key: "inline", proposition: "Inline", outcome: "selected", reasons: [], evidenceRefs: [], stances: [{ variable: "provenance-surface", relation: "requires", valueLabel: "inline" }, { variable: "provenance-surface", relation: "excludes", valueLabel: "tree" }, { variable: "provenance-surface", relation: "excludes", valueLabel: "dedicated" }] },
+        { key: "tree", proposition: "Tree", outcome: "possible", reasons: [], evidenceRefs: [], stances: [{ variable: "provenance-surface", relation: "requires", valueLabel: "tree" }] },
+        { key: "dedicated", proposition: "Dedicated", outcome: "possible", reasons: [], evidenceRefs: [], stances: [{ variable: "provenance-surface", relation: "requires", valueLabel: "dedicated" }] },
+      ],
+      constraints: [], evidence: [], select: ["inline"], activations: [],
+    });
+    network = propagateNetwork(network);
+    expect(network.regions[0].contradiction).toBeUndefined();
+    const locked = propagateNetwork({ ...network, regions: [{ ...network.regions[0], status: "contradiction", contradiction: "Commitments conflict on shared choice: committed moves demand different options." }] });
+    expect(locked.regions[0].contradiction).toBeUndefined();
+    expect(locked.candidates.find((candidate) => candidate.key === "tree")?.status).toBe("eliminated");
+  });
+
   it("rejects a standalone delivery rewrite without a resolved answer", () => {
     const current = state();
     expect(() => validateSolutionDelta(current, "r1", "synthesize", {
