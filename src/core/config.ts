@@ -45,7 +45,13 @@ function solutionLodPresetDefinition(options: SolutionLodPresetOptions = {}): Co
   const models = Object.fromEntries(roles.map((role) => [modelName(role), presetModel(options.models?.[role] ?? SOLUTION_ROLE_CONTRACTS[role].defaultModel)]));
   const agent = (role: SolutionPresetRole): AgentDefinition => {
     const contract = SOLUTION_ROLE_CONTRACTS[role];
-    return { model: modelName(role), opencodeAgent: contract.agent, systemPrompt: contract.systemPrompt, tools: contract.tools, maxSteps: options.roleLimits?.[role]?.maxTurns ?? DEFAULT_SOLUTION_ROLE_LIMITS[role].maxTurns ?? contract.maxSteps };
+    const timeouts = options.roleTimeouts?.[role];
+    return {
+      model: modelName(role), opencodeAgent: contract.agent, systemPrompt: contract.systemPrompt, tools: contract.tools,
+      maxSteps: options.roleLimits?.[role]?.maxTurns ?? DEFAULT_SOLUTION_ROLE_LIMITS[role].maxTurns ?? contract.maxSteps,
+      inactivityTimeoutMs: timeouts?.inactivityTimeoutMs ?? (role === "implement" ? 30 * 60_000 : 15 * 60_000),
+      maxRuntimeMs: timeouts?.maxRuntimeMs ?? (role === "implement" ? 60 * 60_000 : 30 * 60_000),
+    };
   };
   return {
     version: 1,

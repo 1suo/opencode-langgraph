@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { MemorySaver } from "@langchain/langgraph";
 import type { CandidateStance, SolutionLodState, SolutionNetwork } from "../src/core/solution-lod/types.js";
 import { SolutionDeltaSchema } from "../src/core/solution-lod/types.js";
-import { assertAcyclicPrimalGraph, applyBatchRecords, ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, purgeDescendants } from "../src/core/solution-lod/reducer.js";
+import { assertAcyclicPrimalGraph, applyBatchRecords, domainFingerprint, ensureRunnableWork, initialNetwork, mergeSolutionDelta, propagateNetwork, purgeDescendants } from "../src/core/solution-lod/reducer.js";
 import { projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
@@ -19,8 +19,22 @@ function shuffled<T>(random: () => number, items: T[]): T[] {
   return copy;
 }
 const EMPTY_STATE = {
-  stateVersion: 7, runId: "oracle", originalTask: "t", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", activeBatch: [], results: [], usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, result: "",
+  stateVersion: 8, runId: "oracle", originalTask: "t", conversationContext: "", directory: "/repo", worktree: "/repo", phase: "", activeBatch: [], results: [], usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, result: "",
 } as const;
+
+function acceptOracleDomains(network: SolutionNetwork): void {
+  for (const region of network.regions) {
+    region.scopeId ??= `scope:${region.id}`;
+    region.criterionIds ??= region.acceptanceCriteria.map((_, index) => `criterion:${region.id}:${index}`);
+    region.domainPhase ??= region.candidateIds.length ? "selecting" : "ungenerated";
+    region.cegarRound ??= 0;
+    region.challengeVerdict ??= region.candidateIds.length ? "accept" : null;
+    region.noProgressFingerprint ??= null;
+    region.noProgressCount ??= 0;
+    region.domainFingerprint = domainFingerprint(network, region.id);
+    region.acceptedFingerprint = region.domainFingerprint;
+  }
+}
 
 /** Canonical derived state: input-array order is irrelevant, every consequential field is not. */
 function semanticSnapshot(value: SolutionNetwork): string {
@@ -176,6 +190,7 @@ function buildDirect(seed: number): FastInstance {
     if (random() < 0.6) net.constraints.push({ id: `ce${i}`, kind: "refutes", subject: eid, target: t.id, reason: "evidence kill", sourceActivationId: "a9", sourceKind: "repo-evidence", evidenceRefs: [eid] });
     else net.constraints.push({ id: `cs${i}`, kind: "supports", subject: eid, target: t.id, reason: "support", sourceActivationId: "a9", sourceKind: "model-inference", evidenceRefs: [eid] });
   }
+  acceptOracleDomains(net);
   assertAcyclicPrimalGraph(net); // throws on coupling cycles — caught by generateInstance for retry
   return { network: net, committedPicks, multiLevel, descendantVariable, maxDepth: Math.max(...net.regions.map((region) => region.lod)) };
 }
@@ -355,7 +370,7 @@ describe("soundness oracle — fast tier (declarative joint enumeration)", () =>
         expect(usedCandidates.has(candidate.id), `unsound elimination: ${ctx}`).toBe(false);
       }
       for (const [variableId, labels] of usedCoordinates) for (const label of labels) {
-        expect(propagated.candidates.some((candidate) => candidate.status !== "eliminated" && candidate.stances?.some((stance) => stance.relation === "requires" && stance.variableId === variableId && stance.valueLabel.toLowerCase() === label)), `used coordinate ${variableId}=${label} lost every viable witness`).toBe(true);
+        expect(propagated.candidates.some((candidate) => candidate.status !== "eliminated" && candidate.stances?.some((stance) => stance.relation === "requires" && stance.variableId === variableId && stance.valueLabel.toLowerCase() === label)), `seed=${seed} used coordinate ${variableId}=${label} lost every viable witness`).toBe(true);
       }
       const twice = propagateNetwork(structuredClone(propagated));
       expect(fullSnapshot(twice), `seed=${seed} full idempotence`).toBe(fullSnapshot(propagated));
@@ -473,6 +488,7 @@ describe("merge-boundary suite", () => {
         if (sid) committedPicks.push({ regionId: rid, id: sid });
       }
     }
+    acceptOracleDomains(net);
     assertAcyclicPrimalGraph(net);
     const authored = net.candidates.filter((candidate) => candidate.declaredStatus === "selected").map((candidate) => ({ regionId: candidate.regionId, id: candidate.id }));
     return { network: net, committedPicks: [...new Map([...committedPicks, ...authored].map((entry) => [entry.regionId, entry])).values()] };
@@ -525,9 +541,11 @@ describe("terminal-state replay through the real graph (fully verified checkpoin
     const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
     const runtime = { call: async () => { throw new Error("NO MODEL"); } };
     const authored = initialNetwork("settled change");
-    authored.regions = [{ ...authored.regions[0], acceptanceCriteria: ["done"], status: "verified", candidateIds: ["r1:d"], selectedCandidateIds: ["r1:d"] }];
+    authored.regions = [{ ...authored.regions[0], acceptanceCriteria: ["done"], status: "verified", candidateIds: ["r1:d"], selectedCandidateIds: ["r1:d"], artifactIds: ["x1", "x2"] }];
     authored.candidates = [{ id: "r1:d", regionId: "r1", key: "d", proposition: "", status: "selected", evidenceIds: [], eliminationReasons: [], stances: [] }];
+    authored.artifacts = [{ id: "x1", regionId: "r1", kind: "file", path: "src/x.ts", summary: "Changed src/x.ts", activationId: "a0" }, { id: "x2", regionId: "r1", kind: "completion-review", summary: "reviewed", passed: true, activationId: "a0", implementationOutcome: "changed", criterionIds: [...authored.regions[0]!.criterionIds], focusedTests: ["focused passed"], fullChecks: ["full passed"], findings: [] }];
     authored.activations = [];
+    acceptOracleDomains(authored);
     const result = await configured.graph.invoke({ ...configured.initial({ task: "s", directory: "/r", worktree: "/r", runId: "z" }), network: authored }, { recursionLimit: 16, configurable: { thread_id: "z", langgraphOpenCodeRuntime: runtime } });
     expect(configured.result?.(result as SolutionLodState)).toContain("Implemented and verified");
     expect(configured.progress?.(result as SolutionLodState)?.phase).toBe("completed");

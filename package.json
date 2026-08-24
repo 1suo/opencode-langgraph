@@ -14,6 +14,7 @@
   },
   "files": [
     "dist/",
+    "LICENSE",
     "README.md",
     "PLAN.md",
     "SPEC-graph.md"
@@ -51,8 +52,11 @@
     "opencode": ">=1.18.16 <2"
   },
   "dependencies": {
+    "@langchain/core": "^1.2.9",
     "@langchain/langgraph": "^1.4.9",
+    "@langchain/langgraph-checkpoint": "^1.1.5",
     "@opencode-ai/plugin": "1.18.16",
+    "@opencode-ai/sdk": "^1.18.16",
     "@opentui/core": "^0.5.3",
     "@opentui/solid": "^0.5.3",
     "commander": "^15.0.0",

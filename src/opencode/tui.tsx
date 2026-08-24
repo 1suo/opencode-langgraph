@@ -48,7 +48,9 @@ export interface GraphControls {
   cycle(): void;
   tree(): void;
   detail(): void;
+  activations(): void;
   runs(): void;
+  archive(): void;
   output(): void;
   prompt(): void;
   inspect(): void;
@@ -74,7 +76,9 @@ export function graphNavigationLayer(controls: GraphControls) {
       { name: "langgraph.pane.next", title: "LangGraph: focus next pane", run: controls.cycle },
       { name: "langgraph.view.tree", title: "LangGraph: show solution tree", run: controls.tree },
       { name: "langgraph.view.detail", title: "LangGraph: show details", run: controls.detail },
+      { name: "langgraph.view.activations", title: "LangGraph: show activation invocations", run: controls.activations },
       { name: "langgraph.view.runs", title: "LangGraph: choose run", run: controls.runs },
+      { name: "langgraph.runs.archive", title: "LangGraph: toggle archived runs", run: controls.archive },
       { name: "langgraph.view.output", title: "LangGraph: show activation output", run: controls.output },
       { name: "langgraph.view.prompt", title: "LangGraph: show activation prompt", run: controls.prompt },
       { name: "langgraph.row.inspect", title: "LangGraph: open selected row", run: controls.inspect },
@@ -98,7 +102,9 @@ export function graphNavigationLayer(controls: GraphControls) {
       { key: "tab", cmd: "langgraph.pane.next" },
       { key: "1", cmd: "langgraph.view.tree" },
       { key: "2", cmd: "langgraph.view.detail" },
+      { key: "g", cmd: "langgraph.view.activations" },
       { key: "r", cmd: "langgraph.view.runs" },
+      { key: "v", cmd: "langgraph.runs.archive" },
       { key: "o", cmd: "langgraph.view.output" },
       { key: "p", cmd: "langgraph.view.prompt" },
       { key: "return", cmd: "langgraph.row.inspect" },
@@ -202,6 +208,73 @@ export function solutionTreeRows(snapshot: SolutionSemanticSnapshot): SolutionTr
   };
   visit(undefined, "");
   return rows;
+}
+
+export interface ActivationInvocationRow {
+  activation: SemanticActivation;
+  region?: SemanticRegion;
+  indent: string;
+}
+
+export function activationInvocationRows(snapshot: SolutionSemanticSnapshot): ActivationInvocationRow[] {
+  const byId = new Map(snapshot.activations.map((activation) => [activation.id, activation]));
+  const children = new Map<string, SemanticActivation[]>();
+  const roots: SemanticActivation[] = [];
+  const ordered = [...snapshot.activations].sort((a, b) => planId(a.id) - planId(b.id) || a.id.localeCompare(b.id));
+  for (const activation of ordered) {
+    if (activation.senderActivationId && byId.has(activation.senderActivationId))
+      children.set(activation.senderActivationId, [...(children.get(activation.senderActivationId) ?? []), activation]);
+    else roots.push(activation);
+  }
+  const regions = new Map(snapshot.regions.map((region) => [region.id, region]));
+  const rows: ActivationInvocationRow[] = [];
+  const visited = new Set<string>();
+  const visit = (activation: SemanticActivation, indent: string) => {
+    if (visited.has(activation.id)) return;
+    visited.add(activation.id);
+    rows.push({ activation, region: regions.get(activation.regionId), indent });
+    for (const child of children.get(activation.id) ?? []) visit(child, `${indent}  `);
+  };
+  for (const root of roots) visit(root, "");
+  // Malformed cycles remain visible as roots rather than disappearing from diagnostics.
+  for (const activation of ordered) visit(activation, "");
+  return rows;
+}
+
+export function activationNodeId(activation: SemanticActivation): string {
+  return `${activation.operation ?? activation.capability}:${activation.regionId}`;
+}
+
+export function eventForActivation(events: PluginRunEvent[], activations: SemanticActivation[], activation: SemanticActivation, promptOnly = false): PluginRunEvent | undefined {
+  const identifiedActivation = activation as SemanticActivation & { sessionId?: string };
+  const matching = events.filter((event) => event.node === activationNodeId(activation));
+  const latestEligible = (items: PluginRunEvent[]) => items.filter((event) => !promptOnly || event.prompt).at(-1);
+  const byActivation = matching.filter((event) => (event as PluginRunEvent & { activationId?: string }).activationId === activation.id);
+  if (byActivation.length) return latestEligible(byActivation);
+  if (identifiedActivation.sessionId) {
+    const bySession = matching.filter((event) => event.sessionId === identifiedActivation.sessionId);
+    if (bySession.length) return latestEligible(bySession);
+  }
+
+  const peers = activations.filter((item) => activationNodeId(item) === activationNodeId(activation)).sort((a, b) => planId(a.id) - planId(b.id) || a.id.localeCompare(b.id));
+  const index = peers.findIndex((item) => item.id === activation.id);
+  if (index < 0) return;
+  const groups: PluginRunEvent[][] = [];
+  for (const event of matching) {
+    const group = groups.at(-1);
+    const terminal = group?.some((item) => ["completed", "failed", "interrupted"].includes(item.status));
+    const differentSession = Boolean(group?.at(-1)?.sessionId && event.sessionId && group.at(-1)!.sessionId !== event.sessionId);
+    if (!group || terminal || differentSession) groups.push([event]);
+    else group.push(event);
+  }
+  return latestEligible(groups[index] ?? []);
+}
+
+export function movedSelectionId(ids: string[], selectedId: string | undefined, delta: number): string | undefined {
+  if (!ids.length) return;
+  const current = ids.indexOf(selectedId ?? "");
+  const index = Math.max(0, Math.min(ids.length - 1, (current < 0 ? 0 : current) + delta));
+  return ids[index];
 }
 
 function executionState(event: PluginRunEvent): string {
@@ -400,6 +473,7 @@ export function renderPlanTree(events: PluginRunEvent[]): string {
     `SOLUTION LOD  ${snapshot.phase}${snapshot.scope ? ` · ${snapshot.scope}` : ""}`,
     snapshot.callsUsed !== undefined ? `${snapshot.callsUsed} activations${usage ? ` · ${usage.turns} turns` : ""}` : "",
     usage ? `TOKENS  ${compactNumber(usage.input)} input · ${compactNumber(usage.cacheRead)} cached` : "",
+    snapshot.telemetry ? `LIMITS  ${snapshot.telemetry.retries} retries · ${snapshot.telemetry.reopens} reopens · ${snapshot.telemetry.regionCount} regions · ${snapshot.telemetry.candidates} candidates · ${snapshot.telemetry.promptChars} prompt chars · ${snapshot.telemetry.elapsedMs}ms` : "",
     "",
   ].filter((line, index, all) => line || index === all.length - 1);
   for (const { node, branch, continuation } of planRows(snapshot)) {
@@ -448,6 +522,17 @@ function SolutionTreeView(props: { rows: SolutionTreeRow[]; selectedId?: string;
 
 export interface RunListItem { run: ReturnType<typeof listAllRuns>[number]; modified: number }
 
+const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "pausing", "paused", "interrupted"]);
+
+export function visibleRunItems(items: RunListItem[], archive: boolean): RunListItem[] {
+  return items.filter((item) => archive ? !ACTIVE_RUN_STATUSES.has(item.run.status) : ACTIVE_RUN_STATUSES.has(item.run.status));
+}
+
+export function runListRefreshToken(events: PluginRunEvent[]): string {
+  const event = events.at(-1);
+  return event ? `${event.runId}\0${event.node}\0${event.status}\0${event.at}` : "";
+}
+
 function RunListView(props: { items: RunListItem[]; selectedId?: string; onSelect: (id: string) => void; width: () => number; theme: Theme }) {
   const budget = () => Math.max(24, props.width());
   return (
@@ -486,6 +571,23 @@ function RunDetailView(props: { item: RunListItem; theme: Theme }) {
   );
 }
 
+function ActivationNetworkView(props: { rows: ActivationInvocationRow[]; selectedId?: string; onSelect: (id: string) => void; width: () => number; theme: Theme }) {
+  const budget = () => Math.max(24, props.width());
+  return <box flexDirection="column" paddingX={1}>
+    <For each={props.rows}>{(row) => {
+      const selected = () => props.selectedId === row.activation.id;
+      const mapping = () => row.region ? `${row.region.id} · L${row.region.lod} · ${row.region.edge}` : `${row.activation.regionId} · missing region`;
+      const role = () => `${row.activation.capability}${row.activation.operation ? `:${row.activation.operation}` : ""}`;
+      return <box flexDirection="column" width="100%" backgroundColor={selected() ? props.theme.backgroundElement : undefined} onMouseUp={() => props.onSelect(row.activation.id)}>
+        <text wrapMode="none" fg={roleColor(row.activation.capability, props.theme)}>
+          {row.indent}{roleIcon(row.activation.capability)} <b>{row.activation.id}:{role()}</b> {crop(row.activation.request, budget() - row.indent.length - row.activation.id.length - role().length - 5)}
+        </text>
+        <text wrapMode="none" fg={props.theme.textMuted}>{crop(`${row.indent}  ${activationIcon(row.activation.status)} ${row.activation.status} · ${mapping()}`, budget())}</text>
+      </box>;
+    }}</For>
+  </box>;
+}
+
 function schemaToneColor(tone: SchemaTone | undefined, theme: Theme) {
   if (!tone || tone === "text") return theme.text;
   if (tone === "muted") return theme.textMuted;
@@ -515,7 +617,7 @@ function ActivationDetailView(props: { activation: SemanticActivation; event?: P
   return (
     <box flexDirection="column" paddingX={1} gap={1}>
       <box flexDirection="row" gap={1}>
-        <text fg={roleColor(props.activation.capability, props.theme)}><b>{roleIcon(props.activation.capability)} {props.activation.id}:{props.activation.capability}</b></text>
+        <text fg={roleColor(props.activation.capability, props.theme)}><b>{roleIcon(props.activation.capability)} {props.activation.id}:{props.activation.capability}{props.activation.operation ? `:${props.activation.operation}` : ""}</b></text>
         <text fg={statusTone(props.activation.status, props.theme)}>[{props.activation.status.toUpperCase()}]</text>
         <Show when={props.event?.at}><text fg={props.theme.textMuted}>{shortTime(props.event?.at)}</text></Show>
         <Show when={props.event?.usage}>{(usage) => <text fg={props.theme.textMuted} wrapMode="none">{usageLine(usage(), props.event?.streaming)}</text>}</Show>
@@ -554,6 +656,7 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
   const constraints = createMemo(() => props.semantic?.constraints.filter((item) => region()?.constraintIds.includes(item.id)) ?? []);
   const evidence = createMemo(() => props.semantic?.evidence.filter((item) => region()?.evidenceIds.includes(item.id)) ?? []);
   const artifacts = createMemo(() => props.semantic?.artifacts.filter((item) => item.regionId === props.regionId) ?? []);
+  const currentOperation = createMemo(() => props.semantic?.activations.findLast((activation) => activation.regionId === props.regionId && activation.operation)?.operation);
   return <Show when={region()} fallback={<text fg={props.theme.textMuted} padding={1}>Select a solution region.</text>}>{(item) => (
     <box flexDirection="column" paddingX={1} gap={1}>
       <box flexDirection="row" gap={1}>
@@ -562,6 +665,11 @@ function RegionDetailView(props: { semantic?: SolutionSemanticSnapshot; regionId
         <text fg={props.theme.textMuted}>{item().viable}/{item().total} viable</text>
       </box>
       <text fg={props.theme.text} wrapMode="word"><b>{item().objective}</b></text>
+      <Show when={item().domainPhase || currentOperation()}>
+        <text fg={props.theme.accent} wrapMode="word">DOMAIN  {item().domainPhase ?? "pending"}{currentOperation() ? ` · ${currentOperation()}` : ""}{item().cegarRound !== undefined ? ` · CEGAR ${item().cegarRound}` : ""}{item().challengeVerdict ? ` · ${item().challengeVerdict}` : ""}</text>
+      </Show>
+      <Show when={item().domainFingerprint}>{(fingerprint) => <text fg={props.theme.textMuted}>  fingerprint {middleEllipsis(fingerprint(), 32)}{item().acceptedFingerprint === fingerprint() ? " · accepted" : ""}</text>}</Show>
+      <Show when={item().blockedReason}><text fg={props.theme.error} wrapMode="word">  BLOCKED {item().blockedReason}</text></Show>
       <Show when={artifacts().length}><text fg={props.theme.textMuted}>ARTIFACTS</text></Show>
       <For each={artifacts()}>{(artifact) => <text fg={artifact.passed === false ? props.theme.error : props.theme.success} wrapMode="word">  {artifact.kind} {artifact.path ?? artifact.summary}</text>}</For>
       <text fg={props.theme.textMuted}>CANDIDATES</text>
@@ -802,7 +910,7 @@ USE
 /run-graph <task> once · /graph-pause · /graph-resume <answer> · /graph-cancel stop
 
 VIEW · panels
-1 tree · 2 details · R runs
+1 tree · 2 details · G invocation hierarchy · R runs · V active/archive
 Tab next pane · ↑↓ select · Enter open/inspect
 N new · Space pause · U resume · E repair · X cancel
 O output · P prompt · Q back
@@ -880,19 +988,21 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const liveEstimate = createMemo(() => liveStreamingEstimate(events()));
   const solution = createMemo(() => semanticSnapshot(events()));
   const activePlan = createMemo(() => semantic()?.nodes.find((node) => node.id === semantic()?.activeNodeId));
-  const [view, setView] = createSignal<"tree" | "runs">(props.chooser ? "runs" : "tree");
+  const [view, setView] = createSignal<"tree" | "activations" | "runs">(props.chooser ? "runs" : "tree");
   const [focus, setFocus] = createSignal<"tree" | "detail">("tree");
   const [selectedId, setSelectedId] = createSignal<string>();
   const [selectedRunId, setSelectedRunId] = createSignal<string>();
   const [detailTab, setDetailTab] = createSignal<"output" | "prompt">("output");
   const [runsVersion, setRunsVersion] = createSignal(0);
+  const [showArchive, setShowArchive] = createSignal(false);
   let treeBox: ScrollBoxRenderable | undefined;
   let detailBox: ScrollBoxRenderable | undefined;
   const theme = () => props.api.theme.current;
   const termWidth = () => (props.api.renderer as unknown as { width?: number }).width ?? 120;
   const treeWidth = () => Math.max(30, Math.floor(termWidth() * 0.42) - 4);
   const rows = createMemo(() => solution() ? solutionTreeRows(solution()!) : []);
-  const runItems = createMemo<RunListItem[]>(() => {
+  const allRunItems = createMemo<RunListItem[]>(() => {
+    runListRefreshToken(events());
     runsVersion();
     return listAllRuns(stateHome(props.api)).map((run) => {
       let modified = 0;
@@ -900,24 +1010,21 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
       return { run, modified };
     });
   });
-  const eventByNode = createMemo(() => {
-    const runId = latestRunId(events());
-    const map = new Map<string, PluginRunEvent>();
-    for (const event of events()) if (event.runId === runId) map.set(event.node, event);
-    return map;
-  });
-  const promptByNode = createMemo(() => {
-    const runId = latestRunId(events());
-    const map = new Map<string, PluginRunEvent>();
-    for (const event of events()) if (event.runId === runId && event.prompt) map.set(event.node, event);
-    return map;
-  });
-  const activationTime = (activation: SemanticActivation) => shortTime(eventByNode().get(`${activation.capability}:${activation.regionId}`)?.at);
+  const runItems = createMemo(() => visibleRunItems(allRunItems(), showArchive()));
+  const activationRows = createMemo(() => solution() ? activationInvocationRows(solution()!) : []);
+  const currentEvents = createMemo(() => { const runId = latestRunId(events()); return events().filter((event) => event.runId === runId); });
+  const activationTime = (activation: SemanticActivation) => shortTime(eventForActivation(currentEvents(), solution()?.activations ?? [], activation)?.at);
   const selectedRow = createMemo(() => rows().find((row) => row.id === selectedId()));
-  const selectedActivation = createMemo(() => { const row = selectedRow(); return row?.kind === "activation" ? row.activation : undefined; });
-  const selectedRegionId = createMemo(() => { const row = selectedRow(); return row ? (row.kind === "region" ? row.region.id : row.activation.regionId) : undefined; });
-  const selectedActivationEvent = createMemo(() => { const activation = selectedActivation(); return activation ? eventByNode().get(`${activation.capability}:${activation.regionId}`) : undefined; });
-  const selectedActivationPrompt = createMemo(() => { const activation = selectedActivation(); return activation ? promptByNode().get(`${activation.capability}:${activation.regionId}`) : undefined; });
+  const selectedActivation = createMemo(() => {
+    if (view() === "activations") return activationRows().find((row) => row.activation.id === selectedId())?.activation;
+    const row = selectedRow(); return row?.kind === "activation" ? row.activation : undefined;
+  });
+  const selectedRegionId = createMemo(() => {
+    if (view() === "activations") return selectedActivation()?.regionId;
+    const row = selectedRow(); return row ? (row.kind === "region" ? row.region.id : row.activation.regionId) : undefined;
+  });
+  const selectedActivationEvent = createMemo(() => { const activation = selectedActivation(); return activation ? eventForActivation(currentEvents(), solution()?.activations ?? [], activation) : undefined; });
+  const selectedActivationPrompt = createMemo(() => { const activation = selectedActivation(); return activation ? eventForActivation(currentEvents(), solution()?.activations ?? [], activation, true) : undefined; });
   const selectedRunItem = createMemo(() => runItems().find((item) => item.run.runId === selectedRunId()));
   const managedRun = (): StoredRun | undefined => {
     const id = view() === "runs" ? selectedRunId() : runID() ?? latestRunId(events());
@@ -933,12 +1040,10 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   const moveSelection = (delta: number) => {
     if (view() === "runs") {
       const list = runItems(); if (!list.length) return;
-      const index = list.findIndex((item) => item.run.runId === selectedRunId());
-      setSelectedRunId(list[Math.max(0, Math.min(list.length - 1, (index < 0 ? 0 : index) + delta))].run.runId);
+      setSelectedRunId(movedSelectionId(list.map((item) => item.run.runId), selectedRunId(), delta));
     } else {
-      const list = rows(); if (!list.length) return;
-      const index = list.findIndex((row) => row.id === selectedId());
-      setSelectedId(list[Math.max(0, Math.min(list.length - 1, (index < 0 ? 0 : index) + delta))].id);
+      const ids = view() === "activations" ? activationRows().map((row) => row.activation.id) : rows().map((row) => row.id);
+      setSelectedId(movedSelectionId(ids, selectedId(), delta));
     }
     requestRender();
   };
@@ -1026,7 +1131,9 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
     cycle: () => setFocusPanel(focus() === "tree" ? "detail" : "tree"),
     tree: () => { setView("tree"); setFocusPanel("tree"); },
     detail: () => setFocusPanel("detail"),
+    activations: () => { setView("activations"); setFocusPanel("tree"); },
     runs: () => { setRunsVersion((value) => value + 1); setView("runs"); setFocusPanel("tree"); },
+    archive: () => { if (view() === "runs") { setShowArchive((value) => !value); setSelectedRunId(undefined); requestRender(); } },
     output: () => { setDetailTab("output"); setFocusPanel("detail"); },
     prompt: () => { setDetailTab("prompt"); setFocusPanel("detail"); },
     inspect: () => { if (view() === "runs") { const id = selectedRunId(); if (id) openRun(id); } else setFocusPanel("detail"); },
@@ -1052,7 +1159,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   });
   onCleanup(disposeNavigation);
   createEffect(() => {
-    const list = rows();
+    const list = view() === "activations" ? activationRows().map((row) => ({ id: row.activation.id })) : rows();
     if (list.length && !list.some((row) => row.id === selectedId())) setSelectedId(semantic()?.activeNodeId ?? list[0].id);
   });
   createEffect(() => {
@@ -1075,17 +1182,21 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
       </box>
       <box flexDirection="row" gap={2} flexShrink={0}>
         <text fg={theme().textMuted}>RUN::{currentRun().at(-1)?.runId ? middleEllipsis(currentRun().at(-1)!.runId!, 12) : "idle"}</text>
-        <text fg={theme().textMuted}>[R] runs · [N] new · [Space] pause · [U] resume · [E] repair · [X] cancel</text>
+        <text fg={theme().textMuted}>[R] runs · [G] activations · [N] new · [Space] pause · [U] resume · [E] repair · [X] cancel</text>
       </box>
       <box flexGrow={1} minHeight={0} flexDirection="row" gap={1}>
-        <box onMouseUp={() => setFocusPanel("tree")} width="42%" flexShrink={0} border={true} borderColor={borderFor("tree")} title={view() === "runs" ? " RUNS [R] " : " SOLUTION [1] "} flexDirection="column" overflow="hidden">
+        <box onMouseUp={() => setFocusPanel("tree")} width="42%" flexShrink={0} border={true} borderColor={borderFor("tree")} title={view() === "runs" ? ` RUNS [R] :: ${showArchive() ? "ARCHIVE" : "ACTIVE"} [V] ` : view() === "activations" ? " INVOCATIONS [G] " : " SOLUTION [1] "} flexDirection="column" overflow="hidden">
           <scrollbox ref={(value) => { treeBox = value; }} flexGrow={1} minHeight={0} scrollY={true} viewportCulling={true}>
-            <Show when={view() === "runs"} fallback={
+            <Show when={view() === "runs"} fallback={view() === "activations" ? (
+              <Show when={activationRows().length} fallback={<text fg={theme().textMuted} padding={1}>No activation invocations recorded yet.</text>}>
+                <ActivationNetworkView rows={activationRows()} selectedId={selectedId()} onSelect={(id) => { setSelectedId(id); requestRender(); }} width={treeWidth} theme={theme()} />
+              </Show>
+            ) : (
               <Show when={rows().length} fallback={<text fg={theme().textMuted} padding={1}>No solution tree yet for this run. Press [R] to choose a run.</text>}>
                 <SolutionTreeView rows={rows()} selectedId={selectedId()} onSelect={(id) => { setSelectedId(id); requestRender(); }} activationTime={activationTime} width={treeWidth} theme={theme()} />
               </Show>
-            }>
-              <Show when={runItems().length} fallback={<text fg={theme().textMuted} padding={1}>No LangGraph runs found yet.</text>}>
+            )}>
+              <Show when={runItems().length} fallback={<text fg={theme().textMuted} padding={1}>{showArchive() ? "No archived LangGraph runs." : "No active LangGraph runs. Press [V] for the archive."}</text>}>
                 <RunListView items={runItems()} selectedId={selectedRunId()} onSelect={(id) => { setSelectedRunId(id); requestRender(); }} width={treeWidth} theme={theme()} />
               </Show>
             </Show>
@@ -1109,6 +1220,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
         <text fg={focus() === "tree" && view() === "tree" ? theme().primary : theme().textMuted}><b>[1] Tree</b></text>
         <text fg={focus() === "detail" ? theme().primary : theme().textMuted}><b>[2] Details</b></text>
         <text fg={view() === "runs" ? theme().primary : theme().textMuted}><b>[R] Runs</b></text>
+        <text fg={view() === "activations" ? theme().primary : theme().textMuted}><b>[G] Invocations</b></text>
         <text fg={theme().textMuted}>·</text>
         <text fg={theme().textMuted}>[Tab] pane · [Enter] open · [O/P] output/prompt · [↑↓] select · [Q] back</text>
       </box>

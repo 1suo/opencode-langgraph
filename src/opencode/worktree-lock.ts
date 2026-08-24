@@ -3,8 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
-const STALE_MS = 120_000;
-
 function lockRoot(worktree: string): string {
   const stateBase = process.env.OPENCODE_LANGGRAPH_STATE_HOME || path.join(os.homedir(), ".local", "state");
   const id = createHash("sha256").update(path.resolve(worktree)).digest("hex");
@@ -21,16 +19,45 @@ export function processAlive(pid: number): boolean {
   }
 }
 
+export function processIdentity(pid: number): string | undefined {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch { return; }
+}
+
+export function processOwnerAlive(pid: number, identity?: string): boolean {
+  if (!processAlive(pid)) return false;
+  const current = processIdentity(pid);
+  return !identity || !current || identity === current;
+}
+
 function alive(file: string): boolean {
   try {
-    const record = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number };
-    return processAlive(record.pid ?? 0) && Date.now() - fs.statSync(file).mtimeMs < STALE_MS;
+    const record = JSON.parse(fs.readFileSync(file, "utf8")) as { pid?: number; processStart?: string };
+    // A delayed heartbeat must never fence a live process. Dead PIDs are recovered immediately.
+    return processOwnerAlive(record.pid ?? 0, record.processStart);
   } catch {
     return false;
   }
 }
 
 export interface WorktreeLease { release(): void }
+
+export interface WorktreeLeaseController {
+  acquire(): Promise<void>;
+  release(): void;
+}
+
+/** One process-local lease holder per graph invocation. Resume creates a fresh controller. */
+export function worktreeLeaseController(worktree: string, signal: AbortSignal, onWait?: (position: number) => void): WorktreeLeaseController {
+  let lease: WorktreeLease | undefined;
+  let pending: Promise<WorktreeLease> | undefined;
+  return {
+    async acquire() { lease ??= await (pending ??= acquireWorktree(worktree, signal, onWait)); },
+    release() { lease?.release(); lease = undefined; },
+  };
+}
 
 export async function acquireWorktree(worktree: string, signal: AbortSignal, onWait?: (position: number) => void): Promise<WorktreeLease> {
   const root = lockRoot(worktree);
@@ -39,7 +66,8 @@ export async function acquireWorktree(worktree: string, signal: AbortSignal, onW
   fs.mkdirSync(queue, { recursive: true });
   const ticket = `${Date.now().toString().padStart(16, "0")}-${process.pid}-${randomUUID()}`;
   const ticketFile = path.join(queue, ticket);
-  fs.writeFileSync(ticketFile, JSON.stringify({ pid: process.pid, worktree: path.resolve(worktree) }), { flag: "wx" });
+  const identity = processIdentity(process.pid);
+  fs.writeFileSync(ticketFile, JSON.stringify({ pid: process.pid, processStart: identity, worktree: path.resolve(worktree) }), { flag: "wx" });
   let timer: NodeJS.Timeout | undefined = setInterval(() => { try { fs.utimesSync(ticketFile, new Date(), new Date()); } catch { /* acquired or cancelled */ } }, 30_000);
   try {
     while (true) {
@@ -53,7 +81,7 @@ export async function acquireWorktree(worktree: string, signal: AbortSignal, onW
       const position = tickets.indexOf(ticket);
       if (position === 0) {
         try {
-          fs.writeFileSync(owner, JSON.stringify({ ticket, pid: process.pid }), { flag: "wx" });
+          fs.writeFileSync(owner, JSON.stringify({ ticket, pid: process.pid, processStart: identity }), { flag: "wx" });
           fs.unlinkSync(ticketFile);
           clearInterval(timer);
           timer = setInterval(() => { try { fs.utimesSync(owner, new Date(), new Date()); } catch { /* released */ } }, 30_000);

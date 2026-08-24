@@ -8,7 +8,17 @@ import { assertValidConnector, validateConnector } from "./core/validate.js";
 
 function repo(value: string): string { return fs.realpathSync(value); }
 
-const program = new Command().name("opencode-langgraph").description("Explicit LangGraph connector for OpenCode").version("0.7.0");
+function packageVersion(): string {
+  for (const relative of ["../package.json", "../../package.json"]) {
+    try {
+      const metadata = JSON.parse(fs.readFileSync(new URL(relative, import.meta.url), "utf8")) as { name?: string; version?: string };
+      if (metadata.name === "opencode-langgraph" && metadata.version) return metadata.version;
+    } catch {}
+  }
+  throw new Error("Unable to read opencode-langgraph package metadata");
+}
+
+const program = new Command().name("opencode-langgraph").description("Explicit LangGraph connector for OpenCode").version(packageVersion());
 
 program.command("init").description(`create ${typedConfigFile}`).option("--repo <path>", "target repository", process.cwd()).action((options) => {
   process.stdout.write(`${writeConnectorConfig(repo(options.repo))}\n`);

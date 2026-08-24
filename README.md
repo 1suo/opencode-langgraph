@@ -36,11 +36,13 @@ Each OpenCode session starts with `graph:off`. Click that indicator beside the p
 - `/graph`, `F8`, or **Open latest LangGraph execution** opens the current session's viewer.
 - `/graph-help` or `F9` opens the in-TUI usage and graph-design guide.
 
-The graph viewer also provides `[N]` new run, `[Space]` pause, `[U]` resume, `[E]` repair selected region, and `[X]` cancel controls.
+The graph viewer also provides `[N]` new run, `[Space]` pause, `[U]` resume, `[E]` repair selected region, and `[X]` cancel controls. `[R]` opens active runs (`queued`, `running`, `pausing`, `paused`, and `interrupted`) first; `[V]` switches between active runs and the completed/failed/cancelled/pruned archive. `[G]` shows the exact activation invocation hierarchy from `senderActivationId`, with every invocation mapped back to its solution region and LOD.
 
 Agents manage runs through `langgraph_start`, `langgraph_inspect`, `langgraph_pause`, `langgraph_cancel`, `langgraph_prune`, and `langgraph_resume`. `langgraph_start` returns a `runId` immediately while execution continues in the background. Keep that ID, inspect it before acting, prune a wrong solution region before resuming, and do not invoke a nested OpenCode CLI process.
 
-Every agent activation runs in an OpenCode child session. The production graph stores a multi-resolution solution tree separately from its activation network. Constraints collapse candidate domains; a selected family is then refined into covering next steps until the controller computes each leaf small enough to implement. Inspectors, synthesizers, refiners, implementers, verifiers, and presenters exchange small referenced state deltas instead of replaying transcripts. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
+Every agent activation runs in an OpenCode child session. The production graph stores a multi-resolution AND/OR solution tree separately from its activation network. In state v8, inspection grounds a genuine local choice, generation forms two to seven materially distinct candidates, and a fresh counterexample challenge must accept the exact domain fingerprint before selection. A challenge may add one missing family and repeat, up to two repairs; `needs-fact` returns the region to focused inspection before rechallenge. Exceeding the repair or candidate bound blocks with the unresolved counterexample rather than claiming exhaustive coverage. A selected family is refined into required `partOf` AND-children and later `refines` OR-decisions, or into a certified leaf contract that names the bounded implementation scope, owns every criterion, and cites confirmed evidence. Criterion count and hierarchy depth alone never authorize implementation. Inspectors, synthesizers, refiners, implementers, verifiers, and presenters exchange small referenced state deltas instead of replaying transcripts. Graph state is scoped to the execution; graph selection, the toggle, and run history are scoped to the OpenCode session. A home-screen selection is transferred once to the session created by the first prompt. No project initialization is required.
+
+A request with independently verifiable deliverables is represented as one root AND-container with a controller-owned scope ID and one `partOf` child per material task. Each requirement and acceptance criterion has exactly one typed owner. Independent children keep separate lifecycles and verification, while explicit scope, criterion, variable, artifact, and path references carry dependencies or mutation conflicts. A cohesive objective retains the normal single-root decision flow. Completion requires a deterministic bundle audit; a blocked child does not erase verified siblings and is reported as an unresolved scope.
 
 ## Configure
 
@@ -62,6 +64,12 @@ export default defineOpenCodeLangGraph({
 All overrides are optional. `models` accepts `inherit`, `provider/model`, or a full model definition such as `commandModel({ command: "codex", args: ["exec", "--skip-git-repo-check"] })` per capability. `roleLimits` define one activation's scheduling quantum. Usage is telemetry and scheduling pressure, not a user-facing budget gate or a reason to discard state. Human interrupts are reserved for indispensable engineering decisions.
 
 Inspect has repository read/search tools but no shell. Synthesize and refine are tool-free. Implementation receives the collapsed ancestry, the certified contract, relevant constraints/evidence, and artifacts. Verification maps failures to exact regions. Malformed output fails only its activation; actual workspace changes are reconciled and retained.
+
+### Worktree and execution handoff
+
+Graph execution uses the exact locked worktree, including changes that existed before the run. It never automatically stashes, commits, resets, or discards user work. Pre-existing dirty paths remain distinct from activation changes; an overlapping planned mutation must be surfaced before implementation and resolved by an explicit, recoverable operator action.
+
+Changing a model assignment affects future runs, not an already running activation. Switching from graph execution to a headless CLI or manual process is not a checkpoint transfer: those mechanisms cannot inherit the graph's live scheduler state or safely mark its unfinished frontier complete. Inspect and pause/cancel the active run explicitly, then hand off a summary of selected candidates, confirmed evidence, artifacts, and unresolved regions. The connector does not currently synthesize that cross-mechanism handoff automatically.
 
 ### Connect an arbitrary graph
 
@@ -142,7 +150,7 @@ For optional anti-overengineering guidance, add `@dietrichgebert/ponytail` once 
 
 Use LangGraph `interrupt()` for human input instead of enabling OpenCode's `question` tool inside child agents. The next root user message automatically resumes the paused run. The built-in graph stores dependency-free, atomic per-thread checkpoints on disk; custom graphs can provide any persistent LangGraph checkpointer. Checkpoints and run metadata are plugin-private persistence: the connector resolves the current session's run internally, and agents must never read those files.
 
-The F8 viewer opens on the live solution LOD tree. The region pane shows its candidate domain, elimination reasons, conditional children, constraints, evidence, activations, and artifacts. Press `G` for the distinct activation/message network; output, effective prompt, and raw state remain diagnostic. Navigation hints live in panel headers.
+The F8 viewer opens on the live solution LOD tree. The region pane shows its candidate domain, v8 domain phase/operation/fingerprint/CEGAR round when present, elimination reasons, conditional children, constraints, evidence, activations, and artifacts. Press `G` for the distinct activation invocation network; output and effective prompt remain diagnostic. Navigation hints live in panel headers.
 
 Graph-owned start, resume, result, and failure messages use a hidden one-step presenter with every tool disabled. The normal root build agent never executes those lifecycle messages.
 

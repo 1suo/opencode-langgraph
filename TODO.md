@@ -17,9 +17,9 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
   every execution and resume, with fencing if multiple processes can run.
 - [ ] Record mutation phases and workspace fingerprints so a crash after edits
   but before checkpoint commit is detectable and safely recoverable.
-- [ ] Detect stale `running` runs after owner crashes and provide an explicit
+- [x] Detect stale `running` runs after owner crashes and provide an explicit
   recovery path.
-- [ ] Make stored-run writes atomic and validate run IDs before using them in
+- [x] Make stored-run writes atomic and validate run IDs before using them in
   filesystem paths.
 - [ ] Add concurrency protection or compare-and-swap semantics to checkpoint
   updates for the same run.
@@ -61,7 +61,7 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
 - [ ] Add run-level limits for activations, elapsed time, cost, retries, and
   reopen cycles; report a semantic blocked result before LangGraph's recursion
   limit is reached.
-- [ ] Resume failed graphs through an explicit prune/retry policy.
+- [x] Resume failed graphs through an explicit prune/retry policy.
 
 ## 4. Role and verification contracts
 
@@ -76,6 +76,15 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
 - [x] Project only currently legal downstream request forms and document that
   bounded catalog in the specification.
 - [ ] Preserve usage and child-session diagnostics when an activation throws.
+- [x] Require measured workspace-change artifacts for change delivery, with an
+  explicit inspected-and-verified already-satisfied exception; reject answer-only
+  completion while repository mutation criteria remain.
+- [x] Require execution evidence for intended/measured files, focused tests, full
+  checks, and TODO disposition where applicable; prose-only inventories fail.
+- [x] Make completion evidence explicitly cover implementation, direct testing,
+  correctness review, and release gating before checkbox completion.
+- [x] Store typed review findings with severity, files, regression criterion, and
+  evidence; high findings block completion and therefore commit/release.
 
 ## 5. Context and scheduling
 
@@ -88,12 +97,18 @@ techniques such as singleton collapse and minimum-remaining-values scheduling.
 - [ ] Resolve every accepted context-reference type into actual projected data.
 - [x] Allow independent read-only activations to run concurrently while
   retaining one fenced mutation lane per worktree.
+- [x] Keep implementation batches scope-sized and sequential with typed,
+  non-overlapping scope ownership; serialize shared mutation resources while
+  allowing independent read-only work to overlap.
+- [x] Test concurrency through observed overlap and barriers rather than
+  incidental sibling event order; deterministic merge order remains a separate
+  controller invariant.
 
 ## 6. Tests and release evidence
 
 - [x] Test propagation order independence and idempotence with generated
   networks.
-- [ ] Test valid, cyclic, cross-region, and impossible requirements; symmetric
+- [x] Test valid, cyclic, cross-region, and impossible requirements; symmetric
   exclusion; equivalence; and every retained constraint kind.
 - [ ] Test conditional-child retraction and updates, plus referential integrity
   after reopening.
@@ -200,16 +215,16 @@ observed failure and the fix direction.
   (r15–r18) each covered domain-control state+v8, the bounded synthesis loop,
   acceptance gates+tiers, recycling, and observability. Integration region
   r20 had to reconcile collisions reactively ("cross-piece conflicts resolved…
-  as a unit"). Fix: before refining, give the refiner the sibling-child
-  objective list and require it to either reuse an existing cousin scope or
-  justify novelty; add a merge-time check that flags two leaf objectives with
-  high slug/proposition overlap under different parents.
-- [ ] **Constraint-kind validation hole.** A constraint with `kind:
+  as a unit"). Fix: assign explicit controller-owned scope IDs during
+  decomposition and reuse or reject duplicate ownership by typed identity.
+  Project only explicitly referenced cousin scopes; do not infer coupling from
+  slug or proposition similarity.
+- [x] **Constraint-kind validation hole.** A constraint with `kind:
   "acceptance"` entered state (c25) — not a member of `ConstraintKind`.
   Propagation silently ignores unknown kinds, so it was inert but polluted.
   Fix: enforce the enum at mergeSolutionDelta and reject unknown kinds with
   teaching text.
-- [ ] **Duplicate excludes survived dedup.** c1/c2 are identical
+- [x] **Duplicate excludes survived dedup.** c1/c2 are identical
   subject/target/kind pairs differing only in a "(supplied relationship c1)"
   reason suffix. The pair-canonicalization dedup should have merged them;
   investigate why the second authoring path bypassed the existing-match scan
@@ -242,7 +257,7 @@ observed failure and the fix direction.
   implement/verify never started. Consider a scheduler preference: once a
   region has sat superposed past K scheduling passes, force a
   select-or-request-fact decision instead of forming another frontier.
-- [ ] **Scratch files in repo root.** `dbg-bd.tmp.ts` / `dbg-buildDirect.tmp.ts`
+- [x] **Scratch files in repo root.** `dbg-bd.tmp.ts` / `dbg-buildDirect.tmp.ts`
   were left by offline debugging and even surfaced as cleanup work inside the
   run's own decomposition (r20). Delete and keep temp debug scripts outside
   the repository.
@@ -253,14 +268,14 @@ observed failure and the fix direction.
 - [ ] Unify initial execution and checkpoint-resume lifecycle handling in the
   server.
 - [ ] Reuse one stored-run scanning/indexing implementation.
-- [ ] Fix the README's nonexistent `defaultDurableCheckpointer` API example and
-  compile documentation examples in CI.
-- [ ] Derive the CLI version from package metadata instead of reporting `0.7.0`.
-- [ ] Declare directly imported packages as direct dependencies.
-- [ ] Add and ship the MIT `LICENSE` file.
-- [ ] Suppress expected Git stderr in non-Git test workspaces.
-- [ ] Delete the ~30 packed `neolit-*.tgz` tarballs from the repository root.
-- [ ] Remove the empty leftover `src/core/progressive-lod/` directory.
+- [ ] Compile README API examples in CI (`defaultDurableCheckpointer` is now a
+  real exported API).
+- [x] Derive the CLI version from package metadata instead of reporting `0.7.0`.
+- [x] Declare directly imported packages as direct dependencies.
+- [x] Add and ship the MIT `LICENSE` file.
+- [x] Suppress expected Git stderr in non-Git test workspaces.
+- [x] Delete the ~30 packed `neolit-*.tgz` tarballs from the repository root.
+- [x] Remove the empty leftover `src/core/progressive-lod/` directory.
 - [ ] Render the exact agent invocation hierarchy and the LOD regions it
   produced.
 
@@ -268,18 +283,23 @@ observed failure and the fix direction.
 
 - [ ] Record activations, retries, blocked reasons, reopen count, candidate and
   region counts, projected context size, elapsed time, and cost per run.
-- [ ] Consider a general CSP/SAT solver only if real runs show many simultaneous
-  domains, frequent precise cross-region hard constraints, and reopen churn
-  caused by local greedy choices before mutation. Note: the constraint kernel is
-  now tree-restricted by design (shared decision variables + acyclic primal graph,
-  union-find enforced); off-tree/cyclic constraints are rejected at validation,
-  which keeps propagation sound and bounds coupling. A general solver stays a
-  non-goal unless that invariant is deliberately revisited.
-- [ ] Consider learned activation ranking only after deterministic scheduling
-  has a measured quality bottleneck; never delegate leases, permissions,
-  completion, or verification acceptance to learned control.
+**Disposition: General CSP/SAT solver.** Consider one only if real runs show
+many simultaneous domains, frequent precise cross-region hard constraints, and
+reopen churn caused by local greedy choices before mutation. The constraint
+kernel is tree-restricted by design (shared decision variables + acyclic primal
+graph, union-find enforced); off-tree/cyclic constraints are rejected at
+validation, which keeps propagation sound and bounds coupling. A general solver
+is a non-goal unless that invariant is deliberately revisited.
+
+**Disposition: Learned activation ranking.** Consider it only after
+deterministic scheduling has a measured quality bottleneck; never delegate
+leases, permissions, completion, or verification acceptance to learned control.
 
 ## 9. Operational feedback and GitHub issues
+
+- [x] Persist failed child-session recovery context on the same activation and
+  boundedly continue/fork it after API loss; fresh challenge sessions remain
+  independent and transcripts never become workflow state.
 
 ### Runtime reliability — feedback item 1 / GitHub #11
 
@@ -326,22 +346,23 @@ observed failure and the fix direction.
   synthesis/refinement output unless the user requested estimates.
 - [ ] Replace the `MAX_LOD` actionability fallback with a certified bounded leaf
   contract; depth is telemetry, not proof that work is implementable.
-- [ ] Capture a real schema-v6 mutation run confirming that a coding request
+- [ ] Capture a real current-schema mutation run confirming that a coding request
   reaches implement/verify rather than terminating as fact recording (#10).
 - [ ] Add adversarial tests where a model tries to hide required work in omitted
   or falsely optional children, and where it returns estimates instead of work.
 
 ### Live scope enforcement — GitHub #5
 
-- [ ] Implement deterministic in-flight scope monitoring before adding another
-  LLM role: compare tool calls and changed paths with the active region, flag
-  unrelated reads/edits, and abort mutations outside the permitted worktree or
-  certified scope.
-- [ ] Emit scope-monitor events in the graph view with the triggering tool/path
-  and decision (`on-track`, `steer`, or `abort`).
-- [ ] Evaluate an optional cheap LLM reviewer only after a concrete deterministic
-  anomaly; do not add unconditional per-step overseer calls that multiply model
-  degeneration, latency, and cost.
+- [ ] **Blocked: missing pre-side-effect tool hook.** Deterministic in-flight
+  scope monitoring cannot compare and stop tool calls before mutation until the
+  platform exposes a pre-side-effect hook with the active tool/path and scope.
+- [ ] **Blocked: missing pre-side-effect tool hook.** Scope-monitor graph events
+  (`on-track`, `steer`, or `abort`) cannot truthfully represent pre-tool decisions
+  until that hook exists.
+
+**Disposition: Optional LLM reviewer.** Evaluate one only after a concrete
+deterministic anomaly; do not add unconditional per-step overseer calls that
+multiply model degeneration, latency, and cost.
 
 ### Scheduling and ceremony — feedback items 2 and 5
 
@@ -354,6 +375,35 @@ observed failure and the fix direction.
   only the conflicting regions; retain parallel inspection/evaluation elsewhere.
 - [ ] Record time spent in queueing, ceremony roles, retries, implementation, and
   verification so batching/fast-path decisions are evidence-driven.
+
+#### Multi-task runs
+
+- [x] Treat every aligned requested deliverable as a required root `partOf`
+  scope at run framing; permit only explicit conflicting, external, or speculative
+  dispositions, never an OR choice over a subset of requested work.
+
+- [ ] Frame a request containing independently verifiable deliverables as a root
+  AND-container with one controller-assigned scope ID and `partOf` child per
+  material task. Keep inseparable requirements together and preserve the normal
+  single-root flow for one cohesive objective.
+- [ ] Map every material root requirement and acceptance criterion to exactly one
+  owned task scope before execution. Reject duplicate scope ownership by typed
+  identity rather than objective, slug, or proposition similarity.
+- [ ] Represent semantic dependencies, inherited shared decisions, and mutation
+  conflicts separately. Cross-task relationships must cite stable scope,
+  criterion, variable, artifact, or path references instead of inferred prose
+  similarity.
+- [ ] Run each task child through its own lifecycle: use focused
+  `inspect -> implement -> verify` for a supplied or mechanically fixed
+  correction, and the bounded domain/challenge/selection cycle only when the
+  child contains a genuine solution choice.
+- [ ] Schedule independent read-only work concurrently. Retain one fenced
+  mutation lane by default, then serialize only certified overlapping mutation
+  resources if disjoint-path parallel mutation is introduced.
+- [ ] Add a final deterministic bundle-coverage audit: every required scope is
+  represented, every dependency is satisfied, and every live task child is
+  verified. Preserve completed independent children when another child blocks,
+  and report a partial result with the exact unresolved scopes and criteria.
 
 ### Repository and UI operations — feedback items 4 and 6 / GitHub #4
 
@@ -372,15 +422,26 @@ observed failure and the fix direction.
 
 ### Issue disposition and regressions
 
-- [ ] Close GitHub #3 as superseded, explaining that the built-in graph now runs
-  autonomously from inspection through verification and no longer has the old
-  mandatory plan-confirmation interrupt.
-- [ ] Close GitHub #10 only after the recorded real mutation run above succeeds.
-- [ ] Keep GitHub #11 and #13 open until their runtime and convergence tests pass.
-- [ ] Keep GitHub #6 open until root coverage and certified terminality land.
-- [ ] Revise GitHub #5 toward deterministic anomaly-triggered enforcement rather
-  than unconditional LLM supervision.
-- [ ] Keep GitHub #4 open until active/archive filtering ships.
+**External disposition: GitHub #3.** Close as superseded, explaining that the
+built-in graph now runs autonomously from inspection through verification and no
+longer has the old mandatory plan-confirmation interrupt. This repository audit
+did not perform the external GitHub operation.
+
+**External disposition: GitHub #10.** Keep open until the recorded real mutation
+run above succeeds; no external GitHub operation was performed.
+
+**External disposition: GitHub #11 and #13.** Keep open until their runtime and
+convergence tests pass; no external GitHub operation was performed.
+
+**External disposition: GitHub #6.** Keep open until root coverage and certified
+terminality land; no external GitHub operation was performed.
+
+**External disposition: GitHub #5.** Revise toward deterministic
+anomaly-triggered enforcement rather than unconditional LLM supervision; no
+external GitHub operation was performed.
+
+**External disposition: GitHub #4.** Keep open until active/archive filtering
+ships; no external GitHub operation was performed.
 - [x] Keep the closed GitHub #2 long-prompt graph-view scenario covered by TUI
   layout, navigation, and prompt rendering regression tests.
 
@@ -478,4 +539,4 @@ observed failure and the fix direction.
   constraints.
 - [x] Render a readable solution plan with distinctive LOD and status elements.
 - [x] Render semantic graph state instead of the raw static LangGraph topology.
-- [ ] Event for graph finish/fail for agent to act on
+- [x] Event for graph finish/fail for agent to act on

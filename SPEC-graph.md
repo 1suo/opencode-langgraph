@@ -9,7 +9,7 @@ The package is a generic OpenCode/LangGraph connector. Its built-in graph turns 
 Two structures are orthogonal:
 
 1. The solution hierarchy represents the same problem at conditional levels of detail. WFC-style constraint propagation collapses its candidate domains.
-2. The agent activation network is sparse message passing. Agents inspect, synthesize, implement, verify, or present exact state deltas.
+2. The agent activation network is sparse message passing. Agents inspect, synthesize, refine, implement, verify, or present exact state deltas.
 
 Agent routing is not WFC, and hierarchy depth is not automatically a LOD.
 
@@ -25,16 +25,18 @@ Agent routing is not WFC, and hierarchy depth is not automatically a LOD.
 8. Equivalent surviving candidates may be delegated as an implementer-local choice when no unresolved external constraint distinguishes them.
 9. A contradiction reopens only the nearest implicated region. Unrelated collapsed regions and all observed artifacts survive.
 10. Selection never implies actionability. Only successful refinement can create implementable leaves.
+11. A genuine decision domain contains two to seven materially distinct candidates and must pass a fresh, fingerprint-bound challenge before selection or singleton collapse.
+12. Challenge acceptance is bounded evidence that no concrete material omission was found, not a proof of semantic exhaustiveness.
 
 ## Terminality and refinement
 
-Actionability is computed by the controller, never set directly by a model. Refinement splits multi-criterion work into children that collectively cover the parent's acceptance criteria, with every name unique and every child carrying a concrete criterion. A single-criterion region is the current bounded leaf rule; `MAX_LOD` remains a termination guard. A new synthesis choice drops the previous refinement's subtree. Reopening does the same and returns an underspecified region to inspection.
+Actionability is computed by the controller, never set directly by a model. Refinement returns exactly one certified leaf contract or one or more children, never both or neither. Children have unique names, exclusive criterion ownership, and collectively cover every parent criterion. A certified leaf carries every stable criterion ID, a bounded implementation scope that is neither an estimate nor deferred work, and only confirmed evidence references. Implementation additionally requires one selected candidate and acceptance of the exact current domain fingerprint; criterion count and LOD depth are not actionability rules. A new synthesis choice drops the previous refinement's subtree. Reopening does the same and returns an underspecified region to inspection.
 
 ## Solution state
 
-Checkpoints are versioned; schema 7 adds shared decision variables, candidate stances, and constraint provenance; it separates authored candidate dispositions from recomputed solver state and removes durable lease state. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Interrupted runs recorded under older schemas are rejected.
+Checkpoints are versioned. Schema 8 retains shared decision variables, candidate stances, constraint provenance, authored/derived separation, and process-local leases, and adds activation-local synthesis operations plus each region's domain phase and fingerprint, accepted fingerprint, CEGAR repair round, and challenge verdict. `originalTask` is immutable and the conversation frame is linked to the originating OpenCode message. Active checkpoints under older schemas are rejected with a precise start-fresh message.
 
-Hard constraint kinds are `requires`, `excludes`, and `equivalent`; evidence relations are `supports` and `refutes`. Acceptance criteria and permissions are policy fields rather than inert edges. Endpoints are validated by kind. Controller code recomputes derived domains to a fixed point, makes exclusion symmetric, detects impossible requirements and empty domains, and performs forced collapse.
+Hard constraint kinds are `requires`, `excludes`, and `equivalent`; evidence relations are `supports` and `refutes`. Acceptance criteria and permissions are policy fields rather than inert edges. Endpoints are validated by kind. Controller code recomputes derived domains to a fixed point, makes exclusion symmetric, and detects impossible requirements and empty domains. Forced selection and singleton collapse remain disabled until the current domain fingerprint is accepted.
 
 ## Activation network
 
@@ -51,7 +53,7 @@ Each activation sees only the downstream request forms currently legal for that 
 The built-in capabilities are:
 
 - `inspect`: gather only facts needed to form or distinguish the current alternatives;
-- `synthesize`: form complete candidates, record constraints, and select one without tools; it never declares work ready;
+- `synthesize`: perform exactly one of `generate-domain`, `challenge-domain`, or `select-candidate` without tools; it never generates and approves its own domain or declares work ready;
 - `refine`: split the chosen approach into covering next-step children, each with its own criterion;
 - `implement`: execute one computed-implementable change region;
 - `verify`: check artifacts against exact criteria and target failures to regions;
@@ -61,13 +63,21 @@ Controller scheduling follows the region lifecycle:
 
 ```text
 unformed → inspect
-superposed → synthesize
+superposed → generate domain → challenge domain → select candidate
 selected/unrefined → refine
 refined with children → solve children
-single explicit criterion or depth floor (actionable) → implement
+certified leaf + accepted selection (actionable) → implement
 ```
 
 All capability contracts live in `src/core/solution-lod/roles.ts`. Graph nodes compile dependency-scoped semantic projections into role-native prompt sections; configuration chooses models and scheduling quanta.
+
+After inspection, generation returns two to seven mutually exclusive material families and cannot select or eliminate. A fresh challenge returns exactly one fingerprint-bound acceptance, one concrete missing family, or one decision-relevant fact request. At most one counterexample is merged per challenge and the enlarged domain is challenged again; `needs-fact` schedules focused inspection, then recomputes and rechallenges the domain. At most two counterexample repairs and seven total candidates are allowed. Selection compares every viable candidate only after acceptance, using user preference, confirmed repository compatibility, smaller scope/novelty, then lower irreversible risk as lexicographic soft tiers. A newly discovered hard constraint invalidates acceptance and returns to challenge instead of landing with selection. Preferences never become hard constraints. Bounds and repeated no-progress ties terminate as explicit blocks.
+
+## Multi-task AND roots
+
+One cohesive objective uses the normal root region. A request containing independently verifiable deliverables uses a root AND-container with one controller-assigned scope identity and one `partOf` child per material task. Each root requirement and acceptance criterion has exactly one typed owner; dependencies, inherited choices, and mutation conflicts use stable scope, criterion, variable, artifact, or path references rather than prose similarity.
+
+Each child has its own lifecycle and currently follows normal inspection plus the bounded domain/challenge/selection cycle whenever a decision domain is required. Independent reads may run concurrently, while mutation remains fenced. Terminality requires a deterministic bundle-coverage audit. Verified children survive when another child blocks, and the result identifies every unresolved scope and criterion. A focused inspect/implement/verify fast path for already-fixed corrections is not implemented yet.
 
 ## Context and failure semantics
 
@@ -88,6 +98,10 @@ These are confirmed properties of the current projection code, not aspirational:
 Candidate-domain relationships remain local to the current region; evidence and artifacts are sparse by explicit reference.
 
 Workspace status and file content hashes are captured around mutating activations. Actual changes are recorded even when an agent's final output is malformed or interrupted. Pre-existing dirty files remain distinct from files changed during the activation.
+
+The locked worktree is authoritative. The connector preserves pre-existing changes and never automatically stashes, commits, resets, or discards them. A planned mutation that overlaps a dirty path must be reported before implementation and resolved only through an explicit recoverable operator action.
+
+Changing to a headless or manual execution mechanism is not a graph checkpoint handoff. An active run must be inspected and explicitly paused or cancelled; its current choices, evidence, artifacts, and unfinished frontier must be summarized for the receiving mechanism. The connector cannot currently transfer scheduler ownership or synthesize this handoff automatically, so a mechanism switch must not imply graph completion.
 
 Turns, tokens, cache reads, and cost are telemetry and per-call scheduling quanta. They do not cause human budget interruptions or discard solution state. Human input is reserved for genuine decisions or authority that repository inspection cannot supply.
 
@@ -124,7 +138,8 @@ F8 opens the semantic run view:
 
 - the primary pane is the solution LOD tree with relation, LOD, status, viable-domain count, contributing capabilities, and selection;
 - the region pane shows candidates, stances, elimination reasons, constraint provenance/evidence references, evidence status/proof, activations, and artifacts;
-- `G` shows the distinct activation/message network;
+- `G` shows the exact activation invocation hierarchy derived from `senderActivationId`, mapped to each activation's solution region and LOD;
+- `R` shows active runs first and `V` toggles the terminal archive;
 - activation details render input and output by schema semantics — outcome badges (`[CHOSEN]`, `[REJECTED]`), constraint-kind badges (`[REFUTES]`, `requires`, …), refinement contracts with criterion coverage, verification verdicts, check pass/fail, file lists — each tone-mapped to theme colors; unparseable payloads fall back to raw text;
 - output, effective prompt, and raw state remain diagnostic views.
 

@@ -98,9 +98,14 @@ export interface ConnectorPresetConfig {
 export type SolutionPresetRole = "inspect" | "synthesize" | "refine" | "implement" | "verify" | "present";
 export type SolutionPresetModel = OpenCodeModel["model"] | ModelDefinition;
 export type SolutionRoleModelAssignments = Partial<Record<SolutionPresetRole, ModelDefinition>>;
+export interface AgentRuntimeTimeouts {
+  inactivityTimeoutMs?: number;
+  maxRuntimeMs?: number;
+}
 export interface SolutionLodPresetOptions {
   models?: Partial<Record<SolutionPresetRole, SolutionPresetModel>>;
   roleLimits?: Partial<Record<SolutionPresetRole, AgentCallLimits>>;
+  roleTimeouts?: Partial<Record<SolutionPresetRole, AgentRuntimeTimeouts>>;
   maxParallelActivations?: number;
   maxActivations?: number;
 }
@@ -129,6 +134,17 @@ export interface AgentCallResult {
   tools?: AgentToolTrace[];
   usage?: AgentUsage;
   budgetStop?: AgentBudgetStop;
+  retryTrace?: AgentRetryTrace[];
+}
+
+export interface AgentRetryTrace {
+  kind: "startup" | "transport" | "inactivity" | "schema" | "semantic";
+  message: string;
+  action: "fresh" | "continue" | "fork" | "none";
+  sessionId?: string;
+  usage?: AgentUsage;
+  tools?: AgentToolTrace[];
+  progressText?: string;
 }
 
 export interface AgentToolTrace {
@@ -152,16 +168,25 @@ export interface GraphProgressNode {
   evidence?: number;
   confidence?: number;
   agents?: string[];
+  operation?: string;
+  domainPhase?: string;
+  domainFingerprint?: string | null;
+  acceptedFingerprint?: string | null;
+  cegarRound?: number;
+  challengeVerdict?: string | null;
+  viable?: number;
+  selectedCandidateId?: string;
+  blockedReason?: string;
 }
 
 export interface SolutionSemanticSnapshot {
   kind: "solution-lod-v2";
   revision: number;
-  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[] }>;
+  regions: Array<{ id: string; key: string; parentId?: string; edge: "root" | "refines" | "partOf"; lod: number; objective: string; status: string; viable: number; total: number; selectedCandidateIds: string[]; candidateIds: string[]; constraintIds: string[]; evidenceIds: string[]; activationIds: string[]; artifactIds: string[]; scopeId?: string; domainPhase?: string; domainFingerprint?: string | null; acceptedFingerprint?: string | null; cegarRound?: number; challengeVerdict?: string | null; blockedReason?: string }>;
   candidates: Array<{ id: string; regionId: string; proposition: string; status: string; eliminationReasons: string[]; evidenceIds: string[]; stances?: Array<{ variableId: string; relation: string; valueLabel: string }> }>;
   constraints: Array<{ id: string; kind: string; subject: string; target: string; reason: string; sourceKind?: string; evidenceRefs?: string[] }>;
   evidence: Array<{ id: string; text: string; source: string; kind: string; status?: string; validationEvidenceRefs?: string[]; validationReason?: string }>;
-  activations: Array<{ id: string; capability: string; regionId: string; request: string; expectedDelta: string; senderActivationId?: string; status: string; error?: string }>;
+  activations: Array<{ id: string; capability: string; regionId: string; request: string; expectedDelta: string; senderActivationId?: string; status: string; error?: string; operation?: string; domainFingerprint?: string | null }>;
   artifacts: Array<{ id: string; regionId: string; kind: string; path?: string; summary: string; passed?: boolean; activationId: string }>;
 }
 
@@ -174,6 +199,7 @@ export interface GraphProgressSnapshot {
   costBudget?: number;
   summary?: string;
   usage?: AgentUsage;
+  telemetry?: import("./solution-lod/types.js").SolutionTelemetry;
   semantic?: SolutionSemanticSnapshot;
   nodes: GraphProgressNode[];
 }
