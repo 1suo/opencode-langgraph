@@ -39,7 +39,7 @@ function mockV8Structured(title: string, prompt = ""): unknown {
   if (title.includes("generate-domain:")) return { operation: "generate-domain", evidence: [], variables: [], constraints: [], candidates: [{ key: "direct", proposition: "Update target", evidenceRefs: [], stances: [] }, { key: "adapter", proposition: "Update target through an adapter", evidenceRefs: [], stances: [] }] };
   if (title.includes("challenge-domain:")) return { operation: "challenge-domain", verdict: "accept", domainFingerprint: fingerprint, viableCandidateIds: candidateIds };
   if (title.includes("select-candidate:")) return { operation: "select-candidate", domainFingerprint: fingerprint, basis: "lexicographic", selectedCandidateId: `${regionId}:direct`, hardConstraints: [], comparisons: candidateIds.map((candidateId) => ({ candidateId, userPreference: "neutral", repositoryCompatibility: "neutral", changeScope: candidateId === `${regionId}:direct` ? "preferred" : "disfavored", irreversibleRisk: "neutral", evidenceRefs: [] })) };
-  if (title.includes("refine:")) return { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded test change", evidenceRefs: [] }, activations: [] };
+  if (title.includes("refine:")) return { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded test change", criterionIds: ["criterion:scope:r1:0"], evidenceRefs: [], mutationResources: ["src/test.ts"], checks: [{ criterionId: "criterion:scope:r1:0", commandOrObservation: "run focused test" }] }, activations: [] };
   return undefined;
 }
 
@@ -486,9 +486,10 @@ describe("solution LOD reducer", () => {
     return current;
   };
   const certifyLeaf = (network: SolutionNetwork, regionId = "r1") => {
+    const region = network.regions.find((item) => item.id === regionId)!;
     const activation: Activation = { id: `a${network.nextActivationId++}`, capability: "refine", regionId, request: "certify", expectedDelta: `certify:${regionId}`, contextRefs: [regionId], status: "running", basisRevision: network.revision };
     network.activations.push(activation); network.regions.find((item) => item.id === regionId)!.activationIds.push(activation.id);
-    return mergeRefinementOutput(network, activation.id, { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded test change", evidenceRefs: [] }, activations: [] });
+    return mergeRefinementOutput(network, activation.id, { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded test change", criterionIds: [...region.criterionIds], evidenceRefs: [], mutationResources: ["src/test.ts"], checks: region.criterionIds.map((criterionId) => ({ criterionId, commandOrObservation: "run focused test" })) }, activations: [] });
   };
   const pushActivation = (network: SolutionLodState["network"], capability: "synthesize" | "refine" | "inspect", regionId: string, id: string) => {
     network.activations.push({ id, capability, regionId, request: capability, expectedDelta: `${capability}:${regionId}:${id}`, contextRefs: [regionId], status: "running", basisRevision: network.revision });
@@ -1677,7 +1678,7 @@ describe("solution LOD graph", () => {
     if (input.node.startsWith("select-candidate:")) return { text: "", structured: { operation: "select-candidate", domainFingerprint: region?.domainFingerprint, basis: "lexicographic", selectedCandidateId: `${regionId}:${key}`, hardConstraints: [], comparisons: (region?.candidateIds ?? []).map((candidateId) => ({ candidateId, userPreference: "neutral", repositoryCompatibility: "neutral", changeScope: candidateId === `${regionId}:${key}` ? "preferred" : "disfavored", irreversibleRisk: "neutral", evidenceRefs: [] })) } };
     return undefined;
   };
-  const certifiedLeaf = { text: "", structured: { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded test change", evidenceRefs: [] }, activations: [] } };
+  const certifiedLeaf = { text: "", structured: { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded test change", criterionIds: ["criterion:scope:r1:0"], evidenceRefs: [], mutationResources: ["target.txt"], checks: [{ criterionId: "criterion:scope:r1:0", commandOrObservation: "run focused test" }] }, activations: [] } };
 
   it("executes a collapsed region and verifies it without a fixed role pipeline", async () => {
     const directory = temp("solution-lod-graph-");
@@ -1795,7 +1796,10 @@ describe("solution LOD graph", () => {
       ] } };
       if (input.node === "inspect:r2") return { text: "", structured: { region: {}, evidence: [{ text: "left context", source: "left:1", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] } };
       if (input.node === "inspect:r3") return { text: "", structured: { region: {}, evidence: [{ text: "right context", source: "right:1", kind: "inference" }], candidates: [], constraints: [], select: [], activations: [] } };
-      if (input.node === "refine:r2" || input.node === "refine:r3") return certifiedLeaf;
+      if (input.node === "refine:r2" || input.node === "refine:r3") {
+        const region = input.state!.network.regions.find((item) => item.id === input.node.slice("refine:".length))!;
+        return { text: "", structured: { evidence: [], children: [], certifiedLeaf: { implementationScope: "bounded answer", criterionIds: [...region.criterionIds], evidenceRefs: [], mutationResources: [region.key], checks: region.criterionIds.map((criterionId) => ({ criterionId, commandOrObservation: "check answer" })) }, activations: [] } };
+      }
       if (input.node === "present:r2") return { text: "", structured: { answer: "left answer" } };
       if (input.node === "present:r3") return { text: "", structured: { answer: "right answer" } };
       if (input.node === "verify:r2") return { text: "", structured: { verdict: "pass", summary: "ok", findings: [], checks: [{ name: "left answered", passed: true, evidence: "left answered: left answer" }], activations: [] } };

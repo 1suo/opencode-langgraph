@@ -24,12 +24,20 @@ export interface ChildRegionDefinition {
   requirementIds?: RequirementId[];
   dependencyScopeIds?: ScopeId[];
   mutationResources?: string[];
+  unresolvedVariable?: string;
+}
+
+export interface LeafCheck {
+  criterionId: CriterionId;
+  commandOrObservation: string;
 }
 
 export interface CertifiedLeaf {
   criterionIds: CriterionId[];
   implementationScope: string;
   evidenceRefs: string[];
+  mutationResources: string[];
+  checks: LeafCheck[];
 }
 
 export interface SolutionCandidate {
@@ -390,6 +398,7 @@ const ChildRegionSchema = z.object({
   requirementIds: z.array(z.string()).optional(),
   dependencyScopeIds: z.array(z.string()).optional(),
   mutationResources: z.array(z.string()).optional(),
+  unresolvedVariable: z.string().optional().describe("Required for refines: the exact supplied allowed variable that remains unresolved in this child."),
 });
 
 const EvidenceSchema = z.object({
@@ -449,6 +458,7 @@ export const SolutionDeltaSchema = z.object({
   evidence: z.array(z.object({
     text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference"),
   })).default([]).describe("New claims used in this result. Inference always enters as an unconfirmed hypothesis. Only inspection may report repository/tool observations, which enter as confirmed evidence. Model output may not create user evidence; cite the immutable task reference instead."),
+  factIds: z.array(z.string().min(1)).default([]).describe("Existing supplied graph fact IDs relevant to this result. Reuse these instead of repeating their text and source in evidence."),
   validations: z.array(z.object({
     claimRef: z.string().min(1).describe("Existing hypothesis id being checked."),
     verdict: z.enum(["confirmed", "rejected", "unresolved"]),
@@ -505,7 +515,13 @@ export type SolutionDelta = z.infer<typeof SolutionDeltaSchema>;
 export const RefinementOutputSchema = z.object({
   evidence: SolutionDeltaSchema.shape.evidence,
   children: z.array(ChildRegionSchema).default([]).describe("Next conditional work regions that together cover every criterion."),
-  certifiedLeaf: z.object({ implementationScope: z.string().min(1), evidenceRefs: z.array(z.string()).default([]) }).strict().optional(),
+  certifiedLeaf: z.object({
+    implementationScope: z.string().min(1),
+    criterionIds: z.array(z.string().min(1)).min(1),
+    evidenceRefs: z.array(z.string()).default([]),
+    mutationResources: z.array(z.string().min(1)).default([]),
+    checks: z.array(z.object({ criterionId: z.string().min(1), commandOrObservation: z.string().min(1) }).strict()).min(1),
+  }).strict().optional(),
   activations: SolutionDeltaSchema.shape.activations,
 }).strict();
 export type RefinementOutput = z.infer<typeof RefinementOutputSchema>;

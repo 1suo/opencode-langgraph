@@ -725,6 +725,8 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
   const delta = normalizeDelta(typeof capabilityOrDelta === "string" ? maybeDelta! : capabilityOrDelta);
   const region = state.network.regions.find((item) => item.id === regionId);
   if (!region) return;
+  for (const factId of delta.factIds) if (!state.network.evidence.some((item) => item.id === factId)) throw new Error(`Unknown graph fact ID ${factId}.`);
+  if (new Set(delta.factIds).size !== delta.factIds.length) throw new Error("Graph fact IDs must be unique.");
   rejectUnrequestedDeferredWork(state, [delta.region?.objective, ...(delta.region?.acceptanceCriteria ?? []), ...(delta.taskScopes ?? []).flatMap((item) => [item.objective, ...item.acceptanceCriteria]), ...(delta.materialRequirements ?? []).map((item) => item.text), delta.certifiedVerdict?.proposition, delta.certifiedVerdict?.implementationScope, ...delta.candidates.map((item) => item.proposition)]);
   if (capability === "inspect") {
     if (delta.candidates.length || delta.constraints.length || delta.select.length || delta.variables?.length)
@@ -897,11 +899,11 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
 
 /** Direct reducer callers may omit defaulted delta arrays; Zod-normalized graph paths never do. */
 function normalizeDelta(delta: SolutionDelta): SolutionDelta {
-  return { ...delta, candidates: delta.candidates ?? [], constraints: delta.constraints ?? [], evidence: delta.evidence ?? [], validations: delta.validations ?? [], select: delta.select ?? [], activations: delta.activations ?? [], variables: delta.variables ?? [], taskScopes: delta.taskScopes ?? [], taskDispositions: delta.taskDispositions ?? [] };
+  return { ...delta, candidates: delta.candidates ?? [], constraints: delta.constraints ?? [], evidence: delta.evidence ?? [], factIds: delta.factIds ?? [], validations: delta.validations ?? [], select: delta.select ?? [], activations: delta.activations ?? [], variables: delta.variables ?? [], taskScopes: delta.taskScopes ?? [], taskDispositions: delta.taskDispositions ?? [] };
 }
 
 const synthesisDelta = (output: DomainGenerationOutput, candidateItems = output.candidates): SolutionDelta => ({
-  region: {}, evidence: output.evidence, variables: output.variables,
+  region: {}, evidence: output.evidence, factIds: [], variables: output.variables,
   candidates: candidateItems.map((item) => ({ ...item, outcome: "possible" as const, reasons: [] })),
   constraints: output.constraints, select: [], activations: [], validations: [],
 });
@@ -950,7 +952,7 @@ export function validateSynthesisOutput(state: SolutionLodState, activation: Act
       if (!["requires", "excludes", "refutes"].includes(constraint.kind)) throw new Error(`Selection hardConstraints may contain only requires, excludes, or refutes; ${constraint.kind} is not a hard elimination rule.`);
       if (!constraint.evidenceRefs.length || constraint.evidenceRefs.some((ref) => !isConfirmedEvidence(state.network, ref))) throw new Error(`Selection hard constraint ${constraint.subject} -> ${constraint.target} requires cited confirmed evidence.`);
     }
-    validateSolutionDelta(state, region.id, "synthesize", { region: {}, evidence: [], variables: [], candidates: [], constraints: output.hardConstraints, select: [], activations: [], validations: [] });
+    validateSolutionDelta(state, region.id, "synthesize", { region: {}, evidence: [], factIds: [], variables: [], candidates: [], constraints: output.hardConstraints, select: [], activations: [], validations: [] });
     return;
   }
   if (output.basis === "only-viable") {
@@ -1002,7 +1004,7 @@ export function mergeSynthesisOutput(state: SolutionLodState, activationId: stri
         return network;
       }
       const beforeIds = new Set(region.candidateIds);
-      const delta: SolutionDelta = { region: {}, evidence: [], variables: [], candidates: [{ ...output.candidate, outcome: "possible", reasons: [] }], constraints: [], select: [], activations: [], validations: [] };
+      const delta: SolutionDelta = { region: {}, evidence: [], factIds: [], variables: [], candidates: [{ ...output.candidate, outcome: "possible", reasons: [] }], constraints: [], select: [], activations: [], validations: [] };
       network = mergeSolutionDelta({ ...state, network } as SolutionLodState, activationId, delta);
       region = network.regions.find((item) => item.id === activation.regionId)!;
       const addedIds = region.candidateIds.filter((id) => !beforeIds.has(id));
@@ -1015,7 +1017,7 @@ export function mergeSynthesisOutput(state: SolutionLodState, activationId: stri
     network.revision++; return propagateNetwork(network);
   }
   if (output.hardConstraints.length) {
-    const delta: SolutionDelta = { region: {}, evidence: [], variables: [], candidates: [], constraints: output.hardConstraints, select: [], activations: [], validations: [] };
+    const delta: SolutionDelta = { region: {}, evidence: [], factIds: [], variables: [], candidates: [], constraints: output.hardConstraints, select: [], activations: [], validations: [] };
     network = mergeSolutionDelta({ ...state, network } as SolutionLodState, activationId, delta);
     region = network.regions.find((item) => item.id === activation.regionId)!;
     region.acceptedFingerprint = null; region.challengeVerdict = null; region.noProgressCount = 0; region.noProgressFingerprint = null; transitionRegion(region, "challenging"); network.revision++;
@@ -1087,6 +1089,7 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
   }
   const resolvedAnswer = delta.region?.delivery === "answer" ? delta.resolvedAnswer : undefined;
   const localEvidence = mergeEvidence(network, region, delta.evidence);
+  for (const factId of delta.factIds) region.evidenceIds = [...new Set([...region.evidenceIds, factId])];
   if (activation.capability === "inspect" && region.edge === "root" && delta.taskDispositions?.length) {
     network.taskDispositions = delta.taskDispositions.map((item) => ({ ...item, key: slug(item.key), request: normalize(item.request), reason: normalize(item.reason), evidenceRefs: [...new Set(item.evidenceRefs.map((ref) => localEvidence.get(ref) ?? ref))].sort() }));
     changed = true;
@@ -1121,7 +1124,7 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     const candidate: SolutionCandidate = { id, regionId: region.id, key: "certified-verdict", proposition: normalize(delta.certifiedVerdict.proposition), status: "selected", declaredStatus: "selected", evidenceIds, declaredEvidenceIds: evidenceIds, eliminationReasons: [], declaredEliminationReasons: [], stances: [], createdRevision: network.revision + 1, sourceActivationId: activation.id };
     network.candidates = network.candidates.filter((item) => item.regionId !== region.id).concat(candidate);
     region.candidateIds = [id]; region.selectedCandidateIds = [id]; region.mutationResources = [...new Set(delta.certifiedVerdict.mutationResources)].sort();
-    region.certifiedLeaf = { criterionIds: [...region.criterionIds], implementationScope: normalize(delta.certifiedVerdict.implementationScope), evidenceRefs: evidenceIds };
+    region.certifiedLeaf = { criterionIds: [...region.criterionIds], implementationScope: normalize(delta.certifiedVerdict.implementationScope), evidenceRefs: evidenceIds, mutationResources: [...region.mutationResources], checks: region.criterionIds.map((criterionId) => ({ criterionId, commandOrObservation: "Verify the criterion against the measured repository change." })) };
     region.domainFingerprint = domainFingerprint(network, region.id); region.acceptedFingerprint = region.domainFingerprint; region.challengeVerdict = "accept";
     transitionRegion(region, "selected", undefined, "actionable");
     changed = true;
@@ -1236,6 +1239,11 @@ export function validateRefinementOutput(state: SolutionLodState, regionId: stri
   if (Boolean(output.certifiedLeaf) === Boolean(output.children.length)) throw new Error("Refinement must return either one certified leaf contract or one or more children, never both or neither.");
   if (output.certifiedLeaf) {
     if (/\b(?:estimate|later|defer(?:red)?|follow-up)\b/i.test(output.certifiedLeaf.implementationScope)) throw new Error("A certified leaf must name bounded implementable work, not an estimate or deferred follow-up.");
+    if (JSON.stringify([...new Set(output.certifiedLeaf.criterionIds)].sort()) !== JSON.stringify([...region.criterionIds].sort())) throw new Error("A certified leaf must own every exact current criterion ID and no others.");
+    const checkIds = output.certifiedLeaf.checks.map((check) => check.criterionId);
+    if (new Set(checkIds).size !== checkIds.length || JSON.stringify([...checkIds].sort()) !== JSON.stringify([...region.criterionIds].sort())) throw new Error("A certified leaf requires exactly one executable check witness per criterion ID.");
+    if (region.delivery === "change" && !output.certifiedLeaf.mutationResources.length) throw new Error("A change-delivery certified leaf requires at least one bounded mutation resource path.");
+    if (output.certifiedLeaf.mutationResources.some((resource) => !normalize(resource))) throw new Error("A certified leaf cannot contain an empty mutation resource path.");
     for (const ref of output.certifiedLeaf.evidenceRefs) if (!knownRef(state.network, ref) || !isConfirmedEvidence(state.network, ref)) throw new Error(`Certified leaf cites unresolved or stale evidence reference ${ref}.`);
     return;
   }
@@ -1261,12 +1269,31 @@ export function validateRefinementOutput(state: SolutionLodState, regionId: stri
     }
     for (const dependency of child.dependencyScopeIds ?? []) if (!knownScopes.has(dependency as ScopeId) && !proposedScopes.has(dependency)) throw new Error(`Child "${child.key}" cites unknown semantic dependency ${dependency}.`);
     if (child.mutationResources?.some((resource) => !normalize(resource))) throw new Error(`Child "${child.key}" has an empty mutation resource path.`);
+    const boundary = hash({ delivery: child.delivery ?? region.delivery, objective: propositionSignature(child.objective), criteria: child.acceptanceCriteria.map(propositionSignature).sort(), variables: child.allowedVariables.map(slug).sort(), requirements: [...(child.requirementIds ?? [])].sort(), resources: [...(child.mutationResources ?? [])].map(normalize).sort() });
+    for (let ancestor: SolutionRegion | undefined = region; ancestor; ancestor = ancestor.parentId ? state.network.regions.find((item) => item.id === ancestor!.parentId) : undefined) {
+      const ancestorBoundary = hash({ delivery: ancestor.delivery, objective: propositionSignature(ancestor.objective), criteria: ancestor.acceptanceCriteria.map(propositionSignature).sort(), variables: ancestor.allowedVariables.map(slug).sort(), requirements: [...(ancestor.requirementIds ?? [])].sort(), resources: [...(ancestor.mutationResources ?? [])].map(normalize).sort() });
+      if (boundary === ancestorBoundary) throw new Error(`Child "${child.key}" repeats ancestor boundary ${ancestor.id}. Return certifiedLeaf for atomic work or identify a genuinely narrower decision/deliverable boundary.`);
+    }
   }
   const missing = Array.from({ length: criteriaCount }, (_, index) => index).filter((index) => !covered.has(index));
   if (missing.length)
     throw new Error(`The children do not collectively cover the parent success criteria: no child addresses criterion position(s) ${missing.join(", ")}. Add or extend a child so every criterion is covered.`);
   const invalidRequirements = [...requirementOwners].filter(([, count]) => count !== 1);
   if (invalidRequirements.length) throw new Error(`Every material requirement must have exactly one child owner: ${invalidRequirements.map(([id, count]) => `${id}=${count}`).join(", ")}.`);
+  for (const child of output.children) {
+    if (child.edge === "refines") {
+      const unresolved = slug(child.unresolvedVariable ?? "");
+      if (!unresolved || !region.allowedVariables.some((variable) => slug(variable) === unresolved)) throw new Error(`Refines child "${child.key}" must name one exact unresolved allowed variable from its parent boundary.`);
+      const variable = state.network.variables.find((item) => item.name === unresolved && !item.historical);
+      if (variable) {
+        const selectedLabels = new Set(state.network.candidates.filter((candidate) => region.selectedCandidateIds.includes(candidate.id)).flatMap((candidate) => candidate.stances.filter((stance) => stance.variableId === variable.id && stance.relation === "requires").map((stance) => slug(stance.valueLabel))));
+        if (selectedLabels.size === 1) throw new Error(`Refines child "${child.key}" cites already-settled variable ${child.unresolvedVariable}.`);
+      }
+    } else {
+      if (child.unresolvedVariable) throw new Error(`partOf child "${child.key}" cannot claim an unresolved decision variable.`);
+      if (!region.requirementIds?.length && output.children.length < 2) throw new Error(`A lone partOf child does not partition independent work. Return certifiedLeaf for atomic work.`);
+    }
+  }
 }
 
 export function validateImplementationOutput(state: SolutionLodState, regionId: string, output: ImplementationOutput): void {
@@ -1346,7 +1373,7 @@ function retractRegion(network: SolutionNetwork, regionId: string): void {
 }
 
 function conditionalDefinition(definition: RefinementOutput["children"][number]): string {
-  return hash({ key: normalize(definition.key), objective: normalize(definition.objective), edge: definition.edge, delivery: definition.delivery, allowedVariables: [...definition.allowedVariables].map(normalize).sort(), acceptanceCriteria: [...definition.acceptanceCriteria].map(normalize), coveredCriteria: [...definition.coveredCriteria].sort((a, b) => a - b), requirementIds: [...(definition.requirementIds ?? [])].sort(), dependencyScopeIds: [...(definition.dependencyScopeIds ?? [])].sort(), mutationResources: [...(definition.mutationResources ?? [])].map(normalize).sort() });
+  return hash({ key: normalize(definition.key), objective: normalize(definition.objective), edge: definition.edge, delivery: definition.delivery, allowedVariables: [...definition.allowedVariables].map(normalize).sort(), acceptanceCriteria: [...definition.acceptanceCriteria].map(normalize), coveredCriteria: [...definition.coveredCriteria].sort((a, b) => a - b), requirementIds: [...(definition.requirementIds ?? [])].sort(), dependencyScopeIds: [...(definition.dependencyScopeIds ?? [])].sort(), mutationResources: [...(definition.mutationResources ?? [])].map(normalize).sort(), unresolvedVariable: definition.unresolvedVariable ? slug(definition.unresolvedVariable) : undefined });
 }
 
 function resetConditionalRegion(network: SolutionNetwork, region: SolutionRegion): void {
@@ -1372,7 +1399,8 @@ export function mergeRefinementOutput(networkInput: SolutionNetwork, activationI
   mergeEvidence(network, region, output.evidence);
   const parentSelection = region.selectedCandidateIds[0];
   if (output.certifiedLeaf) {
-    region.certifiedLeaf = { criterionIds: [...region.criterionIds], implementationScope: normalize(output.certifiedLeaf.implementationScope), evidenceRefs: [...new Set(output.certifiedLeaf.evidenceRefs)] };
+    region.certifiedLeaf = { criterionIds: [...output.certifiedLeaf.criterionIds] as CriterionId[], implementationScope: normalize(output.certifiedLeaf.implementationScope), evidenceRefs: [...new Set(output.certifiedLeaf.evidenceRefs)], mutationResources: [...new Set(output.certifiedLeaf.mutationResources.map(normalize))].sort(), checks: output.certifiedLeaf.checks.map((check) => ({ criterionId: check.criterionId as CriterionId, commandOrObservation: normalize(check.commandOrObservation) })) };
+    region.mutationResources = [...region.certifiedLeaf.mutationResources];
     transitionRegion(region, "selected", undefined, "actionable");
     network.revision++;
     return propagateNetwork(network);
@@ -1387,13 +1415,13 @@ export function mergeRefinementOutput(networkInput: SolutionNetwork, activationI
     const definitionFingerprint = conditionalDefinition(definition);
     if (existing) {
       if (existing.definitionFingerprint !== definitionFingerprint) resetConditionalRegion(network, existing);
-      existing.key = key; existing.objective = normalize(definition.objective); existing.edge = definition.edge; existing.delivery = definition.delivery ?? region.delivery; existing.allowedVariables = [...new Set(definition.allowedVariables.map(normalize).filter(Boolean))].sort(); existing.acceptanceCriteria = definition.acceptanceCriteria.map(normalize); existing.coveredCriteria = coveredCriteria.sort((a, b) => a - b); existing.criterionIds = definition.acceptanceCriteria.map((_, index) => `criterion:${existing.scopeId}:${index}` as const); existing.requirementIds = [...new Set(definition.requirementIds ?? [])].sort() as RequirementId[]; existing.dependencyScopeIds = [...new Set(definition.dependencyScopeIds ?? [])].sort() as ScopeId[]; existing.mutationResources = [...new Set((definition.mutationResources ?? []).map(normalize))].sort(); existing.definitionFingerprint = definitionFingerprint;
+      existing.key = key; existing.objective = normalize(definition.objective); existing.edge = definition.edge; existing.delivery = definition.delivery ?? region.delivery; existing.allowedVariables = [...new Set(definition.allowedVariables.map(normalize).filter(Boolean))].sort(); existing.acceptanceCriteria = definition.acceptanceCriteria.map(normalize); existing.coveredCriteria = coveredCriteria.sort((a, b) => a - b); existing.criterionIds = definition.acceptanceCriteria.map((_, index) => `criterion:${existing.scopeId}:${index}` as const); existing.requirementIds = [...new Set(definition.requirementIds ?? [])].sort() as RequirementId[]; existing.dependencyScopeIds = [...new Set(definition.dependencyScopeIds ?? [])].sort() as ScopeId[]; existing.mutationResources = [...new Set((definition.mutationResources ?? []).map(normalize))].sort(); existing.definitionFingerprint = definitionFingerprint; existing.allowedVariables = definition.edge === "refines" && definition.unresolvedVariable ? [normalize(definition.unresolvedVariable)] : existing.allowedVariables;
       continue;
     }
     network.regions.push({
       id: `r${network.nextRegionId++}`, key, parentId: region.id, parentCandidateId: parentSelection, edge: definition.edge,
       lod: region.lod + 1, objective: normalize(definition.objective), delivery: definition.delivery ?? region.delivery,
-      allowedVariables: [...new Set(definition.allowedVariables.map(normalize).filter(Boolean))].sort(), acceptanceCriteria: definition.acceptanceCriteria.map(normalize), coveredCriteria: coveredCriteria.sort((a, b) => a - b),
+      allowedVariables: definition.edge === "refines" && definition.unresolvedVariable ? [normalize(definition.unresolvedVariable)] : [...new Set(definition.allowedVariables.map(normalize).filter(Boolean))].sort(), acceptanceCriteria: definition.acceptanceCriteria.map(normalize), coveredCriteria: coveredCriteria.sort((a, b) => a - b),
       status: "unformed", reopens: 0, reopenFingerprint: null, candidateIds: [], selectedCandidateIds: [], constraintIds: [], evidenceIds: [], activationIds: [], artifactIds: [], scopeId: `scope:${region.id}:${key}`, criterionIds: definition.acceptanceCriteria.map((_, index) => `criterion:${region.id}:${key}:${index}` as const), domainPhase: "inspecting", domainFingerprint: null, acceptedFingerprint: null, cegarRound: 0, challengeVerdict: null, noProgressFingerprint: null, noProgressCount: 0, requirementIds: [...new Set(definition.requirementIds ?? [])].sort() as RequirementId[], dependencyScopeIds: [...new Set(definition.dependencyScopeIds ?? [])].sort() as ScopeId[], mutationResources: [...new Set((definition.mutationResources ?? []).map(normalize))].sort(), definitionFingerprint, selectionAge: 0,
     });
   }

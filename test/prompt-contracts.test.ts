@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MemorySaver } from "@langchain/langgraph";
 import { compileActivationPrompt, projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
-import { applyBatchRecords, domainFingerprint, initialNetwork, validateSolutionDelta, validateSynthesisOutput, validateVerificationOutput } from "../src/core/solution-lod/reducer.js";
+import { applyBatchRecords, domainFingerprint, initialNetwork, mergeSolutionDelta, validateSolutionDelta, validateSynthesisOutput, validateVerificationOutput } from "../src/core/solution-lod/reducer.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
 import type { Activation, Capability, SolutionLodState, SolutionNetwork } from "../src/core/solution-lod/types.js";
 
@@ -80,6 +80,25 @@ describe("prompt contracts", () => {
     const paraphrase = compileActivationPrompt(left, { ...activation, request: "Verify each stated success condition" });
     expect(paraphrase).toContain("verify: Verify each stated success condition");
     expect(paraphrase).toContain("Verify every supplied criterion with execution evidence");
+  });
+
+  it("offers only relevant graph facts to inspection and attaches reused fact IDs without duplication", () => {
+    const current = state(initialNetwork("inspect transport compatibility"));
+    current.network.evidence.push(
+      { id: "e1", text: "Native transport is already configured", source: "src/config.ts:4", kind: "repository", status: "confirmed", fingerprint: "transport" },
+      { id: "e2", text: "Unrelated color setting", source: "src/theme.ts:4", kind: "repository", status: "confirmed", fingerprint: "color" },
+    );
+    const activation = current.network.activations[0]!;
+    const prompt = compileActivationPrompt(current, activation);
+    expect(prompt).toContain("Native transport is already configured");
+    expect(prompt).not.toContain("Unrelated color setting");
+    const delta = { region: {}, evidence: [], factIds: ["e1"], variables: [], candidates: [], constraints: [], select: [], activations: [] };
+    validateSolutionDelta(current, "r1", "inspect", delta);
+    current.network.activations[0]!.status = "running";
+    const merged = mergeSolutionDelta(current, "a1", delta);
+    expect(merged.evidence).toHaveLength(2);
+    expect(merged.regions[0]!.evidenceIds).toContain("e1");
+    expect(() => validateSolutionDelta(current, "r1", "inspect", { ...delta, factIds: ["missing"] })).toThrow(/Unknown graph fact ID/);
   });
 });
 

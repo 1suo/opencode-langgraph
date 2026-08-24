@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { initialNetwork, mergeRefinementOutput, reopenRegion, resolveContextReference } from "../src/core/solution-lod/reducer.js";
-import type { Activation, RefinementOutput, SolutionNetwork } from "../src/core/solution-lod/types.js";
+import { initialNetwork, mergeRefinementOutput, reopenRegion, resolveContextReference, validateRefinementOutput } from "../src/core/solution-lod/reducer.js";
+import type { Activation, RefinementOutput, SolutionLodState, SolutionNetwork } from "../src/core/solution-lod/types.js";
 
 const child = (key: string, objective = key): RefinementOutput["children"][number] => ({ key, objective, edge: "partOf", delivery: "change", allowedVariables: ["mode"], acceptanceCriteria: [`${key} done`], coveredCriteria: [0], requirementIds: ["requirement:one"], dependencyScopeIds: ["scope:dependency"], mutationResources: [`src/${key}.ts`] });
+const state = (network: SolutionNetwork): SolutionLodState => ({ stateVersion: 8, runId: "refine", originalTask: "change", conversationContext: "", directory: "/r", worktree: "/r", phase: "", activeBatch: [], network, results: [], usage: { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, callsUsed: 0, startedAt: 0, result: "" });
 
 function refined(definitions: RefinementOutput["children"]): SolutionNetwork {
   const network = initialNetwork("change");
@@ -56,5 +57,21 @@ describe("conditional subtree reconciliation", () => {
     let network = refined([child("work")]); const id = network.regions.find((item) => item.parentId === "r1")!.id; populate(network, id); network = reconcile(network, [child("work", "new work")]); network = reopenRegion(network, id, "reselect");
     expect(network.regions.find((item) => item.id === id)).toMatchObject({ selectedCandidateIds: [], acceptedFingerprint: null });
     expect(network.activations.filter((item) => !item.historical).every((item) => item.contextRefs.every((ref) => resolveContextReference(network, ref)))).toBe(true);
+  });
+
+  it("rejects an atomic one-child wrapper and accepts a witnessed decision refinement", () => {
+    const network = initialNetwork("choose mode");
+    const root = network.regions[0]!;
+    root.status = "unrefined"; root.domainPhase = "selected"; root.allowedVariables = ["mode"]; root.acceptanceCriteria = ["mode works"]; root.criterionIds = ["criterion:scope:r1:0"];
+    expect(() => validateRefinementOutput(state(network), "r1", { evidence: [], children: [{ key: "same", objective: "choose mode", edge: "partOf", allowedVariables: ["mode"], acceptanceCriteria: ["mode works"], coveredCriteria: [0] }], activations: [] })).toThrow(/repeats ancestor boundary|lone partOf child/);
+    expect(() => validateRefinementOutput(state(network), "r1", { evidence: [], children: [{ key: "protocol", objective: "choose protocol", edge: "refines", unresolvedVariable: "mode", allowedVariables: ["mode"], acceptanceCriteria: ["protocol selected"], coveredCriteria: [0] }], activations: [] })).not.toThrow();
+  });
+
+  it("requires exact criterion and executable check witnesses for a leaf", () => {
+    const network = initialNetwork("change");
+    const root = network.regions[0]!;
+    root.status = "unrefined"; root.domainPhase = "selected"; root.acceptanceCriteria = ["works"]; root.criterionIds = ["criterion:scope:r1:0"];
+    expect(() => validateRefinementOutput(state(network), "r1", { evidence: [], children: [], certifiedLeaf: { implementationScope: "edit source", criterionIds: ["criterion:wrong"], evidenceRefs: [], mutationResources: ["src/a.ts"], checks: [{ criterionId: "criterion:wrong", commandOrObservation: "run test" }] }, activations: [] })).toThrow(/every exact current criterion ID/);
+    expect(() => validateRefinementOutput(state(network), "r1", { evidence: [], children: [], certifiedLeaf: { implementationScope: "edit source", criterionIds: [...root.criterionIds], evidenceRefs: [], mutationResources: ["src/a.ts"], checks: root.criterionIds.map((criterionId) => ({ criterionId, commandOrObservation: "run test" })) }, activations: [] })).not.toThrow();
   });
 });
