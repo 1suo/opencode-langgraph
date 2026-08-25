@@ -711,8 +711,9 @@ const factStage = runConstraintSweeps(statusAtPassStart, "facts");
 function mergeEvidence(network: SolutionNetwork, region: SolutionRegion, items: SolutionDelta["evidence"]): Map<string, string> {
   const localEvidence = new Map<string, string>();
   for (const item of items) {
-    const fingerprint = createHash("sha256").update(`${normalize(item.text)}\0${normalize(item.source)}`).digest("hex").slice(0, 16);
-    let evidence = network.evidence.find((existing) => existing.fingerprint === fingerprint);
+    const identity = `${propositionSignature(item.text)}\0${propositionSignature(item.source)}`;
+    const fingerprint = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+    let evidence = network.evidence.find((existing) => existing.fingerprint === fingerprint || `${propositionSignature(existing.text)}\0${propositionSignature(existing.source)}` === identity);
     const status = item.kind === "inference" ? "hypothesis" : "confirmed";
     if (!evidence) { evidence = { ...item, status, text: normalize(item.text), source: normalize(item.source), id: `e${network.nextEvidenceId++}`, fingerprint, createdRevision: network.revision + 1 }; network.evidence.push(evidence); }
     region.evidenceIds = [...new Set([...region.evidenceIds, evidence.id])]; localEvidence.set(item.source, evidence.id);

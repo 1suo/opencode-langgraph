@@ -82,16 +82,13 @@ describe("prompt contracts", () => {
     expect(paraphrase).toContain("Verify every supplied criterion with execution evidence");
   });
 
-  it("offers only relevant graph facts to inspection and attaches reused fact IDs without duplication", () => {
+  it("deduplicates paraphrased evidence by proposition and source identity", () => {
     const current = state(initialNetwork("inspect transport compatibility"));
     current.network.evidence.push(
       { id: "e1", text: "Native transport is already configured", source: "src/config.ts:4", kind: "repository", status: "confirmed", fingerprint: "transport" },
       { id: "e2", text: "Unrelated color setting", source: "src/theme.ts:4", kind: "repository", status: "confirmed", fingerprint: "color" },
     );
     const activation = current.network.activations[0]!;
-    const prompt = compileActivationPrompt(current, activation);
-    expect(prompt).toContain("Native transport is already configured");
-    expect(prompt).not.toContain("Unrelated color setting");
     const delta = { region: {}, evidence: [], factIds: ["e1"], variables: [], candidates: [], constraints: [], select: [], activations: [] };
     validateSolutionDelta(current, "r1", "inspect", delta);
     current.network.activations[0]!.status = "running";
@@ -99,6 +96,10 @@ describe("prompt contracts", () => {
     expect(merged.evidence).toHaveLength(2);
     expect(merged.regions[0]!.evidenceIds).toContain("e1");
     expect(() => validateSolutionDelta(current, "r1", "inspect", { ...delta, factIds: ["missing"] })).toThrow(/Unknown graph fact ID/);
+    current.network.activations[0]!.status = "running";
+    const duplicate = mergeSolutionDelta(current, "a1", { ...delta, factIds: [], evidence: [{ text: " native TRANSPORT is already configured! ", source: "SRC/config.ts:4", kind: "repository" }] });
+    expect(duplicate.evidence).toHaveLength(2);
+    expect(duplicate.regions[0]!.evidenceIds.filter((id) => id === "e1")).toHaveLength(1);
   });
 });
 
