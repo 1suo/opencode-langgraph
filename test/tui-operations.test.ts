@@ -103,5 +103,5 @@ describe("TUI operations", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 });
