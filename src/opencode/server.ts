@@ -13,7 +13,8 @@ import { adoptHomeGraphState, appendPluginEvent, classifyMutationRecovery, count
 import { processIdentity, worktreeLeaseController } from "./worktree-lock.js";
 import { CONNECTOR_PRESENTER, CONNECTOR_ROOT_SYSTEM_PROMPT, SOLUTION_ROLE_CONTRACTS } from "../core/solution-lod/roles.js";
 import { reopenRegion, resetPrunedRegion } from "../core/solution-lod/reducer.js";
-import type { GraphProgressSnapshot } from "../core/types.js";
+import type { GraphProgressNode, GraphProgressSnapshot } from "../core/types.js";
+import type { SolutionNetwork } from "../core/solution-lod/types.js";
 import { prepareVerifierWorkspace, releaseVerifierWorkspace, workspaceDirtyPaths, workspaceFingerprint } from "./verifier-workspace.js";
 
 const PRESENTER_AGENT = CONNECTOR_PRESENTER.name;
@@ -88,9 +89,9 @@ export const server: Plugin = async (plugin) => {
         }),
       }),
       langgraph_inspect: tool({
-        description: "Read a run's saved status, current work, solution regions, agent activations, usage, and result. This changes nothing. Pass the runId returned by langgraph_start. With no ID it reads this session's latest run; rootSessionId selects another session and projectScope selects this project's latest run.",
-        args: { runId: tool.schema.string().optional(), rootSessionId: tool.schema.string().optional(), projectScope: tool.schema.boolean().optional() },
-        execute: async (args: { runId?: string; rootSessionId?: string; projectScope?: boolean }, context) => inspectRun(context.sessionID, args.runId, { rootSessionId: args.rootSessionId, worktree: args.projectScope ? context.worktree : undefined }),
+        description: "Read a run's saved status, phase, result, usage, and a compact region tree with per-node metadata (status, domain phase, viable candidates, selection). This changes nothing. Pass the runId returned by langgraph_start. With no ID it reads this session's latest run; rootSessionId selects another session and projectScope selects this project's latest run. Pass regionId to drill into one region's candidates, constraints, facts, activations, and artifacts instead of the tree. Use verbose:true only when the full semantic network is strictly required; it returns very large output.",
+        args: { runId: tool.schema.string().optional(), rootSessionId: tool.schema.string().optional(), projectScope: tool.schema.boolean().optional(), regionId: tool.schema.string().optional(), verbose: tool.schema.boolean().optional() },
+        execute: async (args: { runId?: string; rootSessionId?: string; projectScope?: boolean; regionId?: string; verbose?: boolean }, context) => inspectRun(context.sessionID, args.runId, { rootSessionId: args.rootSessionId, worktree: args.projectScope ? context.worktree : undefined, regionId: args.regionId, verbose: args.verbose }),
       }),
       langgraph_prune: tool({
         description: "Remove one wrong part of a saved solution and everything derived from it. Use the part's regionId from langgraph_inspect. You may replace its goal, allowed choices, or success criteria. This saves the repair so langgraph_resume can continue from it.",
@@ -290,13 +291,114 @@ async function resolveStoredRun(sessionID: string, runId?: string, options?: { r
   return run;
 }
 
-function runSummary(saved: StoredRun, state: unknown, progress?: GraphProgressSnapshot): string {
+const INSPECT_CLIP = 160;
+
+function clip(text: string | undefined, limit = INSPECT_CLIP): string | undefined {
+  if (text === undefined) return undefined;
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1).trimEnd()}…`;
+}
+
+/** Compact per-region rows — the same metadata the TUI left panel shows, without the semantic network. */
+function inspectNodeTree(progress?: GraphProgressSnapshot): Array<Record<string, unknown>> | undefined {
+  if (!progress?.nodes.length) return undefined;
+  const totals = new Map(progress.semantic?.regions.map((region) => [region.id, region.total]) ?? []);
+  return progress.nodes.map((node: GraphProgressNode) => {
+    const row: Record<string, unknown> = { id: node.id, parentId: node.parentId, level: node.level, status: node.status, title: clip(node.title, 120) };
+    for (const key of ["operation", "domainPhase", "challengeVerdict"] as const) if (node[key]) row[key] = node[key];
+    if (node.evidence !== undefined) row.facts = node.evidence;
+    if (node.viable !== undefined) row.viable = `${node.viable}/${totals.get(node.id) ?? node.viable}`;
+    if (node.cegarRound) row.cegarRound = node.cegarRound;
+    if (node.selectedCandidateId) row.selectedCandidateId = node.selectedCandidateId;
+    if (node.blockedReason) row.blockedReason = clip(node.blockedReason);
+    return row;
+  });
+}
+
+function inspectTelemetry(progress?: GraphProgressSnapshot): Record<string, unknown> | undefined {
+  const telemetry = progress?.telemetry;
+  if (!telemetry) return undefined;
+  return {
+    activations: telemetry.activations, retries: telemetry.retries, reopens: telemetry.reopens,
+    counterexampleRepairs: telemetry.counterexampleRepairs, cycles: telemetry.cycles,
+    candidates: telemetry.candidates, regionCount: telemetry.regionCount,
+    validationFailures: telemetry.validationFailures, elapsedMs: telemetry.elapsedMs,
+    blockedReasons: telemetry.blockedReasons.map((reason) => clip(reason, 80)),
+    cost: telemetry.usage.cost,
+  };
+}
+
+function runSummary(saved: StoredRun, state: unknown, progress?: GraphProgressSnapshot, options?: { verbose?: boolean }): string {
   const values = state as Record<string, unknown> | undefined;
+  if (options?.verbose) {
+    return JSON.stringify({
+      runId: saved.runId, graph: saved.graph, storedStatus: saved.status, phase: values?.phase,
+      result: values?.result, callsUsed: values?.callsUsed, usage: values?.usage,
+      progress, metrics: saved.metrics, dirtyWarning: saved.dirtyWarning, operator: saved.operator,
+    }, null, 2);
+  }
   return JSON.stringify({
     runId: saved.runId, graph: saved.graph, storedStatus: saved.status, phase: values?.phase,
-    result: values?.result, callsUsed: values?.callsUsed, usage: values?.usage,
-    progress, metrics: saved.metrics, dirtyWarning: saved.dirtyWarning, operator: saved.operator,
+    activeNode: progress?.activeNodeId,
+    ...(typeof values?.result === "string" && values.result ? { result: values.result } : {}),
+    callsUsed: values?.callsUsed, usage: values?.usage, metrics: saved.metrics,
+    dirtyWarning: saved.dirtyWarning, operator: saved.operator,
+    nodes: inspectNodeTree(progress), telemetry: inspectTelemetry(progress),
+    next: "Default output is a compact tree. Pass regionId to langgraph_inspect for one region's candidates, constraints, facts, activations, and artifacts. verbose:true dumps the full semantic network; avoid it unless strictly needed.",
   }, null, 2);
+}
+
+function stanceRows(network: SolutionNetwork, stances: SolutionNetwork["candidates"][number]["stances"]) {
+  const names = new Map(network.variables.map((variable) => [variable.id, variable.name]));
+  return (stances ?? []).map((stance) => ({ choice: names.get(stance.variableId) ?? stance.variableId, relation: stance.relation, option: stance.valueLabel }));
+}
+
+/** One region's full local slice: candidates, constraints, facts, activations, artifacts. */
+export function buildRegionDetail(network: SolutionNetwork, regionId: string): Record<string, unknown> {
+  const region = network.regions.find((item) => item.id === regionId);
+  if (!region) throw new Error(`Region ${regionId} not found in this run's solution network. Live regions: ${network.regions.map((item) => item.id).join(", ") || "none"}.`);
+  const candidateIds = new Set(region.candidateIds);
+  const evidenceById = new Map(network.evidence.map((item) => [item.id, item]));
+  const activationById = new Map(network.activations.map((item) => [item.id, item]));
+  const artifactById = new Map(network.artifacts.map((item) => [item.id, item]));
+  return {
+    region: {
+      id: region.id, parentId: region.parentId, edge: region.edge, lod: region.lod, scopeId: region.scopeId,
+      objective: region.objective, delivery: region.delivery,
+      allowedVariables: region.allowedVariables,
+      criteria: region.acceptanceCriteria.map((criterion, index) => ({ criterionId: region.criterionIds[index], criterion })),
+      status: region.status, domainPhase: region.domainPhase,
+      domainFingerprint: region.domainFingerprint, acceptedFingerprint: region.acceptedFingerprint,
+      cegarRound: region.cegarRound, challengeVerdict: region.challengeVerdict,
+      mutationResources: region.mutationResources, requirementIds: region.requirementIds,
+      dependencyScopeIds: region.dependencyScopeIds,
+      reopens: region.reopens, noProgressCount: region.noProgressCount,
+      convergenceCycles: (region.convergenceCycles ?? []).map(({ kind, revision }) => ({ kind, revision })),
+      ...(region.blockedReason ? { blockedReason: region.blockedReason } : {}),
+      ...(region.contradiction ? { contradiction: region.contradiction } : {}),
+      ...(region.certifiedLeaf ? { certifiedLeaf: region.certifiedLeaf } : {}),
+      ...(region.answer ? { answer: region.answer } : {}),
+    },
+    candidates: region.candidateIds.flatMap((id) => {
+      const candidate = network.candidates.find((item) => item.id === id);
+      return candidate ? [{ id: candidate.id, key: candidate.key, proposition: candidate.proposition, status: candidate.status, eliminationReasons: candidate.eliminationReasons, factIds: candidate.evidenceIds, stances: stanceRows(network, candidate.stances) }] : [];
+    }),
+    constraints: network.constraints.filter((item) => !item.historical && (region.constraintIds.includes(item.id) || candidateIds.has(item.subject) || candidateIds.has(item.target)))
+      .map(({ id, kind, subject, target, reason, sourceKind, evidenceRefs }) => ({ id, kind, subject, target, reason, sourceKind, evidenceRefs })),
+    facts: region.evidenceIds.flatMap((id) => {
+      const item = evidenceById.get(id);
+      return item ? [{ id: item.id, text: item.text, source: item.source, kind: item.kind, status: item.status ?? (item.kind === "inference" ? "hypothesis" : "confirmed") }] : [];
+    }),
+    activations: region.activationIds.flatMap((id) => {
+      const item = activationById.get(id);
+      return item ? { id: item.id, capability: item.capability, operation: item.operation, status: item.status, request: clip(item.request, 200), expectedDelta: item.expectedDelta, error: clip(item.error) } : [];
+    }),
+    artifacts: region.artifactIds.flatMap((id) => {
+      const item = artifactById.get(id);
+      return item && !item.historical ? { id: item.id, kind: item.kind, path: item.path, summary: clip(item.summary), passed: item.passed, criterionIds: item.criterionIds, findings: item.findings } : [];
+    }),
+    telemetry: network.telemetry?.regions[regionId],
+  };
 }
 
 export function buildHandoffSummary(saved: StoredRun, state?: unknown): Record<string, unknown> {
@@ -328,7 +430,7 @@ async function persistHandoffSummary(saved: StoredRun): Promise<Record<string, u
   return { ...summary, outcomes };
 }
 
-async function inspectRun(sessionID: string, runId?: string, options?: { rootSessionId?: string; worktree?: string }): Promise<string> {
+async function inspectRun(sessionID: string, runId?: string, options?: { rootSessionId?: string; worktree?: string; regionId?: string; verbose?: boolean }): Promise<string> {
   const saved = await resolveStoredRun(sessionID, runId, options);
   const { configured } = await loadGraphForRun(saved);
   const snapshot = await configured.graph.getState({ configurable: { thread_id: saved.runId } });
@@ -336,7 +438,16 @@ async function inspectRun(sessionID: string, runId?: string, options?: { rootSes
   if (!values || Object.keys(values).length === 0) {
     return JSON.stringify({ runId: saved.runId, graph: saved.graph, rootSessionId: saved.rootSessionId, storedStatus: saved.status, phase: "no-checkpoint-yet", note: "This run has not reached its first checkpoint yet (queued or still acquiring the worktree). There is nothing to inspect or prune until it does." }, null, 2);
   }
-  return runSummary(saved, values, configured.progress?.(values as never));
+  if (options?.regionId !== undefined) {
+    if (saved.graph !== "solution-lod") throw new Error(`langgraph_inspect regionId drill-down only supports the solution-lod graph, not ${saved.graph}.`);
+    const network = values.network as SolutionNetwork | undefined;
+    if (!network) throw new Error("The checkpointed state contains no solution network to drill into.");
+    return JSON.stringify({
+      runId: saved.runId, graph: saved.graph, storedStatus: saved.status, phase: values.phase,
+      ...buildRegionDetail(network, options.regionId),
+    }, null, 2);
+  }
+  return runSummary(saved, values, configured.progress?.(values as never), { verbose: options?.verbose });
 }
 
 async function startRun(plugin: PluginInput, sessionID: string, task: string, graph: string | undefined, context: {

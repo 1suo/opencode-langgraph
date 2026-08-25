@@ -2356,6 +2356,20 @@ describe("OpenCode automatic graph routing", () => {
       const inspected = JSON.parse(inspectOutput);
       expect(inspected.storedStatus).toBe("failed");
       expect(inspected.phase).toBe("blocked");
+      expect(inspected.semantic).toBeUndefined();
+      expect(inspected.nodes.map((node: { id: string }) => node.id)).toContain("r1");
+      expect(Object.keys(inspected.nodes[0])).toEqual(expect.arrayContaining(["id", "level", "status", "title"]));
+      expect(inspectOutput.length).toBeLessThan(6_000);
+      expect(inspected.next).toContain("regionId");
+
+      const drilldown = JSON.parse(await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string; regionId?: string }, ctx: never) => Promise<string>)({ regionId: "r1" }, toolContext));
+      expect(drilldown.region).toMatchObject({ id: "r1", objective: "task", delivery: "change" });
+      expect(Array.isArray(drilldown.candidates)).toBe(true);
+      expect(drilldown.activations.map((activation: { capability: string }) => activation.capability)).toContain("inspect");
+      expect(() => (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string; regionId?: string }, ctx: never) => Promise<string>)({ regionId: "r999" }, toolContext)).rejects.toThrow(/Region r999 not found/);
+
+      const verbose = JSON.parse(await (hooks.tool?.langgraph_inspect.execute as (args: { runId?: string; verbose?: boolean }, ctx: never) => Promise<string>)({ verbose: true }, toolContext));
+      expect(verbose.progress.semantic.regions.length).toBeGreaterThan(0);
 
       const pruneOutput = await (hooks.tool?.langgraph_prune.execute as (args: { runId?: string; regionId: string; reason?: string; objective?: string }, ctx: never) => Promise<string>)({ regionId: "r1", reason: "insufficient balance during inspection", objective: "Update target with a different approach" }, toolContext);
       expect(JSON.parse(pruneOutput).phase).toBe("pruned");
