@@ -19,6 +19,10 @@ import { prepareVerifierWorkspace, releaseVerifierWorkspace, workspaceDirtyPaths
 
 const PRESENTER_AGENT = CONNECTOR_PRESENTER.name;
 const ACTIVE_RUN_STATUSES: StoredRun["status"][] = ["queued", "running", "pausing", "paused", "interrupted"];
+/** Lifecycle tools registered by this plugin; hidden from graph role agents to prevent recursive runs. */
+const LIFECYCLE_TOOLS = ["langgraph_start", "langgraph_inspect", "langgraph_prune", "langgraph_resume", "langgraph_cancel", "langgraph_pause"];
+/** Role agents that may never start runs — they execute work inside one. */
+const GRAPH_ROLE_AGENTS = new Set(Object.values(SOLUTION_ROLE_CONTRACTS).map((contract) => contract.agent));
 
 function executionWorktree(directory: string, worktree: string): string {
   const resolved = path.resolve(worktree);
@@ -84,9 +88,12 @@ export const server: Plugin = async (plugin) => {
       langgraph_start: tool({
         description: "Start a LangGraph run in the current project and return its runId as soon as it is saved. The run continues in the background. Use this instead of invoking the OpenCode CLI or /run-graph. Keep the runId and call langgraph_inspect to monitor it. Start the next run only after the current one completes, fails, or is cancelled.",
         args: { task: tool.schema.string(), graph: tool.schema.string().optional() },
-        execute: async (args: { task: string; graph?: string }, context) => startRun(plugin, context.sessionID, args.task, args.graph, {
-          directory: context.directory, worktree: context.worktree, ask: context.ask, metadata: context.metadata,
-        }),
+        execute: async (args: { task: string; graph?: string }, context) => {
+          if (context.agent && GRAPH_ROLE_AGENTS.has(context.agent)) throw new Error(`langgraph_start is not available to ${context.agent}: graph role agents execute work inside a run and may not start nested runs.`);
+          return startRun(plugin, context.sessionID, args.task, args.graph, {
+            directory: context.directory, worktree: context.worktree, ask: context.ask, metadata: context.metadata,
+          });
+        },
       }),
       langgraph_inspect: tool({
         description: "Read a run's saved status, phase, result, usage, and a compact region tree with per-node metadata (status, domain phase, viable candidates, selection). This changes nothing. Pass the runId returned by langgraph_start. With no ID it reads this session's latest run; rootSessionId selects another session and projectScope selects this project's latest run. Pass regionId to drill into one region's candidates, constraints, facts, activations, and artifacts instead of the tree. Use verbose:true only when the full semantic network is strictly required; it returns very large output.",
@@ -119,7 +126,10 @@ export const server: Plugin = async (plugin) => {
       config.agent[PRESENTER_AGENT] = { description: "LangGraph lifecycle presenter and graph recovery", mode: "primary", hidden: true, prompt: CONNECTOR_PRESENTER.systemPrompt, tools: CONNECTOR_PRESENTER.tools, maxSteps: CONNECTOR_PRESENTER.maxSteps, permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" } };
       for (const [role, contract] of Object.entries(SOLUTION_ROLE_CONTRACTS)) {
         if (contract.agent === "build" || contract.agent === "plan") continue;
-        config.agent[contract.agent] = { description: `LangGraph ${role} capability`, mode: "subagent", hidden: true, prompt: contract.systemPrompt, tools: contract.tools, maxSteps: contract.maxSteps, permission: { edit: "deny", bash: role === "verify" ? "allow" : "deny", webfetch: "deny", external_directory: "deny" } };
+        // Graph role agents must never see the lifecycle tools: an inspector that can start
+        // runs will spawn nested graphs from its own assignment brief instead of answering.
+        const lifecycleToolBlacklist = Object.fromEntries(LIFECYCLE_TOOLS.map((name) => [name, false]));
+        config.agent[contract.agent] = { description: `LangGraph ${role} capability`, mode: "subagent", hidden: true, prompt: contract.systemPrompt, tools: { ...lifecycleToolBlacklist, ...contract.tools }, maxSteps: contract.maxSteps, permission: { edit: "deny", bash: role === "verify" ? "allow" : "deny", webfetch: "deny", external_directory: "deny" } };
       }
       config.command ??= {};
       config.command["run-graph"] = {
