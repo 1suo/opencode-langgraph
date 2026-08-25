@@ -2,12 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
+import { errorMessage } from "./error-message.js";
 import { solutionLodGraph } from "./solution-lod/graph.js";
 import type { AgentDefinition, CommandModel, ConnectorConfig, ConnectorDefinition, ConnectorGraph, ConnectorPresetConfig, ModelDefinition, OpenCodeModel, SolutionLodPresetOptions, SolutionPresetModel, SolutionPresetRole, SolutionRoleModelAssignments } from "./types.js";
 import { DEFAULT_SOLUTION_ROLE_LIMITS } from "./solution-lod/types.js";
 import { SOLUTION_ROLE_CONTRACTS } from "./solution-lod/roles.js";
 
 export const typedConfigFile = path.join(".opencode", "langgraph.ts");
+const jsonConfigFile = path.join(".opencode", "langgraph.json");
 
 export function opencodeModel(input: Omit<OpenCodeModel, "backend">): OpenCodeModel {
   return { backend: "opencode", ...input };
@@ -26,12 +28,32 @@ export function defineOpenCodeLangGraph<const Config extends ConnectorConfig>(co
 }
 
 export async function loadConnectorDefinition(repo: string): Promise<ConnectorDefinition> {
+  const jsonFile = path.join(repo, jsonConfigFile);
+  if (fs.existsSync(jsonFile)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(jsonFile, "utf8")) as ConnectorConfig;
+      if (!("preset" in config)) throw new Error("langgraph.json accepts only { version, preset, options }; define custom graphs in langgraph.ts instead.");
+      return presetDefinition(config.preset as ConnectorPresetConfig["preset"], (config as ConnectorPresetConfig).options);
+    } catch (error) {
+      return unusableConfigPreset(jsonFile, error);
+    }
+  }
   const file = path.join(repo, typedConfigFile);
   if (!fs.existsSync(file)) return solutionLodPresetDefinition();
-  const coreEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
-  const jiti = createJiti(import.meta.url, { interopDefault: true, alias: { "opencode-langgraph": coreEntry } });
-  const config = await jiti.import<ConnectorConfig>(file, { default: true });
-  return "preset" in config ? presetDefinition(config.preset, config.options) : config;
+  try {
+    const coreEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "index");
+    const jiti = createJiti(import.meta.url, { interopDefault: true, alias: { "opencode-langgraph": coreEntry } });
+    const config = await jiti.import<ConnectorConfig>(file, { default: true });
+    return "preset" in config ? presetDefinition(config.preset, config.options) : config;
+  } catch (error) {
+    return unusableConfigPreset(file, error);
+  }
+}
+
+/** A broken project config must degrade to the working preset, never brick graph loading. */
+function unusableConfigPreset(file: string, error: unknown): ConnectorDefinition {
+  console.error(`[opencode-langgraph] ignoring unusable connector config ${file}: ${errorMessage(error)}. Falling back to the built-in solution-lod preset.`);
+  return solutionLodPresetDefinition();
 }
 
 function presetDefinition(preset: ConnectorPresetConfig["preset"], options?: SolutionLodPresetOptions): ConnectorDefinition {

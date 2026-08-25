@@ -123,6 +123,28 @@ describe("typed graph validation", () => {
     expect(initial.stateVersion).toBe(8);
   });
 
+  it("loads dependency-free langgraph.json presets and degrades broken configs to the preset", async () => {
+    const jsonProject = temp("opencode-langgraph-json-");
+    fs.mkdirSync(path.join(jsonProject, ".opencode"), { recursive: true });
+    const jsonFile = path.join(jsonProject, ".opencode", "langgraph.json");
+    fs.writeFileSync(jsonFile, JSON.stringify({ version: 1, preset: "solution-lod", options: { models: { inspect: "provider/from-json" }, roleLimits: { refine: { maxTurns: 4 } } } }));
+    const fromJson = await loadConnectorDefinition(jsonProject);
+    expect(fromJson.models["inspect-model"]).toEqual({ backend: "opencode", model: "provider/from-json" });
+    expect(fromJson.agents.refine.maxSteps).toBe(4);
+
+    fs.writeFileSync(jsonFile, JSON.stringify({ version: 1, models: {} }));
+    const fallback = await loadConnectorDefinition(jsonProject);
+    expect(fallback.defaultGraph).toBe("solution-lod");
+    expect(fallback.models["inspect-model"]).toEqual({ backend: "opencode", model: "inherit" });
+
+    const brokenProject = temp("opencode-langgraph-broken-");
+    fs.mkdirSync(path.join(brokenProject, ".opencode"), { recursive: true });
+    fs.writeFileSync(path.join(brokenProject, typedConfigFile), `import { defineOpenCodeLangGraph } from "../../some/missing/checkout/dist/index.js";\nexport default defineOpenCodeLangGraph({ version: 1, preset: "solution-lod" });\n`);
+    const degraded = await loadConnectorDefinition(brokenProject);
+    expect(degraded.defaultGraph).toBe("solution-lod");
+    expect(degraded.graphs["solution-lod"]).toBeDefined();
+  });
+
   it("applies per-session role assignments without changing the configured definition", async () => {
     const project = temp("solution-lod-model-proxy-");
     const definition = await loadConnectorDefinition(project);
