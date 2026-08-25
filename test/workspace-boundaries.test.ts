@@ -20,7 +20,7 @@ describe("workspace boundaries", () => {
   it("preserves Git context while isolating verifier worktree and index mutations", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "verifier-git-source-")); const state = fs.mkdtempSync(path.join(os.tmpdir(), "verifier-git-state-")); roots.push(root, state);
     process.env.OPENCODE_LANGGRAPH_STATE_HOME = state;
-    const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
+    const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.com" } });
     git(root, ["init", "-q"]); git(root, ["config", "user.email", "test@example.com"]); git(root, ["config", "user.name", "Test"]);
     fs.writeFileSync(path.join(root, "renamed.txt"), "base\n"); fs.writeFileSync(path.join(root, "staged.txt"), "base\n");
     git(root, ["add", "."]); git(root, ["commit", "-qm", "base"]);

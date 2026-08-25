@@ -44,6 +44,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build
+        run: npm run build
+
       - name: Compute next version from registry
         run: |
           REGISTRY_VERSION=$(npm view opencode-langgraph version)

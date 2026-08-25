@@ -90,7 +90,14 @@ describe("TUI operations", () => {
         fs.writeFileSync(file, source);
         return file;
       });
-      const options: ts.CompilerOptions = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, skipLibCheck: true };
+      const options: ts.CompilerOptions = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, skipLibCheck: true,
+        // Resolve the package's self-exports from source so the gate does not depend on a stale ./dist.
+        baseUrl: process.cwd(),
+        paths: {
+          "opencode-langgraph": ["./src/core/index.ts"],
+          "opencode-langgraph/server": ["./src/opencode/server.ts"],
+          "opencode-langgraph/tui": ["./src/opencode/tui.tsx"],
+        } };
       const diagnostics = ts.getPreEmitDiagnostics(ts.createProgram(files, options));
       expect(diagnostics.map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([]);
     } finally {
