@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MemorySaver } from "@langchain/langgraph";
 import { CandidateSelectionOutputSchema, DomainChallengeOutputSchema, DomainGenerationOutputSchema, SolutionDeltaSchema, type Activation, type SolutionLodState, type SolutionNetwork, type SynthesisOutput } from "../src/core/solution-lod/types.js";
 import { domainFingerprint, initialNetwork, mergeSolutionDelta, mergeSynthesisOutput, propagateNetwork, reopenRegion, selectActivationBatch, validateImplementationOutput, validateSolutionDelta, validateSynthesisOutput } from "../src/core/solution-lod/reducer.js";
-import { solutionLodGraph } from "../src/core/solution-lod/graph.js";
+import { compileActivationPrompt, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { OpenCodeRuntimeError } from "../src/opencode/runtime.js";
 
 const usage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -252,6 +252,69 @@ describe("solution LOD state v8 lifecycle", () => {
     expect(calls).toEqual(["inspect:r1", "generate-domain:r1", "challenge-domain:r1", "select-candidate:r1", "refine:r1", "implement:r1", "verify:r1"]);
     expect(configured.progress?.(result as SolutionLodState)?.phase).toBe("completed");
     expect(configured.result?.(result as SolutionLodState)).toContain("Implemented and verified");
+  });
+
+  it("stores canonically equivalent inspection evidence once and keeps descendant activation sparse", async () => {
+    const findingA = { kind: "repository" as const, text: "Native transport is already configured", source: "src/config.ts:4" };
+    const findingB = { kind: "repository" as const, text: "Unrelated color theme constant exists", source: "src/theme.ts:9" };
+    const variantA = { kind: "repository" as const, text: " native TRANSPORT is ALREADY configured!! ", source: "SRC/config.ts:4" };
+    const variantB = { kind: "repository" as const, text: "unrelated COLOR theme  constant... exists?", source: "src/theme.ts:9 " };
+    const calls: string[] = [];
+    const inspectPrompts = new Map<string, { prompt: string; evidenceIds: string[] }>();
+    const nodeCalls = new Map<string, number>();
+    const runtime = { call: async (input: any) => {
+      calls.push(input.node);
+      nodeCalls.set(input.node, (nodeCalls.get(input.node) ?? 0) + 1);
+      const network = input.state.network as SolutionNetwork;
+      const region = network.regions.find((item) => input.node.endsWith(`:${item.id}`))!;
+      if (nodeCalls.get(input.node) === 1 && input.prompt) inspectPrompts.set(input.node, { prompt: String(input.prompt), evidenceIds: [...region.evidenceIds] });
+      if (input.node === "inspect:r1" && nodeCalls.get(input.node) === 1) return { text: "", structured: { region: { acceptanceCriteria: ["criterion done"] }, evidence: [findingA, findingB], candidates: [], constraints: [], select: [], activations: [] } };
+      if (input.node === "inspect:r1") return { text: "", structured: { region: { acceptanceCriteria: ["criterion done", "restatement collapsed"] }, evidence: [variantA, variantB], candidates: [], constraints: [], select: [], activations: [] } };
+      if (input.node.startsWith("inspect:")) return { text: "", structured: { region: {}, evidence: [{ kind: "repository" as const, text: `Descendant fact for ${region.id}`, source: `src/${region.id}.ts:1` }], candidates: [], constraints: [], select: [], activations: [] } };
+      if (input.node === `challenge-domain:${region.id}` && nodeCalls.get(input.node) === 1 && region.id === "r1") return { text: "", structured: { operation: "challenge-domain", verdict: "needs-fact", domainFingerprint: region.domainFingerprint, request: "Restate the confirmed findings to exercise canonical storage.", expectedDelta: "restatement:r1", contextRefs: ["r1"] } };
+      if (input.node.startsWith("challenge-domain:")) return { text: "", structured: { operation: "challenge-domain", verdict: "accept", domainFingerprint: region.domainFingerprint, viableCandidateIds: [...region.candidateIds] } };
+      if (input.node.startsWith("generate-domain:")) return { text: "", structured: { operation: "generate-domain", evidence: [], variables: [], constraints: [], candidates: [
+        { key: "native", proposition: `Use native code in ${region.id}`, evidenceRefs: [], stances: [] },
+        { key: "adapter", proposition: `Add an adapter in ${region.id}`, evidenceRefs: [], stances: [] },
+      ] } };
+      if (input.node.startsWith("select-candidate:")) return { text: "", structured: { operation: "select-candidate", domainFingerprint: region.domainFingerprint, basis: "lexicographic", selectedCandidateId: `${region.id}:native`, hardConstraints: [], comparisons: [...region.candidateIds].sort().map((candidateId) => ({ candidateId, userPreference: "neutral", repositoryCompatibility: "neutral", changeScope: candidateId.endsWith("native") ? "preferred" : "disfavored", irreversibleRisk: "neutral", evidenceRefs: [] })) } };
+      if (input.node === "refine:r1") return { text: "", structured: { evidence: [], children: [{ key: "impl", objective: "Implement the selected family narrowly", edge: "refines", allowedVariables: [], acceptanceCriteria: ["child done", "child second"], coveredCriteria: [0, 1], unresolvedVariable: "solution family", mutationResources: ["src/feature.ts"] }], activations: [] } };
+      if (input.node.startsWith("refine:")) return { text: "", structured: { evidence: [], children: [], certifiedLeaf: { implementationScope: "one bounded source edit", criterionIds: [...region.criterionIds], evidenceRefs: [], mutationResources: ["src/feature.ts"], checks: region.criterionIds.map((criterionId) => ({ criterionId, commandOrObservation: "run focused test" })) }, activations: [] } };
+      if (input.node.startsWith("implement:")) return { text: "", structured: { status: "already-satisfied", summary: "done", changedFiles: [], checks: region.acceptanceCriteria.map((criterion) => ({ name: criterion, passed: true, evidence: `${criterion} observed` })), activations: [] } };
+      if (input.node.startsWith("verify:")) return { text: "", structured: { verdict: "pass", summary: "verified", findings: [], checks: region.acceptanceCriteria.map((criterion) => ({ name: criterion, passed: true, evidence: `${criterion} observed` })), completionEvidence: { implementation: "already satisfied by confirmed inspection evidence", implementationOutcome: "already-satisfied", directTest: "focused tests ran", correctnessReview: "reviewed", releaseGate: "gates passed", changedFiles: [], focusedTests: ["focused"], fullChecks: ["full"], inspectionEvidenceRefs: [...region.evidenceIds] }, activations: [] } };
+      throw new Error(`unexpected call ${input.node}`);
+    } };
+    const configured = solutionLodGraph({ agents: { inspect: "inspect", synthesize: "synthesize", refine: "refine", implement: "implement", verify: "verify", present: "present" }, checkpointer: new MemorySaver() });
+    const result = await configured.graph.invoke(configured.initial({ task: "change it", directory: "/r", worktree: "/r", runId: "v8-dedup-e2e" }), { recursionLimit: 128, configurable: { thread_id: "v8-dedup-e2e", langgraphOpenCodeRuntime: runtime } });
+    const final = result as SolutionLodState;
+    expect(configured.progress?.(final)?.phase, JSON.stringify({ blocked: final.network.regions.filter((r) => r.blockedReason).map((r) => [r.id, r.blockedReason]), failed: final.network.activations.filter((a) => a.status === "failed").slice(-2).map((a) => [a.id, a.capability, String(a.error).slice(0, 300)]) })).toBe("completed");
+    expect(nodeCalls.get("inspect:r1")).toBe(2);
+
+    expect(final.network.evidence).toHaveLength(3);
+    const storedA = final.network.evidence.find((item) => item.text === "Native transport is already configured")!;
+    const storedB = final.network.evidence.find((item) => item.text === "Unrelated color theme constant exists")!;
+    expect(storedA).toBeDefined();
+    expect(storedB).toBeDefined();
+
+    const rootRegion = final.network.regions.find((item) => item.id === "r1")!;
+    const childRegion = final.network.regions.find((item) => item.id === "r2")!;
+    for (const region of [rootRegion, childRegion]) {
+      expect(new Set(region.evidenceIds).size).toBe(region.evidenceIds.length);
+    }
+    expect(rootRegion.evidenceIds.filter((id) => id === storedA.id)).toHaveLength(1);
+
+    const childInspect = inspectPrompts.get("inspect:r2");
+    expect(childInspect).toBeDefined();
+    expect(childInspect!.evidenceIds).toEqual([]);
+    expect(childInspect!.prompt).not.toContain(findingA.text);
+    expect(childInspect!.prompt).not.toContain(findingB.text);
+    expect(childInspect!.prompt).not.toContain(findingA.source);
+
+    const base = { id: "ax", capability: "inspect" as const, regionId: childRegion.id, request: "q", expectedDelta: "x", contextRefs: [childRegion.id], status: "running" as const, basisRevision: 0 };
+    const sparsePrompt = compileActivationPrompt({ ...final, network: final.network }, { ...base });
+    expect(sparsePrompt).not.toContain(findingA.text);
+    const explicitPrompt = compileActivationPrompt({ ...final, network: final.network }, { ...base, contextRefs: [childRegion.id, storedA.id] });
+    expect(explicitPrompt).toContain(findingA.text);
   });
 
   it("preserves structured runtime failure diagnostics in activation task records", async () => {
