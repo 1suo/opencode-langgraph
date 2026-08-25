@@ -17,7 +17,11 @@ claim of mathematical exhaustiveness.
 - [x] Add the minimum persistent domain-control state to each region: phase,
   domain revision/fingerprint, CEGAR repair round, and accepted fingerprint.
 - [x] Make `generate-domain` return between two and seven mutually exclusive,
-  materially distinct solution families at the current LOD.
+  materially distinct solution families at the current LOD. (Later relaxed to
+  one-to-seven: exactly one family is accepted only when the boundary genuinely
+  admits no materially different alternative, because forced diversity on narrow
+  boundaries manufactured duplicate paraphrases; the fresh challenge still
+  polices omission.)
 - [x] Reject generation output that selects or directly eliminates a candidate.
   Models may propose possible candidates, stances, and evidence-backed
   constraints; the kernel remains responsible for derived dispositions.

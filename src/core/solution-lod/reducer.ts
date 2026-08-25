@@ -721,6 +721,33 @@ function mergeEvidence(network: SolutionNetwork, region: SolutionRegion, items: 
   return localEvidence;
 }
 
+/**
+ * Bind one material requirement to exactly one owned criterion. Typed references
+ * (scopeKey + criterionIndex) take precedence; echoed criterion text remains as a
+ * legacy binding so older outputs keep landing.
+ */
+function bindRequirement(
+  requirement: { key: string; scopeKey?: string; criterionIndex?: number; criterion?: string },
+  scopes: ReadonlyArray<{ key: string; acceptanceCriteria: ReadonlyArray<string> }>,
+  noun = "task scope",
+): { ownerIndex: number; criterionIndex: number } {
+  if (requirement.scopeKey !== undefined || requirement.criterionIndex !== undefined) {
+    const ownerIndex = scopes.findIndex((scope) => slug(scope.key) === slug(requirement.scopeKey ?? ""));
+    if (ownerIndex < 0) throw new Error(`Material requirement ${requirement.key} cites unknown ${noun} "${requirement.scopeKey ?? ""}". Cite the supplied key of an owning ${noun}.`);
+    const criteria = scopes[ownerIndex]!.acceptanceCriteria;
+    const index = requirement.criterionIndex ?? -1;
+    const criterion = criteria[index];
+    if (criterion === undefined) throw new Error(`Material requirement ${requirement.key} cites criterion #${index} of ${noun} "${requirement.scopeKey ?? scopes[ownerIndex]!.key}", which has only ${criteria.length}.`);
+    return { ownerIndex, criterionIndex: index };
+  }
+  const wanted = normalize(requirement.criterion ?? "");
+  for (const [ownerIndex, scope] of scopes.entries()) {
+    const criterionIndex = scope.acceptanceCriteria.findIndex((criterion) => normalize(criterion) === wanted);
+    if (criterionIndex >= 0) return { ownerIndex, criterionIndex };
+  }
+  throw new Error(`Material requirement ${requirement.key} cites criterion "${requirement.criterion ?? ""}" that no ${noun} owns. Bind it with scopeKey and criterionIndex instead of echoing text.`);
+}
+
 export function validateSolutionDelta(state: SolutionLodState, regionId: string, capabilityOrDelta: Capability | SolutionDelta, maybeDelta?: SolutionDelta): void {
   const capability: Capability = typeof capabilityOrDelta === "string" ? capabilityOrDelta : capabilityOrDelta.resolvedAnswer ? "inspect" : "synthesize";
   const delta = normalizeDelta(typeof capabilityOrDelta === "string" ? maybeDelta! : capabilityOrDelta);
@@ -741,16 +768,25 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
       if (delta.materialRequirements?.length) {
         const requirementKeys = delta.materialRequirements.map((item) => slug(item.key));
         if (new Set(requirementKeys).size !== requirementKeys.length) throw new Error("Every material root requirement requires a unique typed identity.");
-        const criteria = new Set(delta.taskScopes.flatMap((scope) => scope.acceptanceCriteria.map(normalize)));
-        for (const requirement of delta.materialRequirements) if (!criteria.has(normalize(requirement.criterion))) throw new Error(`Material requirement ${requirement.key} cites criterion "${requirement.criterion}" that no task scope owns.`);
-        const owners = new Map(requirementKeys.map((key) => [key, 0]));
+        for (const requirement of delta.materialRequirements) bindRequirement(requirement, delta.taskScopes);
+        // Ownership is structural: a requirement bound by scopeKey is owned by that scope.
+        // Legacy scope.requirementKeys echoes own only requirements that carry no scopeKey.
+        const owners = new Map<string, number>(requirementKeys.map((key) => [key, 0]));
+        const legacyOwned = new Set(delta.materialRequirements.filter((item) => item.scopeKey === undefined && item.criterionIndex === undefined).map((item) => slug(item.key)));
         for (const scope of delta.taskScopes) for (const key of scope.requirementKeys ?? []) {
           const normalized = slug(key);
           if (!owners.has(normalized)) throw new Error(`Task scope ${scope.key} cites unknown material requirement ${key}.`);
+          if (!legacyOwned.has(normalized)) throw new Error(`Task scope ${scope.key} echoes requirement ${key}, which binds itself structurally by scopeKey — remove the duplicate requirementKeys entry.`);
           owners.set(normalized, owners.get(normalized)! + 1);
         }
+        for (const requirement of delta.materialRequirements) {
+          const normalized = slug(requirement.key);
+          if (legacyOwned.has(normalized)) continue;
+          const ownerIndex = delta.taskScopes.findIndex((scope) => slug(scope.key) === slug(requirement.scopeKey ?? ""));
+          if (ownerIndex >= 0) owners.set(normalized, owners.get(normalized)! + 1);
+        }
         const invalid = [...owners].filter(([, count]) => count !== 1);
-        if (invalid.length) throw new Error(`Every material root requirement must have exactly one task-scope owner: ${invalid.map(([key, count]) => `${key}=${count}`).join(", ")}.`);
+        if (invalid.length) throw new Error(`Every material root requirement must have exactly one task-scope owner: ${invalid.map(([key, count]) => `${key}=${count}`).join(", ")}. Bind each requirement with scopeKey (+ criterionIndex), or list its key in exactly one scope's requirementKeys.`);
       }
       const suppliedSources = new Set(delta.evidence.filter((item) => item.kind === "repository" || item.kind === "tool").map((item) => item.source));
       for (const disposition of delta.taskDispositions ?? []) {
@@ -899,8 +935,7 @@ export function validateSolutionDelta(state: SolutionLodState, regionId: string,
 }
 
 /** Direct reducer callers may omit defaulted delta arrays; Zod-normalized graph paths never do. */
-function normalizeDelta(delta: SolutionDelta): SolutionDelta {
-  return { ...delta, candidates: delta.candidates ?? [], constraints: delta.constraints ?? [], evidence: delta.evidence ?? [], factIds: delta.factIds ?? [], validations: delta.validations ?? [], select: delta.select ?? [], activations: delta.activations ?? [], variables: delta.variables ?? [], taskScopes: delta.taskScopes ?? [], taskDispositions: delta.taskDispositions ?? [] };
+function normalizeDelta(delta: SolutionDelta): SolutionDelta {  return { ...delta, candidates: delta.candidates ?? [], constraints: delta.constraints ?? [], evidence: delta.evidence ?? [], factIds: delta.factIds ?? [], validations: delta.validations ?? [], select: delta.select ?? [], activations: delta.activations ?? [], variables: delta.variables ?? [], taskScopes: delta.taskScopes ?? [], taskDispositions: delta.taskDispositions ?? [] };
 }
 
 const synthesisDelta = (output: DomainGenerationOutput, candidateItems = output.candidates): SolutionDelta => ({
@@ -1063,9 +1098,8 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     region.criterionIds = region.acceptanceCriteria.map((_, index) => `criterion:${region.scopeId}:${index}` as const);
     const requirementDefinitions = delta.materialRequirements?.length ? delta.materialRequirements : taskScopes.map((item) => ({ key: item.key, text: item.objective, criterion: item.acceptanceCriteria[0]! }));
     network.materialRequirements = requirementDefinitions.map((item) => {
-      const ownerIndex = taskScopes.findIndex((scope) => scope.acceptanceCriteria.some((criterion) => normalize(criterion) === normalize(item.criterion)));
+      const { ownerIndex, criterionIndex } = bindRequirement(item, taskScopes);
       const owner = taskScopes[ownerIndex]!;
-      const criterionIndex = owner.acceptanceCriteria.findIndex((criterion) => normalize(criterion) === normalize(item.criterion));
       const scopeId = `scope:${region.id}:${slug(owner.key)}` as ScopeId;
       return { id: `requirement:${slug(item.key)}` as RequirementId, key: slug(item.key), text: normalize(item.text), scopeId, criterionId: `criterion:${scopeId}:${criterionIndex}` as CriterionId };
     });
@@ -1081,9 +1115,9 @@ export function mergeSolutionDelta(state: SolutionLodState, activationId: string
     transitionRegion(region, "selected", undefined, "collapsed");
     changed = true;
   } else if (activation.capability === "inspect" && region.edge === "root" && delta.materialRequirements?.length) {
+    const rootScopes = [{ key: region.id, acceptanceCriteria: region.acceptanceCriteria }];
     network.materialRequirements = delta.materialRequirements.map((item) => {
-      const criterionIndex = region.acceptanceCriteria.findIndex((criterion) => normalize(criterion) === normalize(item.criterion));
-      if (criterionIndex < 0) throw new Error(`Material requirement ${item.key} cites an unknown root criterion.`);
+      const { criterionIndex } = bindRequirement(item, rootScopes, "root criterion");
       return { id: `requirement:${slug(item.key)}` as RequirementId, key: slug(item.key), text: normalize(item.text), scopeId: region.scopeId, criterionId: region.criterionIds[criterionIndex]! };
     });
     region.requirementIds = network.materialRequirements.map((item) => item.id);
@@ -1834,7 +1868,7 @@ export function ensureRunnableWork(input: SolutionNetwork, width = 1, originalTa
         transitionRegion(target, "inspecting");
         network = queueActivation(network, "inspect", target.id, "Find the repository facts needed to form complete alternatives for this goal. Investigate lower-level details when they affect that choice, but do not turn them into choices yet.", `inspection:${target.id}:${network.revision}`, [...target.evidenceIds]);
       } else if (target.domainPhase === "ungenerated") {
-        network = queueSynthesis(network, "generate-domain", target.id, "Generate two to seven mutually exclusive, materially distinct solution families without selecting or eliminating any.", `generate-domain:${target.id}:${network.revision}`, [...target.evidenceIds, ...target.constraintIds]);
+        network = queueSynthesis(network, "generate-domain", target.id, "Generate every genuinely distinct solution family for this goal, without selecting or eliminating any. Return exactly one family only when no materially different alternative exists.", `generate-domain:${target.id}:${network.revision}`, [...target.evidenceIds, ...target.constraintIds]);
       } else if (target.domainPhase === "challenging") {
         network = queueSynthesis(network, "challenge-domain", target.id, "Freshly challenge the bounded local domain: accept it, give one concrete missing family, or request one precise decision-relevant fact.", `challenge-domain:${target.id}:${target.domainFingerprint}:${target.reopens}`, [...target.evidenceIds, ...target.constraintIds, ...target.candidateIds]);
       } else if (target.domainPhase === "selecting") {

@@ -404,6 +404,11 @@ const ChildRegionSchema = z.object({
 const EvidenceSchema = z.object({
   text: z.string().min(1), source: z.string().min(1), kind: z.enum(["repository", "tool", "inference", "user"]).default("inference"),
 }).strict();
+/** Tool-free roles may only author hypotheses; confirmed observations come from inspection. */
+const HypothesisEvidenceSchema = z.object({
+  text: z.string().min(1), source: z.string().min(1),
+  kind: z.literal("inference").default("inference").describe("Omit or set to 'inference'. This role cannot create confirmed repository/tool/user evidence; cite supplied fact IDs instead."),
+}).strict();
 const StanceSchema = z.object({
   variable: z.string().min(1), relation: z.enum(["requires", "excludes", "prefers"]), valueLabel: z.string().min(1),
 }).strict();
@@ -419,9 +424,10 @@ const ActivationRequestSchema = z.object({
 
 export const DomainGenerationOutputSchema = z.object({
   operation: z.literal("generate-domain"),
-  evidence: z.array(EvidenceSchema).default([]),
+  evidence: z.array(HypothesisEvidenceSchema).default([]),
   variables: z.array(z.object({ name: z.string().min(1), seedLabels: z.array(z.string()).default([]) }).strict()).default([]),
-  candidates: z.array(GeneratedCandidateSchema).min(2).max(7),
+  candidates: z.array(GeneratedCandidateSchema).min(1).max(7)
+    .describe("Every genuinely distinct solution family the boundary contains — usually several. Return exactly ONE family only when the boundary truly admits no materially different alternative; a fresh challenger independently verifies that nothing is missing."),
   constraints: z.array(ConstraintSchema).default([]),
 }).strict();
 export type DomainGenerationOutput = z.infer<typeof DomainGenerationOutputSchema>;
@@ -500,7 +506,13 @@ export const SolutionDeltaSchema = z.object({
     key: z.string().min(1), objective: z.string().min(1), delivery: z.enum(["answer", "change"]).default("change"), allowedVariables: z.array(z.string()).default([]), acceptanceCriteria: z.array(z.string().min(1)).min(1), requirementKeys: z.array(z.string()).optional(), dependencyScopeIds: z.array(z.string()).optional(), mutationResources: z.array(z.string()).optional(),
   }).strict()).optional().describe("Inspector-only root AND decomposition for two or more independently verifiable material tasks."),
   taskDispositions: z.array(z.object({ key: z.string().min(1), request: z.string().min(1), disposition: z.enum(["conflicting", "external", "speculative"]), reason: z.string().min(1), evidenceRefs: z.array(z.string().min(1)).min(1) }).strict()).optional().describe("Explicit evidence-backed disposition only for requested items that cannot become aligned root partOf scopes. Never use this to choose a subset of aligned deliverables."),
-  materialRequirements: z.array(z.object({ key: z.string().min(1), text: z.string().min(1), criterion: z.string().min(1) }).strict()).optional().describe("Immutable typed inventory of material root requirements, each bound to one exact observable criterion, authored once during root inspection."),
+  materialRequirements: z.array(z.object({
+    key: z.string().min(1),
+    text: z.string().min(1),
+    scopeKey: z.string().min(1).optional().describe("Preferred binding: the exact key of the task scope that owns this requirement."),
+    criterionIndex: z.number().int().nonnegative().optional().describe("Preferred binding: the owning scope's acceptanceCriteria position (0-based). Cite scopeKey + criterionIndex instead of echoing criterion text."),
+    criterion: z.string().min(1).optional().describe("Legacy binding by exact criterion text. Prefer scopeKey + criterionIndex; echoed text must match a task scope's criterion character for character after whitespace normalization."),
+  }).strict()).optional().describe("Immutable typed inventory of material root requirements, each bound to exactly one observable criterion of one owning task scope, authored once during root inspection."),
   certifiedVerdict: z.object({ proposition: z.string().min(1), implementationScope: z.string().min(1), evidenceRefs: z.array(z.string()).min(1), mutationResources: z.array(z.string().min(1)).min(1) }).strict().optional().describe("Mechanically fixed small correction whose exact repository evidence, implementation scope, and mutation paths leave no genuine solution choice."),
   activations: z.array(z.object({
     capability: z.enum(["inspect", "synthesize", "refine", "implement", "verify", "present"]).describe("The kind of help needed."),
@@ -513,7 +525,7 @@ export const SolutionDeltaSchema = z.object({
 export type SolutionDelta = z.infer<typeof SolutionDeltaSchema>;
 
 export const RefinementOutputSchema = z.object({
-  evidence: SolutionDeltaSchema.shape.evidence,
+  evidence: z.array(HypothesisEvidenceSchema).default([]),
   children: z.array(ChildRegionSchema).default([]).describe("Next conditional work regions that together cover every criterion."),
   certifiedLeaf: z.object({
     implementationScope: z.string().min(1),

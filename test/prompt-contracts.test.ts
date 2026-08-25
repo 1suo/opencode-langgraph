@@ -3,6 +3,7 @@ import { MemorySaver } from "@langchain/langgraph";
 import { compileActivationPrompt, projectActivationContext, solutionLodGraph } from "../src/core/solution-lod/graph.js";
 import { applyBatchRecords, domainFingerprint, initialNetwork, mergeSolutionDelta, validateSolutionDelta, validateSynthesisOutput, validateVerificationOutput } from "../src/core/solution-lod/reducer.js";
 import { SOLUTION_ROLE_CONTRACTS } from "../src/core/solution-lod/roles.js";
+import { DomainGenerationOutputSchema, RefinementOutputSchema } from "../src/core/solution-lod/types.js";
 import type { Activation, Capability, SolutionLodState, SolutionNetwork } from "../src/core/solution-lod/types.js";
 
 const usage = { turns: 0, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -57,7 +58,7 @@ describe("prompt contracts", () => {
   it("gives generation, challenge, and selection exclusive bounded contracts", () => {
     const current = generated();
     const expected = {
-      "generate-domain": ["Return 2-7 concrete mutually exclusive families", "Do not select, eliminate, approve"],
+      "generate-domain": ["Return every genuinely distinct family the boundary contains", "never pad with paraphrases", "Do not select, eliminate, or approve"],
       "challenge-domain": ["Return exactly accept, one genuinely new concrete counterexample, or one precise needs-fact request", "exact fingerprint"],
       "select-candidate": ["Compare every viable candidate", "first uniquely deciding tier", "force rechallenge"],
     } as const;
@@ -118,6 +119,12 @@ describe("structured semantic contracts", () => {
       { key: "a", proposition: "Native transport", evidenceRefs: [], stances: [] },
       { key: "b", proposition: "Other", evidenceRefs: [], stances: [] },
     ] })).toThrow(/vague residual/);
+    expect(() => validateSynthesisOutput(current, generation, { operation: "generate-domain", evidence: [], variables: [], constraints: [], candidates: [
+      { key: "only", proposition: "Directly extend the single existing mechanism", evidenceRefs: [], stances: [] },
+    ] })).not.toThrow();
+    expect(DomainGenerationOutputSchema.safeParse({ operation: "generate-domain", candidates: [] }).success).toBe(false);
+    expect(DomainGenerationOutputSchema.safeParse({ operation: "generate-domain", evidence: [{ text: "x", source: "y", kind: "repository" }], candidates: [{ key: "a", proposition: "p" }] }).success).toBe(false);
+    expect(RefinementOutputSchema.safeParse({ evidence: [{ text: "smuggled fact", source: "src/x.ts:1", kind: "repository" }], children: [], activations: [] } as never).success).toBe(false);
     expect(() => validateSynthesisOutput(current, generation, { operation: "challenge-domain", verdict: "accept", domainFingerprint: "stale", viableCandidateIds: ["r1:a"] })).toThrow(/does not match/);
 
     const domain = generated();

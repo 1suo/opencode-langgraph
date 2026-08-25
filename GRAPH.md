@@ -168,7 +168,7 @@ Given one activation task:
    | Capability | Zod schema |
    |---|---|
 | `inspect` | `SolutionDeltaSchema` |
-| `synthesize:generate-domain` | generation schema: two to seven distinct candidates; no selection or elimination |
+| `synthesize:generate-domain` | generation schema: one to seven distinct candidates (one only when no materially different alternative exists); no selection or elimination |
 | `synthesize:challenge-domain` | challenge schema: exact-fingerprint `accept`, one `counterexample`, or one `needs-fact` |
 | `synthesize:select-candidate` | selection schema: compare every viable candidate against the accepted fingerprint |
    | `refine` | `RefinementOutputSchema` |

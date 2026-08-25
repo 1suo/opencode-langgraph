@@ -74,6 +74,30 @@ describe("root coverage and certified fast path", () => {
     expect(() => validateSolutionDelta(state(network), "r1", "inspect", SolutionDeltaSchema.parse({ ...base, materialRequirements: [{ key: "one", text: "Optional later", criterion: "one passes" }], taskScopes: scopes }))).toThrow(/estimate, optionalization, or deferred work/);
   });
 
+  it("binds requirements structurally by scope key and criterion index without echoing text", () => {
+    const network = initialNetwork("change both");
+    const base = { region: {}, evidence: [], candidates: [], constraints: [], select: [], activations: [] };
+    const scopes = [
+      { key: "alpha", objective: "First", acceptanceCriteria: ["first passes"] },
+      { key: "beta", objective: "Second", acceptanceCriteria: ["second passes", "second also logs"] },
+    ];
+    const delta = SolutionDeltaSchema.parse({ ...base, taskScopes: scopes, materialRequirements: [
+      { key: "one", text: "First required change", scopeKey: "beta", criterionIndex: 0 },
+      { key: "two", text: "Second required change", scopeKey: "beta", criterionIndex: 1 },
+    ] });
+    expect(() => validateSolutionDelta(state(network), "r1", "inspect", delta)).not.toThrow();
+    network.activations[0]!.status = "running";
+    const merged = mergeSolutionDelta(state(network), "a1", delta);
+    const inventory = JSON.stringify(merged.materialRequirements);
+    expect(inventory).toContain("criterion:scope:r1:beta:0");
+    expect(inventory).toContain("criterion:scope:r1:beta:1");
+    expect(() => validateSolutionDelta(state(network), "r1", "inspect", SolutionDeltaSchema.parse({ ...base, taskScopes: scopes, materialRequirements: [{ key: "one", text: "x", scopeKey: "missing", criterionIndex: 0 }] }))).toThrow(/unknown task scope/);
+    expect(() => validateSolutionDelta(state(network), "r1", "inspect", SolutionDeltaSchema.parse({ ...base, taskScopes: scopes, materialRequirements: [{ key: "one", text: "x", scopeKey: "beta", criterionIndex: 5 }] }))).toThrow(/criterion #5/);
+    expect(() => validateSolutionDelta(state(network), "r1", "inspect", SolutionDeltaSchema.parse({ ...base, taskScopes: scopes, materialRequirements: [{ key: "one", text: "x" }] }))).toThrow(/scopeKey and criterionIndex/);
+    const echoed = SolutionDeltaSchema.parse({ ...base, taskScopes: [...scopes.slice(0, 1), { ...scopes[1], requirementKeys: ["two"] }], materialRequirements: [{ key: "two", text: "y", scopeKey: "beta", criterionIndex: 0 }] });
+    expect(() => validateSolutionDelta(state(network), "r1", "inspect", echoed)).toThrow(/remove the duplicate requirementKeys entry/);
+  });
+
   it("takes inspect -> certified leaf -> implement without synthesis or refinement", () => {
     const network = initialNetwork("fix typo");
     network.activations[0]!.status = "running";
