@@ -3,7 +3,8 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import path from "node:path";
-import { accessSync, constants, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { loadConnectorDefinition } from "../core/config.js";
 import { errorMessage } from "../core/error-message.js";
 import type { AgentUsage, ModelDefinition, SolutionPresetRole, SolutionRoleModelAssignments, SolutionSemanticSnapshot, UsageStreamingEstimate } from "../core/types.js";
@@ -902,6 +903,31 @@ function showRunSelector(api: TuiPluginApi): void {
   api.route.navigate("langgraph.graph", { runs: true });
 }
 
+let cachedPluginVersion: string | undefined;
+let pluginVersionResolved = false;
+
+export function pluginVersion(): string | undefined {
+  if (pluginVersionResolved) return cachedPluginVersion;
+  pluginVersionResolved = true;
+  let base: string;
+  try { base = path.dirname(fileURLToPath(import.meta.url)); } catch { base = process.cwd(); }
+  for (const candidate of ["../../package.json", "../../../package.json"]) {
+    try {
+      const version = (JSON.parse(readFileSync(path.join(base, candidate), "utf8")) as { version?: unknown }).version;
+      if (typeof version === "string" && version) {
+        cachedPluginVersion = version;
+        break;
+      }
+    } catch { /* try next candidate */ }
+  }
+  return cachedPluginVersion;
+}
+
+export function graphVersionLabel(): string {
+  const version = pluginVersion();
+  return version ? `LANGGRAPH v${version}` : "LANGGRAPH";
+}
+
 export function graphHelpText(): string {
   return `[F7] toggle · [F8] view · [F9] help
 
@@ -1172,7 +1198,7 @@ function GraphRoute(props: { api: TuiPluginApi; rootSessionId?: string; userMess
   return (
     <box position="absolute" left={0} top={0} width="100%" height="100%" flexDirection="column" padding={1}>
       <box flexDirection="row" gap={2} flexShrink={0}>
-        <text fg={theme().primary}><b>LANGGRAPH</b></text>
+        <text fg={theme().primary}><b>{graphVersionLabel()}</b></text>
         <text fg={liveColor()}><b>[{liveStatus()}]</b></text>
         <text fg={theme().secondary}>[{(currentRun().at(-1)?.graph ?? "no-graph").toUpperCase()}]</text>
         <text fg={statusTone(semantic()?.phase ?? "idle", theme())}>[{(semantic()?.phase ?? "idle").toUpperCase()}]</text>

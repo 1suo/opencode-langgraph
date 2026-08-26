@@ -7,7 +7,7 @@ import { Annotation, Command, END, MemorySaver, START, StateGraph, interrupt, is
 import { afterEach, describe, expect, it } from "vitest";
 import { OpenCodeAgentRuntime } from "../src/opencode/runtime.js";
 import { buildConversationContext, server } from "../src/opencode/server.js";
-import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, usageLine, type GraphControls } from "../src/opencode/tui.js";
+import { effectivePrompt, graphHelpText, graphNavigationLayer, graphToggleLabel, graphVersionLabel, readVisibleEvents, renderEventGraph, renderPlanTree, renderStructuredEvent, tui, usageLine, type GraphControls } from "../src/opencode/tui.js";
 import { appendPluginEvent, listAllRuns, listProjectRuns, readHomeGraphState, readPluginEvents, readSessionGraphEnabled, readSessionGraphName, readStoredRun, reconcileRuns, writeHomeGraphState, writeSessionGraphEnabled, writeSessionGraphName, writeStoredRun } from "../src/opencode/store.js";
 import { flattenSchemaLines, renderSchemaInput, renderSchemaOutput, renderSchemaText } from "../src/opencode/schema-view.js";
 import { commandModel, loadConnectorDefinition, typedConfigFile, withSolutionRoleModelAssignments, writeConnectorConfig } from "../src/core/config.js";
@@ -2557,6 +2557,11 @@ describe("OpenCode graph viewer", () => {
   it("shows the actual graph name in the prompt shortcut legend", () => {
     expect(graphToggleLabel(false, "review")).toBe("[F7] graph:off · [F8] view · [F9] help");
     expect(graphToggleLabel(true, "review")).toBe("[F7] graph:review · [F8] view · [F9] help");
+  });
+
+  it("shows the plugin version from package.json in the graph viewer header", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { version: string };
+    expect(graphVersionLabel()).toBe(`LANGGRAPH v${manifest.version}`);
   });
 
   it("keeps graph usage and design help available in the TUI", () => {
